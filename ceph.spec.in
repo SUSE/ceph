@@ -820,6 +820,11 @@ mkdir -p %{_localstatedir}/run/ceph/
 %config %{_sysconfdir}/bash_completion.d/rbd
 %config(noreplace) %{_sysconfdir}/ceph/rbdmap
 %{python_sitelib}/ceph_argparse.py*
+%if 0%{?rhel} >= 7 || 0%{?fedora}
+/usr/lib/udev/rules.d/50-rbd.rules
+%else
+/lib/udev/rules.d/50-rbd.rules
+%endif
 
 %postun -n ceph-common
 # Package removal cleanup
