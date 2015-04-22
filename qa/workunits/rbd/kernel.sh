@@ -36,8 +36,8 @@ clean_up
 
 trap clean_up INT TERM EXIT
 
-# allow ubuntu user to map/unmap rbd devices
-sudo chown ubuntu /sys/bus/rbd/add /sys/bus/rbd/remove
+# allow jenkins user to map/unmap rbd devices
+sudo chown jenkins /sys/bus/rbd/add /sys/bus/rbd/remove
 
 # create an image
 dd if=/bin/sh of=/tmp/img1 bs=1k count=1 seek=10

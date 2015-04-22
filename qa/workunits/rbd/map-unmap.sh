@@ -72,9 +72,9 @@ function setup() {
 
 	[ -d /sys/bus/rbd ] || sudo modprobe rbd
 
-	# allow ubuntu user to map/unmap rbd devices
-	sudo chown ubuntu /sys/bus/rbd/add
-	sudo chown ubuntu /sys/bus/rbd/remove
+	# allow jenkins user to map/unmap rbd devices
+	sudo chown jenkins /sys/bus/rbd/add
+	sudo chown jenkins /sys/bus/rbd/remove
 	rbd create "${image_name}" --size="${image_size}"
 }
 

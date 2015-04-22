@@ -84,7 +84,7 @@ function setup() {
 	# List of rbd id's *not* created by this script
 	export INITIAL_RBD_IDS=$(ls /sys/bus/rbd/devices)
 
-	sudo chown ubuntu /sys/bus/rbd/add /sys/bus/rbd/remove
+	sudo chown jenkins /sys/bus/rbd/add /sys/bus/rbd/remove
 
 	# Set up some environment for normal teuthology test setup.
 	# This really should not be necessary but I found it was.

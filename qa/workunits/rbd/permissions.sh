@@ -16,7 +16,7 @@ recreate_pools() {
     delete_pools
 }
 
-delete_uers() {
+delete_users() {
     (ceph auth del client.volumes || true) >/dev/null 2>&1
     (ceph auth del client.images || true) >/dev/null 2>&1
 }

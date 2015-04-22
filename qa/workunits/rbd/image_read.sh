@@ -265,9 +265,9 @@ function setup() {
 		while [ ! -f /sys/bus/rbd/add ]; do
 		    sleep 1
 		done
-		# allow ubuntu user to map/unmap rbd devices
-		sudo chown ubuntu /sys/bus/rbd/add
-		sudo chown ubuntu /sys/bus/rbd/remove
+		# allow jenkins user to map/unmap rbd devices
+		sudo chown jenkins /sys/bus/rbd/add
+		sudo chown jenkins /sys/bus/rbd/remove
 	fi
 	# create and fill the original image with some data
 	create_image "${ORIGINAL}"
@@ -364,9 +364,9 @@ function map_image() {
 
 	rbd map "${image_name}"
 	udevadm settle
-	# allow ubuntu user to write to the device
+	# allow jenkins user to write to the device
 	[ "${SUSER}" = true ] ||
-		sudo chown ubuntu $(image_dev_path "${image_name}")
+		sudo chown jenkins $(image_dev_path "${image_name}")
 	true	# Don't let the suser test spoil our return value
 }
 
