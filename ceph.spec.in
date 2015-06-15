@@ -825,6 +825,18 @@ mkdir -p %{_localstatedir}/run/ceph/
 %else
 /lib/udev/rules.d/50-rbd.rules
 %endif
+%if 0%{?suse_version}
+%if %suse_version >= 1310
+%dir /usr/lib/udev
+%dir /usr/lib/udev/rules.d
+/usr/lib/udev/rules.d/50-rbd.rules
+%endif
+%if %suse_version < 1310
+%dir /lib/udev
+%dir /lib/udev/rules.d
+/lib/udev/rules.d/50-rbd.rules
+%endif
+%endif
 
 %postun -n ceph-common
 # Package removal cleanup
