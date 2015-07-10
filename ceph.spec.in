@@ -65,7 +65,6 @@ Requires:	python-cephfs = %{version}-%{release}
 Requires:	python
 Requires:	python-argparse
 Requires:	python-requests
-Requires:	python-flask
 Requires:	xfsprogs
 Requires:	parted
 Requires:	util-linux
@@ -133,6 +132,7 @@ BuildRequires:	nss-devel
 BuildRequires:	keyutils-libs-devel
 BuildRequires:	libatomic_ops-devel
 Requires:	gdisk
+Requires:	python-flask
 Requires(post):	chkconfig
 Requires(preun):chkconfig
 Requires(preun):initscripts
@@ -149,6 +149,7 @@ Requires:	scsirastools
 BuildRequires:	google-perftools-devel
 %endif
 Recommends:	logrotate
+Requires:	python-Flask
 BuildRequires:	%insserv_prereq
 BuildRequires:	mozilla-nss-devel
 BuildRequires:	keyutils-devel
