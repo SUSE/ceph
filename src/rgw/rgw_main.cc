@@ -968,10 +968,14 @@ public:
     char thread_pool_buf[32];
     snprintf(thread_pool_buf, sizeof(thread_pool_buf), "%d", (int)g_conf->rgw_thread_pool_size);
     string port_str;
+    string userid;
     map<string, string> conf_map = conf->get_config_map();
     conf->get_val("port", "80", &port_str);
     conf_map.erase("port");
     conf_map["listening_ports"] = port_str;
+    conf->get_val("user", "wwwrun", &userid);
+    conf_map.erase("user");
+    conf_map["run_as_user"] = userid;
     set_conf_default(conf_map, "enable_keep_alive", "yes");
     set_conf_default(conf_map, "num_threads", thread_pool_buf);
     set_conf_default(conf_map, "decode_url", "no");
