@@ -243,6 +243,14 @@ under Open Cluster Framework (OCF) compliant resource
 managers such as Pacemaker.
 %endif
 
+%package mds
+Summary:        Gateway for the ceph filesystem
+Group:          System Environment/Base
+Requires:       %{name}
+%description mds
+This package provides the server for the Metadata server, which
+is required to mount ceph as a filesystem.
+
 %package -n librados2
 Summary:	RADOS distributed object store client library
 Group:		System Environment/Libraries
@@ -703,7 +711,7 @@ rm -rf $RPM_BUILD_ROOT
       source $SYSCONF_CEPH
     fi
     if [ "X$CEPH_AUTO_RESTART_ON_UPGRADE" = "Xyes" ] ; then
-      SERVICE_LIST=$(systemctl | grep -E '^ceph-mon@|^ceph-create-keys@|^ceph-osd@|^ceph-mds@|^ceph-disk-'  | cut -d' ' -f1)
+      SERVICE_LIST=$(systemctl | grep -E '^ceph-mon@|^ceph-create-keys@|^ceph-osd@|^ceph-disk-'  | cut -d' ' -f1)
       if [ -n "$SERVICE_LIST" ]; then
         for SERVICE in $SERVICE_LIST; do
           /usr/bin/systemctl try-restart $SERVICE > /dev/null 2>&1 || :
@@ -732,7 +740,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_bindir}/osdmaptool
 %{_bindir}/ceph-run
 %{_bindir}/ceph-mon
-%{_bindir}/ceph-mds
 %{_bindir}/ceph-objectstore-tool
 %{_bindir}/ceph-osd
 %{_bindir}/librados-config
@@ -745,7 +752,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_libexecdir}/ceph/ceph-osd-prestart.sh
 %{_unitdir}/ceph-osd@.service
 %{_unitdir}/ceph-mon@.service
-%{_unitdir}/ceph-mds@.service
 %{_unitdir}/ceph-disk-activate-journal@.service
 %{_unitdir}/ceph-disk-activate@.service
 %{_unitdir}/ceph-disk-dmcrypt-activate@.service
@@ -796,7 +802,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man8/ceph-disk.8*
 %{_mandir}/man8/ceph-create-keys.8*
 %{_mandir}/man8/ceph-mon.8*
-%{_mandir}/man8/ceph-mds.8*
 %{_mandir}/man8/ceph-osd.8*
 %{_mandir}/man8/ceph-run.8*
 %{_mandir}/man8/ceph-rest-api.8*
@@ -813,9 +818,7 @@ rm -rf $RPM_BUILD_ROOT
 %dir %{_localstatedir}/lib/ceph/tmp
 %dir %{_localstatedir}/lib/ceph/mon
 %dir %{_localstatedir}/lib/ceph/osd
-%dir %{_localstatedir}/lib/ceph/mds
 %dir %{_localstatedir}/lib/ceph/bootstrap-osd
-%dir %{_localstatedir}/lib/ceph/bootstrap-mds
 %dir %{_localstatedir}/lib/ceph/bootstrap-rgw
 %if  (! 0%{?suse_version}) || ( 0%{?suse_version} && (! 0%{?_with_systemd}) )
 %dir %{_localstatedir}/run/ceph/
@@ -981,6 +984,62 @@ fi
 %dir /usr/lib/ocf/resource.d
 %dir /usr/lib/ocf/resource.d/ceph
 /usr/lib/ocf/resource.d/%{name}/*
+%endif
+
+#################################################################################
+%files mds
+%{_bindir}/ceph-mds
+%if 0%{?_with_systemd}
+%{_unitdir}/ceph-mds@.service
+%endif
+%{_mandir}/man8/ceph-mds.8*
+%dir %{_localstatedir}/lib/ceph/mds
+%dir %{_localstatedir}/lib/ceph/bootstrap-mds
+
+
+%preun mds
+%if 0%{?_with_systemd}
+  # Disable and stop on removal.
+  if [ $1 = 0 ] ; then
+    SERVICE_LIST=$(systemctl | grep -E '^ceph-mds@'  | cut -d' ' -f1)
+    if [ -n "$SERVICE_LIST" ]; then
+      for SERVICE in $SERVICE_LIST; do
+        /usr/bin/systemctl --no-reload disable $SERVICE > /dev/null 2>&1 || :
+        /usr/bin/systemctl stop $SERVICE > /dev/null 2>&1 || :
+      done
+    fi
+  fi
+%endif
+
+%postun mds -p /bin/bash
+/sbin/ldconfig
+%if 0%{?_with_systemd}
+  if [ $1 = 1 ] ; then
+    # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
+    # "yes". In any case: if units are not running, do not touch them.
+    SYSCONF_CEPH=/etc/sysconfig/ceph
+    if [ -f $SYSCONF_CEPH -a -r $SYSCONF_CEPH ] ; then
+      source $SYSCONF_CEPH
+    fi
+    if [ "X$CEPH_AUTO_RESTART_ON_UPGRADE" = "Xyes" ] ; then
+      SERVICE_LIST=$(systemctl | grep -E '^ceph-mds@'  | cut -d' ' -f1)
+      if [ -n "$SERVICE_LIST" ]; then
+        for SERVICE in $SERVICE_LIST; do
+          /usr/bin/systemctl try-restart $SERVICE > /dev/null 2>&1 || :
+        done
+      fi
+    fi
+  fi
+%endif
+
+%post mds
+/sbin/ldconfig
+%if 0%{?suse_version}
+  %set_permissions %{_bindir}/ceph-mds
+  # explicit systemctl daemon-reload (that's the only relevant bit of
+  # service_add_post; the rest is all sysvinit --> systemd migration which
+  # isn't applicable in this context (see above comment).
+  /usr/bin/systemctl daemon-reload >/dev/null 2>&1 || :
 %endif
 
 #################################################################################
