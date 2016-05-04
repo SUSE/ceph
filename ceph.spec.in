@@ -1115,6 +1115,14 @@ fi
 %{_unitdir}/ceph-radosgw@.service
 %{_unitdir}/ceph-radosgw.target
 
+%pre radosgw
+%if 0%{?suse_version}
+# chown -R any existing /var/{log,lib,run}/ceph-radosgw
+[ -d /var/lib/ceph-radosgw ] && chown -R ceph.ceph /var/lib/ceph-radosgw
+[ -d /var/log/ceph-radosgw ] && chown -R ceph.ceph /var/log/ceph-radosgw
+[ -d /var/run/ceph-radosgw ] && chown -R ceph.ceph /var/run/ceph-radosgw
+%endif
+
 %post radosgw
 %if 0%{?suse_version}
 if [ $1 -ge 1 ] ; then
