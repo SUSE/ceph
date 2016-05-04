@@ -917,6 +917,10 @@ if ! getent passwd ceph >/dev/null ; then
     CEPH_USER_ID_OPTION=""
     getent passwd $CEPH_USER_ID >/dev/null || CEPH_USER_ID_OPTION="-u $CEPH_USER_ID"
     useradd ceph $CEPH_USER_ID_OPTION -r -g ceph -s /sbin/nologin -c "Ceph daemons" -d %{_localstatedir}/lib/ceph 2>/dev/null || :
+# chown -R any existing /var/{log,lib,run}/ceph
+[ -d /var/lib/ceph ] && chown -R ceph.ceph /var/lib/ceph
+[ -d /var/log/ceph ] && chown -R ceph.ceph /var/log/ceph
+[ -d /var/run/ceph ] && chown -R ceph.ceph /var/run/ceph
 fi
 %endif
 exit 0
@@ -1110,6 +1114,14 @@ fi
 %dir %{_localstatedir}/lib/ceph/radosgw
 %{_unitdir}/ceph-radosgw@.service
 %{_unitdir}/ceph-radosgw.target
+
+%pre radosgw
+%if 0%{?suse_version}
+# chown -R any existing /var/{log,lib,run}/ceph-radosgw
+[ -d /var/lib/ceph-radosgw ] && chown -R ceph.ceph /var/lib/ceph-radosgw
+[ -d /var/log/ceph-radosgw ] && chown -R ceph.ceph /var/log/ceph-radosgw
+[ -d /var/run/ceph-radosgw ] && chown -R ceph.ceph /var/run/ceph-radosgw
+%endif
 
 %post radosgw
 %if 0%{?suse_version}
