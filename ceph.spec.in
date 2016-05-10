@@ -817,7 +817,6 @@ rm -rf $RPM_BUILD_ROOT
 %{_bindir}/ceph-client-debug
 %{_bindir}/cephfs
 %if 0%{?_with_systemd}
-%{_unitdir}/ceph-create-keys@.service
 %{_libexecdir}/systemd/system-preset/50-ceph.preset
 %else
 %{_initrddir}/ceph
