@@ -113,7 +113,6 @@ EXTRA_DIST += \
 	$(srcdir)/upstart/ceph-mon.conf \
 	$(srcdir)/upstart/ceph-mon-all.conf \
 	$(srcdir)/upstart/ceph-mon-all-starter.conf \
-	$(srcdir)/upstart/ceph-create-keys.conf \
 	$(srcdir)/upstart/ceph-osd.conf \
 	$(srcdir)/upstart/ceph-osd-all.conf \
 	$(srcdir)/upstart/ceph-osd-all-starter.conf \
