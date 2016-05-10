@@ -122,7 +122,6 @@ binary-arch: build install
 	# per package, so do this ourselves
 	install -d -m0755 debian/ceph-base/etc/init
 	install -m0644 src/upstart/ceph-all.conf debian/ceph-base/etc/init
-	install -m0644 src/upstart/ceph-create-keys.conf debian/ceph-base/etc/init
 	install -d -m0755 debian/ceph-osd/etc/init
 	install -m0644 src/upstart/ceph-osd*.conf debian/ceph-osd/etc/init
 	install -m0644 src/upstart/ceph-disk.conf debian/ceph-osd/etc/init
