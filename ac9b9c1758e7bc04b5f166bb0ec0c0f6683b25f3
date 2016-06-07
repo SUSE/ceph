@@ -1,0 +1,1 @@
+This one can be dropped (a later commit removes it and does make %{_smpflags})
