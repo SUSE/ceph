@@ -1583,7 +1583,7 @@ exit 0
 %if %{with lttng}
 %{_bindir}/rbd-replay-prep
 %endif
-%{_bindir}/ceph-post-file
+%exclude %{_bindir}/ceph-post-file
 %dir %{_libdir}/ceph/denc
 %{_libdir}/ceph/denc/denc-mod-*.so
 %{_tmpfilesdir}/ceph-common.conf
