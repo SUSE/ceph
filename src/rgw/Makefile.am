@@ -131,7 +131,7 @@ libcivetweb_la_SOURCES =  \
 	rgw/rgw_civetweb_log.cc \
 	civetweb/src/civetweb.c
 
-libcivetweb_la_CXXFLAGS = ${CIVETWEB_INCLUDE} -fPIC -Woverloaded-virtual \
+libcivetweb_la_CXXFLAGS = ${CIVETWEB_INCLUDE} -fPIC -DNO_SSL_DL -Woverloaded-virtual \
 	${AM_CXXFLAGS}
 libcivetweb_la_CFLAGS = -I$(srcdir)/civetweb/include ${CIVETWEB_INCLUDE} -fPIC -DNO_SSL_DL
 LIBCIVETWEB_DEPS += -lssl -lcrypto
