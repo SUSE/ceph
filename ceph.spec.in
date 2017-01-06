@@ -2351,3 +2351,4 @@ exit 0
 %config %{_sysconfdir}/prometheus/ceph/ceph_default_alerts.yml
 
 %changelog
+# nospeccleaner
