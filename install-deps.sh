@@ -78,7 +78,8 @@ centos|fedora|rhel)
 opensuse|suse|sles)
         echo "Using zypper to install dependencies"
         $SUDO zypper --gpg-auto-import-keys --non-interactive install lsb-release systemd-rpm-macros
-        sed -e 's/@//g' < ceph.spec.in > $DIR/ceph.spec
+        sed -e 's/@//g' \
+            -e 's/%bcond_without xio/%bcond_with xio/g' < ceph.spec.in > $DIR/ceph.spec
         $SUDO zypper --non-interactive install $(rpmspec -q --buildrequires $DIR/ceph.spec) || exit 1
         ;;
 *)
