@@ -8,7 +8,7 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 
-AC_INIT([ceph], [10.2.4], [ceph-devel@vger.kernel.org])
+AC_INIT([ceph], [10.2.5], [ceph-devel@vger.kernel.org])
 
 AX_CXX_COMPILE_STDCXX_11(, mandatory)
 
@@ -51,7 +51,7 @@ AM_PROG_LIBTOOL
 AM_PROG_AS
 
 
-AM_INIT_AUTOMAKE([foreign parallel-tests tar-ustar])
+AM_INIT_AUTOMAKE([foreign parallel-tests tar-pax])
 # enable make V=0 (if automake >1.11)
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 

@@ -170,6 +170,7 @@ class Ptype(object):
                 return True
         return False
 
+
 DEFAULT_FS_TYPE = 'xfs'
 SYSFS = '/sys'
 
@@ -2896,10 +2897,19 @@ def start_daemon(
                 ],
             )
         elif os.path.exists(os.path.join(path, 'systemd')):
+            # ensure there is no duplicate ceph-osd@.service
+            command_check_call(
+                [
+                    'systemctl',
+                    'disable',
+                    'ceph-osd@{osd_id}'.format(osd_id=osd_id),
+                ],
+            )
             command_check_call(
                 [
                     'systemctl',
                     'enable',
+                    '--runtime',
                     'ceph-osd@{osd_id}'.format(osd_id=osd_id),
                 ],
             )
@@ -2957,6 +2967,7 @@ def stop_daemon(
                 [
                     'systemctl',
                     'disable',
+                    '--runtime',
                     'ceph-osd@{osd_id}'.format(osd_id=osd_id),
                 ],
             )
@@ -4316,6 +4327,8 @@ def main_trigger(args):
         )
         return
 
+    if get_ceph_user() == 'ceph':
+        command_check_call(['chown', 'ceph:ceph', args.dev])
     parttype = get_partition_type(args.dev)
     partid = get_partition_uuid(args.dev)
 
@@ -5021,6 +5034,7 @@ def main_catch(func, args):
 
 def run():
     main(sys.argv[1:])
+
 
 if __name__ == '__main__':
     main(sys.argv[1:])
