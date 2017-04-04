@@ -362,9 +362,9 @@ static int read_obj_policy(RGWRados *store,
 
     const rgw_user& bucket_owner = bucket_policy.get_owner().get_id();
     if (bucket_owner.compare(s->user->user_id) != 0 &&
-        !s->auth_identity->is_admin_of(bucket_owner) &&
-        !bucket_policy.verify_permission(*s->auth_identity, s->perm_mask,
-                                         RGW_PERM_READ)) {
+        ! s->auth.identity->is_admin_of(bucket_owner) &&
+        ! bucket_policy.verify_permission(*s->auth.identity, s->perm_mask,
+                                          RGW_PERM_READ)) {
       ret = -EACCES;
     } else {
       ret = -ENOENT;
@@ -876,8 +876,12 @@ int RGWGetObj::read_user_manifest_part(rgw_bucket& bucket,
 
   /* We can use global user_acl because LOs cannot have segments
    * stored inside different accounts. */
-  if (!verify_object_permission(s, s->user_acl.get(), bucket_policy,
-          &obj_policy, RGW_PERM_READ)) {
+  if (s->system_request) {
+    ldout(s->cct, 2) << "overriding permissions due to system operation" << dendl;
+  } else if (s->auth.identity->is_admin_of(s->user->user_id)) {
+    ldout(s->cct, 2) << "overriding permissions due to admin operation" << dendl;
+  } else if (!verify_object_permission(s, s->user_acl.get(), bucket_policy,
+                                       &obj_policy, RGW_PERM_READ)) {
     return -EPERM;
   }
 
@@ -1452,7 +1456,7 @@ void RGWGetObj::execute()
     return;
   }
   attr_iter = attrs.find(RGW_ATTR_SLO_MANIFEST);
-  if (attr_iter != attrs.end()) {
+  if (attr_iter != attrs.end() && !skip_manifest) {
     is_slo = true;
     op_ret = handle_slo_manifest(attr_iter->second);
     if (op_ret < 0) {
@@ -1544,7 +1548,7 @@ int RGWListBuckets::verify_permission()
 
 int RGWGetUsage::verify_permission()
 {
-  if (s->auth_identity->is_anonymous()) {
+  if (s->auth.identity->is_anonymous()) {
     return -EACCES;
   }
 
@@ -1731,7 +1735,7 @@ void RGWStatAccount::execute()
 
 int RGWGetBucketVersioning::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -1751,7 +1755,7 @@ void RGWGetBucketVersioning::execute()
 
 int RGWSetBucketVersioning::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -1981,7 +1985,7 @@ void RGWListBucket::execute()
 
 int RGWGetBucketLogging::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -1990,7 +1994,7 @@ int RGWGetBucketLogging::verify_permission()
 
 int RGWGetBucketLocation::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -2002,7 +2006,7 @@ int RGWCreateBucket::verify_permission()
   /* This check is mostly needed for S3 that doesn't support account ACL.
    * Swift doesn't allow to delegate any permission to an anonymous user,
    * so it will become an early exit in such case. */
-  if (s->auth_identity->is_anonymous()) {
+  if (s->auth.identity->is_anonymous()) {
     return -EACCES;
   }
 
@@ -2519,6 +2523,11 @@ void RGWDeleteBucket::execute()
   if ( op_ret < 0) {
      ldout(s->cct, 1) << "WARNING: failed to sync user stats before bucket delete: op_ret= " << op_ret << dendl;
   }
+  
+  op_ret = store->check_bucket_empty(s->bucket_info);
+  if (op_ret < 0) {
+    return;
+  }
 
   if (!store->is_meta_master()) {
     bufferlist in_data;
@@ -2534,7 +2543,7 @@ void RGWDeleteBucket::execute()
     }
   }
 
-  op_ret = store->delete_bucket(s->bucket_info, ot);
+  op_ret = store->delete_bucket(s->bucket_info, ot, false);
 
   if (op_ret == -ECANCELED) {
     // lost a race, either with mdlog sync or another delete bucket operation.
@@ -2578,8 +2587,8 @@ int RGWPutObj::verify_permission()
     }
 
     /* admin request overrides permission checks */
-    if (!s->auth_identity->is_admin_of(cs_policy.get_owner().get_id()) &&
-        !cs_policy.verify_permission(*s->auth_identity, s->perm_mask, RGW_PERM_READ)) {
+    if (! s->auth.identity->is_admin_of(cs_policy.get_owner().get_id()) &&
+        ! cs_policy.verify_permission(*s->auth.identity, s->perm_mask, RGW_PERM_READ)) {
       return -EACCES;
     }
 
@@ -2785,7 +2794,7 @@ class RGWPutObj_CB : public RGWGetDataCB
   RGWPutObj *op;
 public:
   RGWPutObj_CB(RGWPutObj *_op) : op(_op) {}
-  ~RGWPutObj_CB() {}
+  ~RGWPutObj_CB() override {}
 
   int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) override {
     return op->get_data_cb(bl, bl_ofs, bl_len);
@@ -3450,7 +3459,7 @@ int RGWPutMetadataAccount::init_processing()
 
 int RGWPutMetadataAccount::verify_permission()
 {
-  if (s->auth_identity->is_anonymous()) {
+  if (s->auth.identity->is_anonymous()) {
     return -EACCES;
   }
 
@@ -3879,9 +3888,9 @@ int RGWCopyObj::verify_permission()
     }
 
     /* admin request overrides permission checks */
-    if (!s->auth_identity->is_admin_of(src_policy.get_owner().get_id()) &&
-        !src_policy.verify_permission(*s->auth_identity, s->perm_mask,
-                                      RGW_PERM_READ)) {
+    if (! s->auth.identity->is_admin_of(src_policy.get_owner().get_id()) &&
+        ! src_policy.verify_permission(*s->auth.identity, s->perm_mask,
+                                       RGW_PERM_READ)) {
       return -EACCES;
     }
   }
@@ -3917,9 +3926,9 @@ int RGWCopyObj::verify_permission()
   }
 
   /* admin request overrides permission checks */
-  if (!s->auth_identity->is_admin_of(dest_policy.get_owner().get_id()) &&
-      !dest_bucket_policy.verify_permission(*s->auth_identity, s->perm_mask,
-                                            RGW_PERM_WRITE)) {
+  if (! s->auth.identity->is_admin_of(dest_policy.get_owner().get_id()) &&
+      ! dest_bucket_policy.verify_permission(*s->auth.identity, s->perm_mask,
+                                             RGW_PERM_WRITE)) {
     return -EACCES;
   }
 
@@ -4087,7 +4096,7 @@ int RGWPutACLs::verify_permission()
 int RGWGetLC::verify_permission()
 {
   bool perm;
-  perm = verify_bucket_permission(s, RGW_PERM_WRITE_ACP);
+  perm = verify_bucket_permission(s, RGW_PERM_READ_ACP);
   if (!perm)
     return -EACCES;
 
@@ -4189,6 +4198,16 @@ void RGWPutACLs::execute()
     return;
   }
 
+  if (s->object.empty() && !store->is_meta_master()) {
+    bufferlist in_data;
+    in_data.append(data, len);
+    op_ret = forward_request_to_master(s, NULL, store, in_data, NULL);
+    if (op_ret < 0) {
+      ldout(s->cct, 20) << __func__ << "forward_request_to_master returned ret=" << op_ret << dendl;
+      return;
+    }
+  }
+
   if (s->cct->_conf->subsys.should_gather(ceph_subsys_rgw, 15)) {
     ldout(s->cct, 15) << "Old AccessControlPolicy";
     policy->to_xml(*_dout);
@@ -4265,7 +4284,7 @@ void RGWPutLC::execute()
   }
 
   if (s->cct->_conf->subsys.should_gather(ceph_subsys_rgw, 15)) {
-    ldout(s->cct, 15) << "Old LifecycleConfiguration";
+    ldout(s->cct, 15) << "Old LifecycleConfiguration:";
     config->to_xml(*_dout);
     *_dout << dendl;
   }
@@ -4352,17 +4371,17 @@ void RGWDeleteLC::execute()
   do {
     op_ret = l.lock_exclusive(ctx, oid);
     if (op_ret == -EBUSY) {
-      dout(0) << "RGWLC::RGWPutLC() failed to acquire lock on, sleep 5, try again" << oid << dendl;
+      dout(0) << "RGWLC::RGWDeleteLC() failed to acquire lock on, sleep 5, try again" << oid << dendl;
       sleep(5);
       continue;
     }
     if (op_ret < 0) {
-      dout(0) << "RGWLC::RGWPutLC() failed to acquire lock " << oid << op_ret << dendl;
+      dout(0) << "RGWLC::RGWDeleteLC() failed to acquire lock " << oid << op_ret << dendl;
       break;
     }
     op_ret = cls_rgw_lc_rm_entry(*ctx, oid, entry);
     if (op_ret < 0) {
-      dout(0) << "RGWLC::RGWPutLC() failed to set entry " << oid << op_ret << dendl;     
+      dout(0) << "RGWLC::RGWDeleteLC() failed to set entry " << oid << op_ret << dendl;
     }
     break;
   }while(1);
@@ -4372,7 +4391,7 @@ void RGWDeleteLC::execute()
 
 int RGWGetCORS::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -4394,7 +4413,7 @@ void RGWGetCORS::execute()
 
 int RGWPutCORS::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -4416,7 +4435,7 @@ void RGWPutCORS::execute()
 
 int RGWDeleteCORS::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -4528,7 +4547,7 @@ void RGWGetRequestPayment::execute()
 
 int RGWSetRequestPayment::verify_permission()
 {
-  if (false == s->auth_identity->is_owner_of(s->bucket_owner.get_id())) {
+  if (false == s->auth.identity->is_owner_of(s->bucket_owner.get_id())) {
     return -EACCES;
   }
 
@@ -4575,7 +4594,6 @@ void RGWInitMultipart::execute()
   bufferlist aclbl;
   map<string, bufferlist> attrs;
   rgw_obj obj;
-  map<string, string>::iterator iter;
 
   if (get_params() < 0)
     return;
@@ -5104,7 +5122,7 @@ void RGWAbortMultipart::execute()
   // and also remove the metadata obj
   op_ret = del_op.delete_obj();
   if (op_ret == -ENOENT) {
-    op_ret = -ERR_NO_SUCH_BUCKET;
+    op_ret = -ERR_NO_SUCH_UPLOAD;
   }
 }
 
@@ -5526,8 +5544,11 @@ void RGWGetObjLayout::pre_exec()
 void RGWGetObjLayout::execute()
 {
   rgw_obj obj(s->bucket, s->object);
-  target = new RGWRados::Object(store, s->bucket_info, *static_cast<RGWObjectCtx *>(s->obj_ctx), rgw_obj(s->bucket, s->object));
-  RGWRados::Object::Read stat_op(target);
+  RGWRados::Object target(store,
+                          s->bucket_info,
+                          *static_cast<RGWObjectCtx *>(s->obj_ctx),
+                          rgw_obj(s->bucket, s->object));
+  RGWRados::Object::Read stat_op(&target);
 
   op_ret = stat_op.prepare();
   if (op_ret < 0) {
@@ -5536,7 +5557,7 @@ void RGWGetObjLayout::execute()
 
   head_obj = stat_op.state.head_obj;
 
-  op_ret = target->get_manifest(&manifest);
+  op_ret = target.get_manifest(&manifest);
 }
 
 

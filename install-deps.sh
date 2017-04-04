@@ -44,6 +44,7 @@ if [ x`uname`x = xFreeBSDx ]; then
         misc/e2fsprogs-libuuid \
         misc/getopt \
         textproc/expat2 \
+        textproc/gsed \
         textproc/libxml2 \
         textproc/xmlstarlet \
 	textproc/jq \
@@ -88,7 +89,7 @@ else
 	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y remove ceph-build-deps
 	if [ -n "$backports" ] ; then rm $control; fi
         ;;
-    centos|fedora|rhel)
+    centos|fedora|rhel|ol)
         yumdnf="yum"
         builddepcmd="yum-builddep -y"
         if test "$(echo "$VERSION_ID >= 22" | bc)" -ne 0; then
