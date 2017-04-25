@@ -23,6 +23,7 @@
 #include "Watch.h"
 #include "TierAgentState.h"
 #include "messages/MOSDOpReply.h"
+#include "common/Checksummer.h"
 #include "common/sharedptr_registry.hpp"
 #include "ReplicatedBackend.h"
 #include "PGTransaction.h"
@@ -1304,6 +1305,15 @@ protected:
   int do_extent_cmp(OpContext *ctx, OSDOp& osd_op);
   int do_writesame(OpContext *ctx, OSDOp& osd_op);
 
+  // -- checksum --
+  int do_checksum(OpContext *ctx, OSDOp& osd_op, bufferlist::iterator *bl_it,
+		  bool *async_read);
+  int finish_checksum(OSDOp& osd_op, Checksummer::CSumType csum_type,
+                      bufferlist::iterator *init_value_bl_it,
+                      const bufferlist &read_bl);
+
+  friend class C_ChecksumRead;
+
   bool pgls_filter(PGLSFilter *filter, hobject_t& sobj, bufferlist& outdata);
   int get_pgls_filter(bufferlist::iterator& iter, PGLSFilter **pfilter);
 
@@ -1732,6 +1742,8 @@ public:
   void on_flushed() override;
   void on_removal(ObjectStore::Transaction *t) override;
   void on_shutdown() override;
+  bool check_failsafe_full(ostream &ss) override;
+  bool check_osdmap_full(const set<pg_shard_t> &missing_on) override;
 
   // attr cache handling
   void setattr_maybe_cache(
