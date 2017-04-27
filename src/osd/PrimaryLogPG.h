@@ -1302,6 +1302,9 @@ protected:
   int do_xattr_cmp_u64(int op, __u64 v1, bufferlist& xattr);
   int do_xattr_cmp_str(int op, string& v1s, bufferlist& xattr);
 
+  int do_extent_cmp(OpContext *ctx, OSDOp& osd_op);
+  int do_writesame(OpContext *ctx, OSDOp& osd_op);
+
   // -- checksum --
   int do_checksum(OpContext *ctx, OSDOp& osd_op, bufferlist::iterator *bl_it,
 		  bool *async_read);
@@ -1310,8 +1313,6 @@ protected:
                       const bufferlist &read_bl);
 
   friend class C_ChecksumRead;
-
-  int do_writesame(OpContext *ctx, OSDOp& osd_op);
 
   bool pgls_filter(PGLSFilter *filter, hobject_t& sobj, bufferlist& outdata);
   int get_pgls_filter(bufferlist::iterator& iter, PGLSFilter **pfilter);
