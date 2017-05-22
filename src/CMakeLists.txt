@@ -882,13 +882,12 @@ add_subdirectory(tools)
 # dmClock
 
 add_subdirectory(dmclock) # after gmock
-add_dependencies(tests dmclock-tests dmclock-data-struct-tests)
 
 if(WITH_TESTS)
-  install(PROGRAMS
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dmclock-tests
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dmclock-data-struct-tests
-    DESTINATION bin)
+  if(WITH_DMCLOCK_TESTS)
+    add_subdirectory(dmclock/test)
+    add_subdirectory(dmclock/support/test)
+  endif(WITH_DMCLOCK_TESTS)
 endif(WITH_TESTS)
 
 if(HAVE_INTEL)
