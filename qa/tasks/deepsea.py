@@ -2,6 +2,7 @@
 Task to deploy clusters with DeepSea
 '''
 import logging
+import time
 
 from teuthology import misc
 from teuthology.orchestra import run
@@ -16,12 +17,23 @@ class DeepSea(Task):
     def __init__(self, ctx, config):
         super(DeepSea, self).__init__(ctx, config)
 
+        # make sure self.config dict has values for important keys
         if config is None:
             config = {}
         assert isinstance(config, dict), \
             'deepsea task only accepts a dict for configuration'
         self.config["repo"] = config.get('repo', 'https://github.com/SUSE/DeepSea.git')
         self.config["branch"] = config.get('branch', 'master')
+        self.config["exec"] = config.get('exec', ['workunits/basic-health-ok.sh'])
+        assert isinstance(self.config["exec"], list), \
+            'exec property of deepsea yaml must be a list'
+
+        # prepare the list of commands to be executed on the master node
+        self.exec_cmd = []
+        assert len(self.config["exec"]) > 0, \
+            'deepsea exec list must have at least one element'
+        for cmd in self.config["exec"]:
+            self.exec_cmd.append('cd DeepSea/qa ; ' + cmd)
 
         # determine the role id of the master role
         if(misc.num_instances_of_type(self.cluster, 'master') != 1):
@@ -34,6 +46,7 @@ class DeepSea(Task):
         # into a string
         self.config["master_remote"] = get_remote_for_role(self.ctx,
                 master_role).name
+        self.log.info("master remote: {}".format(self.config["master_remote"]))
         self.salt = Salt(self.ctx, self.config)
 
     def setup(self):
@@ -41,7 +54,6 @@ class DeepSea(Task):
 
         self.log.info("DeepSea repo: {}".format(self.config["repo"]))
         self.log.info("DeepSea branch: {}".format(self.config["branch"]))
-        self.log.info("master remote: {}".format(self.config["master_remote"]))
 
         self.salt.master_remote.run(args=[
             'git',
@@ -81,25 +93,32 @@ class DeepSea(Task):
 
         self.salt.ping_minions()
 
-        self.log.info("listing contents of DeepSea/qa/ directory tree...")
-        self.salt.master_remote.run(args=[
-            'ls',
-            '-lR',
-            '--color=never',
-            'DeepSea/qa/'
-            ])
-
-        self.log.info("running basic-health-ok.sh workunit...")
-        self.salt.master_remote.run(args=[
-            'sudo',
-            'DeepSea/qa/workunits/basic-health-ok.sh'
-            ])
-
-
     def begin(self):
         super(DeepSea, self).begin()
+        for cmd in self.exec_cmd:
+            self.log.info(
+                "command to be executed on master node: {}".format(cmd)
+                )
+            self.salt.master_remote.run(args=[
+                'sudo', 'sh', '-c',
+                cmd
+                ])
 
     def end(self):
+        # replace this hack with DeepSea purge when it's ready
+        for _remote, _ in self.ctx.cluster.remotes.iteritems():
+            self.log.info("stopping OSD services on {}"
+                .format(_remote.hostname))
+            _remote.run(args=[
+                'sudo', 'sh', '-c',
+                'systemctl stop ceph-osd.target ; sleep 10'
+                ])
+            self.log.info("unmounting OSD data devices on {}"
+                .format(_remote.hostname))
+            _remote.run(args=[
+                'sudo', 'sh', '-c',
+                'umount /dev/vdb2 ; umount /dev/vdc2'
+                ])
         super(DeepSea, self).end()
 
 task = DeepSea
