@@ -13,7 +13,40 @@ from util import get_remote_for_role
 log = logging.getLogger(__name__)
 
 class DeepSea(Task):
+    """
+    Automated DeepSea integration testing via teuthology: set up a Salt
+    cluster, clone the DeepSea git repo, run DeepSea integration test(s) 
 
+    The number of machines in the cluster is determined by the roles stanza, as
+    usual. One, and only one, of the machines must have a role of type
+    "master", e.g.  master.1 or master.a (the part following the dot is not
+    significant, but must be there).
+
+    The task starts the Salt Master daemon on the master node, and Salt Minion
+    daemons on all the nodes (including the master node), and ensures that the
+    minions are properly linked to the master. TODO: The role types are stored
+    in the role grain on the minions.
+
+    After that, the DeepSea git repo is cloned to the master node (in
+    accordance with the "repo" and "branch" options, if given).
+
+    Finally, the task iterates over the list of commands given in the "exec"
+    property, executing each one inside the 'qa/' directory of the DeepSea repo
+    clone.
+
+    Possible options for this task are:
+
+        repo: (DeepSea git repo, defaults to https://github.com/SUSE/DeepSea.git)
+        branch: (DeepSea git branch, defaults to master)
+        exec: (list of commands, relative to qa/ of the DeepSea repo)
+
+    Example:
+
+        tasks
+        - deepsea:
+            exec:
+            - workunits/basic-health-ok.sh
+    """
     def __init__(self, ctx, config):
         super(DeepSea, self).__init__(ctx, config)
 
