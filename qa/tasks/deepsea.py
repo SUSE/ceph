@@ -45,7 +45,7 @@ class DeepSea(Task):
         tasks
         - deepsea:
             exec:
-            - workunits/basic-health-ok.sh
+            - suites/basic/health-ok.sh
     """
     def __init__(self, ctx, config):
         super(DeepSea, self).__init__(ctx, config)
@@ -57,7 +57,7 @@ class DeepSea(Task):
             'deepsea task only accepts a dict for configuration'
         self.config["repo"] = config.get('repo', 'https://github.com/SUSE/DeepSea.git')
         self.config["branch"] = config.get('branch', 'master')
-        self.config["exec"] = config.get('exec', ['workunits/basic-health-ok.sh'])
+        self.config["exec"] = config.get('exec', ['suites/basic/health-ok.sh'])
         assert isinstance(self.config["exec"], list), \
             'exec property of deepsea yaml must be a list'
 
