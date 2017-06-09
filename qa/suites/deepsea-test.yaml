@@ -5,12 +5,12 @@ roles:
 openstack:
 - volumes: # attached to each instance
     count: 2
-    size: 30 # GB
+    size: 10 # GB
 tasks:
 - install:
 - deepsea:
     repo: https://github.com/smithfarm/DeepSea.git
-    branch: wip-teuthology-suite
+    branch: wip-qa-suite
 #- exec:
 #    master.a:
 #      - sleep 1000000000 # forever
