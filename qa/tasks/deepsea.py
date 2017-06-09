@@ -103,6 +103,21 @@ class DeepSea(Task):
             'install',
             ])
 
+        self.log.info("printing branch name and sha1...")
+        self.salt.master_remote.run(args=[
+            'cd',
+            'DeepSea',
+            run.Raw(';'),
+            'git',
+            'rev-parse',
+            '--abbrev-ref',
+            'HEAD',
+            run.Raw(';'),
+            'git',
+            'rev-parse',
+            'HEAD',
+            ])
+
         self.log.info("installing deepsea dependencies...")
         self.salt.master_remote.run(args = [
             'sudo',
