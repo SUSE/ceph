@@ -361,6 +361,9 @@ Requires:      gperftools-libs >= 2.6.1
 %endif
 %if 0%{?suse_version}
 Recommends:    chrony
+Requires:      gptfdisk
+Provides:      libxio = 1.7
+Obsoletes:     libxio <= 1.7
 %endif
 %description base
 Base is the package that includes all the files shared amongst ceph servers
@@ -384,6 +387,8 @@ Requires:	python%{_python_buildid}-prettytable
 %endif
 %if 0%{?suse_version}
 Requires:	python%{_python_buildid}-PrettyTable
+Provides:       libxio = 1.7
+Obsoletes:      libxio <= 1.7
 %endif
 %if 0%{with libradosstriper}
 Requires:	libradosstriper1 = %{_epoch_prefix}%{version}-%{release}
