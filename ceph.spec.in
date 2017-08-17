@@ -259,6 +259,8 @@ Requires:      psmisc
 Requires:      which
 %if 0%{?suse_version}
 Recommends:    ntp-daemon
+Provides:      libxio = 1.7
+Obsoletes:     libxio <= 1.7
 %endif
 %description base
 Base is the package that includes all the files shared amongst ceph servers
@@ -280,6 +282,8 @@ Requires:	python-prettytable
 %endif
 %if 0%{?suse_version}
 Requires:	python-PrettyTable
+Provides:       libxio = 1.7
+Obsoletes:      libxio <= 1.7
 %endif
 Requires:	python-requests
 %{?systemd_requires}
