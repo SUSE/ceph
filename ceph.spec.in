@@ -15,11 +15,12 @@
 # Please submit bugfixes or comments via http://tracker.ceph.com/
 #
 %bcond_without ocf
-%bcond_without cephfs_java
 %if 0%{?suse_version}
 %bcond_with ceph_test_package
+%bcond_with cephfs_java
 %else
 %bcond_without ceph_test_package
+%bcond_without cephfs_java
 %endif
 %bcond_with make_check
 %ifarch s390 s390x
