@@ -136,7 +136,9 @@ BuildRequires:	make
 BuildRequires:	parted
 BuildRequires:	perl
 BuildRequires:	pkgconfig
+%if %{with lowmem_builder}
 BuildRequires:  procps
+%endif
 BuildRequires:	python
 BuildRequires:	python-devel
 BuildRequires:	python-nose
@@ -859,11 +861,13 @@ cmake .. \
 PARALLEL_BUILD=%{?_smp_mflags}
 %if %{with lowmem_builder}
 lo_jobs="%{?jobs:%{jobs}}"
+%if 0%{?suse_version}
 %ifarch %arm
     %if ! 0%{?qemu_user_space_build:1}
         # native hardware is not that powerful
         lo_jobs="1"
     %endif
+%endif
 %endif
 # do not eat all memory
 echo "Available memory:"
@@ -882,6 +886,7 @@ fi
 if test -n "$lo_jobs" ; then
   PARALLEL_BUILD="-j$lo_jobs"
 fi
+%endif
 
 make "$PARALLEL_BUILD"
 
