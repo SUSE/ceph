@@ -1032,7 +1032,9 @@ if(WITH_FUSE)
   add_executable(ceph-fuse ${ceph_fuse_srcs})
   target_link_libraries(ceph-fuse ${ALLOC_LIBS} ${FUSE_LIBRARIES}
     client ceph-common global-static)
-  set_target_properties(ceph-fuse PROPERTIES COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}")
+  set_target_properties(ceph-fuse PROPERTIES
+    COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}"
+    INSTALL_RPATH "")
   install(TARGETS ceph-fuse DESTINATION bin)
   install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
 endif(WITH_FUSE)
