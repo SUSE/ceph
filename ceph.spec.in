@@ -78,9 +78,12 @@ License:	LGPL-2.1 and CC-BY-SA-1.0 and GPL-2.0 and BSL-1.0 and BSD-3-Clause and 
 Group:		System/Filesystems
 %endif
 URL:		http://ceph.com/
+%if 0%{?fedora} || 0%{?rhel}
 Source0:	https://download.ceph.com/tarballs/@TARBALL_BASENAME@.tar.bz2
-# _insert_obs_source_lines_here
+%endif
 %if 0%{?suse_version}
+Source0:	@TARBALL_BASENAME@.tar.bz2
+# _insert_obs_source_lines_here
 %if 0%{?is_opensuse}
 ExclusiveArch:  x86_64 aarch64 ppc64 ppc64le
 %else
