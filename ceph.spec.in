@@ -922,7 +922,6 @@ install -m 0644 -D etc/sysconfig/ceph %{buildroot}%{_sysconfdir}/sysconfig/ceph
 install -m 0644 -D etc/sysconfig/ceph %{buildroot}%{_fillupdir}/sysconfig.%{name}
 %endif
 install -m 0644 -D systemd/ceph.tmpfiles.d %{buildroot}%{_tmpfilesdir}/ceph-common.conf
-install -m 0755 -D systemd/ceph %{buildroot}%{_sbindir}/rcceph
 install -m 0644 -D systemd/50-ceph.preset %{buildroot}%{_libexecdir}/systemd/system-preset/50-ceph.preset
 mkdir -p %{buildroot}%{_sbindir}
 install -m 0644 -D src/logrotate.conf %{buildroot}%{_sysconfdir}/logrotate.d/ceph
@@ -988,7 +987,6 @@ rm -rf %{buildroot}
 %{_sbindir}/ceph-disk
 %{_sbindir}/ceph-volume
 %{_sbindir}/ceph-volume-systemd
-%{_sbindir}/rcceph
 %dir %{_libexecdir}/ceph
 %{_libexecdir}/ceph/ceph_common.sh
 %dir %{_libdir}/rados-classes
