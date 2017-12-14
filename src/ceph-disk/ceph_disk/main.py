@@ -50,13 +50,9 @@ CEPH_LOCKBOX_ONDISK_MAGIC = 'ceph lockbox volume v001'
 KEY_MANAGEMENT_MODE_V1 = 'ceph-mon v1'
 
 DEPRECATION_WARNING = """
-*******************************************************************************
-This tool is now deprecated in favor of ceph-volume.
-It is recommended to use ceph-volume for OSD deployments. For details see:
-
-    http://docs.ceph.com/docs/master/ceph-volume/#migrating
-
-*******************************************************************************
+ceph-disk is deprecated and will be removed in the next major version
+of Ceph (Nautilus). The replacement tool is called ceph-volume. For
+details see http://docs.ceph.com/docs/master/ceph-volume/#migrating
 """
 
 PTYPE = {
@@ -5685,7 +5681,6 @@ def make_zap_parser(subparsers):
 
 
 def main(argv):
-    # Deprecate from the very beginning
     warnings.warn(DEPRECATION_WARNING)
     args = parse_args(argv)
 
@@ -5706,19 +5701,9 @@ def main(argv):
     CEPH_PREF_GROUP = args.setgroup
 
     if args.verbose:
-        try:
-            args.func(args)
-        except Exception:
-            # warn on any exception when running with verbosity
-            warnings.warn(DEPRECATION_WARNING)
-            # but still raise the original issue
-            raise
-
+        args.func(args)
     else:
         main_catch(args.func, args)
-
-    # if there aren't any errors, still log again at the very bottom
-    warnings.warn(DEPRECATION_WARNING)
 
 
 def setup_logging(verbose, log_stdout):
@@ -5746,8 +5731,6 @@ def main_catch(func, args):
         func(args)
 
     except Error as e:
-        # warn on generic 'error' exceptions
-        warnings.warn(DEPRECATION_WARNING)
         raise SystemExit(
             '{prog}: {msg}'.format(
                 prog=args.prog,
@@ -5756,8 +5739,6 @@ def main_catch(func, args):
         )
 
     except CephDiskException as error:
-        # warn on ceph-disk exceptions
-        warnings.warn(DEPRECATION_WARNING)
         exc_name = error.__class__.__name__
         raise SystemExit(
             '{prog} {exc_name}: {msg}'.format(
