@@ -126,7 +126,7 @@ BuildRequires:	gperf
 BuildRequires:  cmake
 BuildRequires:	cryptsetup
 BuildRequires:	fuse-devel
-BuildRequires:	gcc-c++
+BuildRequires:	gcc-c++ >= 7
 BuildRequires:	gdbm
 %if 0%{with tcmalloc}
 BuildRequires:	gperftools-devel >= 2.4
