@@ -167,8 +167,7 @@ Inline Compression
 ==================
 
 BlueStore supports inline compression using `snappy`, `zlib`, or
-`lz4`. Please note that the `lz4` compression plugin is not
-distributed in the official release.
+`lz4`.
 
 Whether data in BlueStore is compressed is determined by a combination
 of the *compression mode* and any hints associated with a write
