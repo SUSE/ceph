@@ -165,6 +165,7 @@ class TestCephDetectInit(testtools.TestCase):
                                  is_openrc=(lambda: False)):
             self.assertEqual('unknown', gentoo.choose_init())
 
+    @mock.patch('os.path.isfile', lambda path: False)
     def test_get(self):
         with mock.patch.multiple(
                 'platform',
@@ -252,6 +253,7 @@ class TestCephDetectInit(testtools.TestCase):
         self.assertEqual('gentoo', n('exherbo'))
         self.assertEqual('virtuozzo', n('Virtuozzo Linux'))
 
+    @mock.patch('os.path.isfile', lambda path: False)
     @mock.patch('platform.system', lambda: 'Linux')
     def test_platform_information_linux(self):
         with mock.patch('platform.linux_distribution',
@@ -319,12 +321,19 @@ class TestCephDetectInit(testtools.TestCase):
         argv = ['--use-rhceph', '--verbose']
         self.assertEqual(0, main.run(argv))
 
+    @mock.patch('os.path.isfile', lambda path: False)
+    def test_run_unknown_distro(self):
+        argv = ['--use-rhceph', '--verbose']
         with mock.patch.multiple(
                 'platform',
                 system=lambda: 'Linux',
                 linux_distribution=lambda **kwargs: (('unknown', '', ''))):
             self.assertRaises(exc.UnsupportedPlatform, main.run, argv)
             self.assertEqual(0, main.run(argv + ['--default=sysvinit']))
+
+    def test_extract_from_os_release(self):
+        self.assertEqual('', ceph_detect_init._extract_from_os_release(
+                         'bad data', 'ID'))
 
 # Local Variables:
 # compile-command: "cd .. ; .tox/py27/bin/py.test tests/test_all.py"
