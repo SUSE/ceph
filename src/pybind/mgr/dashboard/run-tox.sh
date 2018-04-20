@@ -18,7 +18,7 @@ fi
 source ${MGR_DASHBOARD_VIRTUALENV}/bin/activate
 
 if [ "$WITH_PYTHON3" = "ON" ]; then
-  ENV_LIST="cov-init,py27,py3,cov-report,lint"
+  ENV_LIST="cov-init,py3,cov-report,lint"
 else
   ENV_LIST="cov-init,py27,cov-report,lint"
 fi

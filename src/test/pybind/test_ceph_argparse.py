@@ -20,11 +20,11 @@ from nose.tools import *
 
 from ceph_argparse import validate_command, parse_json_funcsigs
 
+import json
+import io
 import os
 import re
 import sys
-import json
-from StringIO import StringIO
 
 def get_command_descriptions(what):
     CEPH_BIN = os.environ['CEPH_BIN']
@@ -95,12 +95,12 @@ class TestArgparse:
                                                     command,
                                                     'toomany']))
 
-	def capture_output(self, args, stdout=None, stderr=None):
+    def capture_output(self, args, stdout=None, stderr=None):
         if stdout:
-            stdout = StringIO()
+            stdout = io.StringIO()
             sys.stdout = stdout
         if stderr:
-            stderr = StringIO()
+            stderr = io.StringIO()
             sys.stderr = stderr
         ret = validate_command(sigdict, args)
         if stdout:

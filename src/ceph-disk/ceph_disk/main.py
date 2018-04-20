@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright (C) 2015, 2016, 2017 Red Hat <contact@redhat.com>
 # Copyright (C) 2014 Inktank <info@inktank.com>
