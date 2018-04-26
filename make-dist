@@ -122,7 +122,7 @@ fi
 
 . /etc/os-release
 case $ID in
-    opensuse|suse|sles)
+    opensuse-tumbleweed|opensuse|suse|sles)
         if [ "x$rpm_release" != "x0" ] ; then
             rpm_release=$(echo $rpm_release | sed 's/.g/+g/')
             rpm_version="${rpm_version}.${rpm_release}"
