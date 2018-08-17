@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - suites/basic/health-ok.sh --encrypted
+    - suites/basic/health-ok.sh --apparmor --encrypted

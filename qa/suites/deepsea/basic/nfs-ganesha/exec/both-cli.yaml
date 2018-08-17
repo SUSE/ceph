@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - "suites/basic/health-nfs-ganesha.sh --cli --fsal=both"
+    - "suites/basic/health-nfs-ganesha.sh --apparmor --cli --fsal=both"

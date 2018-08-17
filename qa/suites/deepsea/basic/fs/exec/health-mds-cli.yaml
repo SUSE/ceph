@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - suites/basic/health-mds.sh --cli
+    - suites/basic/health-mds.sh --apparmor --cli

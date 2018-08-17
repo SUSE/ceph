@@ -1,7 +1,7 @@
 overrides:
   deepsea:
     exec:
-    - suites/ceph-test/librbd.sh
+    - "suites/ceph-test/librbd.sh --apparmor"
 tasks:
 # the "exec" task runs commands as root
 - exec:

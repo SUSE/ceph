@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - suites/basic/health-rgw.sh --ssl
+    - suites/basic/health-rgw.sh --apparmor --ssl

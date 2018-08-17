@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - "suites/ceph-test/pynfs.sh --cli --fsal=cephfs"
+    - "suites/ceph-test/pynfs.sh --apparmor --cli --fsal=cephfs"

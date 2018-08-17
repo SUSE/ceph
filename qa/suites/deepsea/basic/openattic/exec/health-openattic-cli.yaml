@@ -1,4 +1,4 @@
 overrides:
   deepsea:
     exec:
-    - suites/basic/health-openattic.sh --cli
+    - suites/basic/health-openattic.sh --apparmor --cli
