@@ -7,6 +7,14 @@ tasks:
         - policy_cfg:
             profile: default
         - stage2:
+        - custom_ceph_conf:
+            global:
+              mon lease: 15
+              mon lease ack timeout: 25
+            mon:
+              debug mon: 20
+            osd:
+              debug filestore: 20
         - stage3:
         - stage4:
         - 'ceph -s'

@@ -41,6 +41,10 @@ cp /srv/salt/ceph/stage/prep/minion/default-no-update-no-reboot.sls \
    /srv/salt/ceph/stage/prep/minion/default.sls
 """
 global_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/global.conf'
+mgr_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/mgr.conf'
+mds_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/mds.conf'
+osd_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/osd.conf'
+client_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/client.conf'
 health_ok_cmd = "health-ok.sh --teuthology"
 mon_conf = '/srv/salt/ceph/configuration/files/ceph.conf.d/mon.conf'
 proposals_dir = "/srv/pillar/ceph/proposals"
@@ -601,6 +605,9 @@ profile-{profile}/cluster/{remote}.sls
         elif directive == "stage2":
             config = cmd_dict['stage2']
             target = self._run_stage_2
+        elif directive == "custom_ceph_conf":
+            config = cmd_dict['custom_ceph_conf']
+            target = self._custom_ceph_conf
         elif directive == "stage3":
             config = cmd_dict['stage3']
             target = self._run_stage_3
@@ -715,6 +722,45 @@ profile-{profile}/cluster/{remote}.sls
         self._ceph_conf_dashboard()
         self._dump_global_conf()
         self._dump_mon_conf()
+
+    def _custom_ceph_conf(self, config):
+        """
+        Add custom options for ceph.conf
+        Dict definition should be defined between stage 2 and 3.
+        Conf files for each roles are stored in:
+        /srv/salt/ceph/configuration/files/ceph.conf.d/
+        EXAMPLE:
+        tasks:
+          - deepsea_deploy:
+              cli: true
+              commands:
+                - stage0:
+                    update: false
+                - stage1:
+                - policy_cfg:
+                    profile: default
+                - stage2:
+                - custom_ceph_conf:
+                    global:
+                      mon lease: 15
+                      mon lease ack timeout: 25
+                    mon:
+                      debug mon: 20
+                    osd:
+                      debug filestore: 20
+                - stage3:
+        """
+        log.info("WWWW: custom options in ceph.conf")
+        if not config:
+            log.info("empty config: not setting any custom ceph.conf")
+            return None
+        for section, section_configs in config.keys():
+            if isinstance(section_configs, dict):
+                for conf_item, conf_value in section_configs.iteritems():
+                    data = '{} = {}\n'.format(conf_item, conf_value)
+                    exec('conf_file = ' + section + '_conf')
+                    sudo_append_to_file(self.master_remote, conf_file, data)
+                    log.info("Adding to ceph.conf, {} section: {}".format(section, data))
 
     def _run_stage_3(self, config):
         """
