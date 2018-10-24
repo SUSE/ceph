@@ -208,4 +208,17 @@ class DeepSea(Task):
         log.debug("end of teardown method")
 
 
+class Subtask(DeepSea):
+
+    def __init__(self, ctx, config):
+        super(Subtask, self).__init__(ctx, config)
+
+    def begin(self):
+        log.debug("beginning of begin method")
+        log.info("Welcome to the deepsea.subtask subtask!")
+        log.info("The Salt Master node is {}".format(self.master_remote.hostname))
+        log.debug("end of begin method")
+
+
 task = DeepSea
+subtask = Subtask

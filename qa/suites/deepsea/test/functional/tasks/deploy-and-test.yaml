@@ -1,4 +1,5 @@
 tasks:
+  - deepsea.subtask:
   - deepsea_deploy:
       cli: true
       commands:
