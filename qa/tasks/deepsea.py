@@ -905,6 +905,13 @@ class CrushMap(DeepSea):
             hostnames += [self.__lop_off_domain_part(h)]
         return hostnames
 
+    def _remotes_from_short_hostnames(self, hostnames):
+        result = []
+        for hostname in hostnames:
+            fqdn = hostname + '.teuthology'
+            result += [self.remotes[fqdn]]
+        return result
+
     def _unblock_ceph_ports(self, remote):
         remote.sh('sudo iptables -F')
 
@@ -912,16 +919,16 @@ class CrushMap(DeepSea):
         for remote in list_of_remotes:
             self._unblock_ceph_ports(remote)
 
-    def _wait_for_rack_down_reported(self):
+    def _wait_for_bucket_down_reported(self, bucket_type):
         cmd = ('set -ex\n'
-               'echo "Waiting till rack will become reported" >/dev/null\n'
-               'until ceph -s | grep ".* rack .* down"\n'
+               'echo "Waiting till {bt} down will become reported" >/dev/null\n'
+               'until ceph -s | grep ".* {bt} .* down"\n'
                'do\n'
                '    sleep 30\n'
-               'done\n')
-        write_file(self.master_remote, 'wait_for_rack_down_reported.sh', cmd)
-        self.master_remote.sh('timeout 15m bash wait_for_rack_down_reported.sh')
-        self.master_remote.sh('sudo ceph -s ; ceph osd crush tree')
+               'done\n').format(bucket_type)
+        write_file(self.master_remote, 'wait_for_bucket_down_reported.sh', cmd)
+        self.master_remote.sh('timeout 15m bash wait_for_bucket_down_reported.sh')
+        self.master_remote.sh('sudo ceph -s ; sudo ceph osd crush tree')
 
     def rack_dc_region_unavailability(self):
         if len(self.storage_nodes) < 4:
@@ -967,15 +974,60 @@ class CrushMap(DeepSea):
         self.master_remote.sh(cmd.format(hosts=rack3_hosts, rack='rack3'))
         self.master_remote.sh(cmd.format(hosts=rack4_hosts, rack='rack4'))
         # rack unavailability test
-        rack4_remotes = []
-        for hostname in rack4_hosts:
-            fqdn = hostname + '.teuthology'
-            rack4_remotes += [self.remotes[fqdn]]
+        rack4_remotes = self._remotes_from_short_hostnames(rack4_hosts)
+        self.log.info("Bringing down rack4, consisting of ->{}<-".format(rack4_hosts))
         self._block_ceph_ports_on_multiple_remotes(rack4_remotes)
-        self._wait_for_rack_down_reported()
+        self._wait_for_bucket_down_reported('rack')
         self._unblock_ceph_ports_on_multiple_remotes(rack4_remotes)
         self.wait_for_health_ok()
+        self.log.info("rack4 is back up")
         # datacenter (dc) unavailability test
+        cmd = ('set -ex\n'
+               'echo "Simulating datacenter failure" >/dev/null\n'
+               'sudo ceph osd crush add-bucket dc1 datacenter\n'
+               'sudo ceph osd crush add-bucket dc2 datacenter\n'
+               'sudo ceph osd crush move dc1 root=default\n'
+               'sudo ceph osd crush move dc2 root=default\n'
+               'sudo ceph osd crush move rack1 datacenter=dc1\n'
+               'sudo ceph osd crush move rack2 datacenter=dc1\n'
+               'sudo ceph osd crush move rack3 datacenter=dc2\n'
+               'sudo ceph osd crush move rack4 datacenter=dc2\n')
+        self.master_remote.sh(cmd)
+        region1_remotes = self._remotes_from_short_hostnames(region1_hosts)
+        self.log.info("Bringing down datacenter1, consisting of ->{}<-".format(region1_hosts))
+        self._block_ceph_ports_on_multiple_remotes(region1_remotes)
+        self._wait_for_bucket_down_reported('datacenter')
+        self._unblock_ceph_ports_on_multiple_remotes(region1_remotes)
+        self.wait_for_health_ok()
+        self.log.info("datacenter1 is back up")
+        # region unavailability test
+        cmd = ('set -ex\n'
+               'echo "Simulating region failure" >/dev/null\n'
+               'sudo ceph osd crush add-bucket dc3 datacenter\n'
+               'sudo ceph osd crush add-bucket dc4 datacenter\n'
+               'sudo ceph osd crush add-bucket region1 region\n'
+               'sudo ceph osd crush add-bucket region2 region\n'
+               'sudo ceph osd crush move region1 root=default\n'
+               'sudo ceph osd crush move region2 root=default\n'
+               'sudo ceph osd crush move dc1 region=region1\n'
+               'sudo ceph osd crush move dc2 region=region1\n'
+               'sudo ceph osd crush move dc3 region=region2\n'
+               'sudo ceph osd crush move dc4 region=region2\n'
+               'sudo ceph osd crush move rack2 datacenter=dc2\n'
+               'sudo ceph osd crush move rack3 datacenter=dc3\n'
+               'sudo ceph osd crush move rack4 datacenter=dc4\n')
+        self.master_remote.sh(cmd)
+        self.log.info("Bringing down region1, consisting of ->{}<-".format(region1_hosts))
+        self._block_ceph_ports_on_multiple_remotes(region1_remotes)
+        self._wait_for_bucket_down_reported('region')
+        self._unblock_ceph_ports_on_multiple_remotes(region1_remotes)
+        self.wait_for_health_ok()
+        self.log.info("region1 is back up")
+        self.log.info("Restoring original CRUSH map")
+        self.master_remote.sh("sudo ceph osd setcrushmap -i crushmap.bin\n"
+                              "sudo ceph osd crush tree\n")
+        self.wait_for_health_ok()
+        self.master_remote.sh("sudo ceph -s")
         self.log.info("End of rack_dc_region_unavailability test")
 
     def begin(self):
