@@ -97,6 +97,19 @@ def remote_run_script_as_root(remote, path, data, args=None):
     remote.run(label=path, args=cmd)
 
 
+def split_a_number(i):
+    """
+    Takes an integer i and returns a tuple (x, y) where
+
+        x = i / 2 (integer division)
+        y = i - x
+    """
+    i = int(i)
+    x = i / 2
+    y = i - x
+    return (x, y)
+
+
 class DeepSea(Task):
     """
     Install DeepSea on the Salt Master node.
@@ -833,8 +846,6 @@ class CreatePools(DeepSea):
         deepsea_ctx['logger_obj'] = log.getChild('create_pools')
         self.name = 'deepsea.create_pools'
         super(CreatePools, self).__init__(ctx, config)
-        if not isinstance(self.config, dict):
-            raise ConfigError(self.err_prefix + "config must be a dictionary")
 
     def begin(self):
         self.log.info(anchored("pre-creating pools"))
@@ -846,6 +857,82 @@ class CreatePools(DeepSea):
                 args.append(key)
         args = list(set(args))
         self.scripts.create_all_pools_at_once(*args)
+
+    def teardown(self):
+        pass
+
+
+class CrushMap(DeepSea):
+
+    crush_map = ''
+
+    crush_tree = ''
+
+    err_prefix = "(crushmap subtask) "
+
+    def __init__(self, ctx, config):
+        deepsea_ctx['logger_obj'] = log.getChild('crushmap')
+        self.name = 'deepsea.crushmap'
+        super(CrushMap, self).__init__(ctx, config)
+        self.log.info("Initial CRUSH map:")
+        self.crush_map = self.scripts.crush_map()
+        self.log.info("Initial CRUSH tree:")
+        self.crush_tree = self.master_remote.sh("sudo ceph osd crush tree")
+
+    def rack_dc_region_unavailability(self):
+        if len(self.storage_nodes) < 4:
+            raise ConfigError(
+                self.err_prefix +
+                'rack_dc_region_unavailability test requires at least 4 storage nodes'
+                )
+        self.log.info("Beginning of rack_dc_region_unavailability test")
+        cmd = ('set -ex\n'
+               'echo "adding rack buckets" >/dev/null\n'
+               'for r in $(seq 1 4) ; do\n'
+               '    sudo ceph osd crush add-bucket rack$r rack\n'
+               'done\n'
+               'echo "moving rack buckets to default root" >/dev/null\n'
+               'for r in $(seq 1 4) ; do\n'
+               '    sudo ceph osd crush move rack$r root=default\n'
+               'done\n')
+        self.master_remote.sh(cmd)
+        hosts_x, hosts_y = split_a_number(len(self.storage_nodes))
+        self.log.info("hosts_x == {}, hosts_y == {}".format(hosts_x, hosts_y))
+        region1_hosts = self.storage_nodes[0:hosts_x]
+        # region2_hosts = self.storage_nodes[hosts_x:hosts_y]
+        region1_x, region1_y = split_a_number(len(region1_hosts))
+        self.log.info("region1_x == {}, region1_y == {}".format(region1_x, region1_y))
+        cmd = ('set -ex\n'
+               'CRUSH_HOSTS="{hosts}"\n'
+               'echo "move some crush hosts to {rack} (region1)" >/dev/null\n'
+               'for host in "$CRUSH_HOSTS" ; do\n'
+               '    sudo ceph osd crush move $host rack={rack}\n'
+               'done\n'
+               'sudo ceph osd crush tree\n')
+        rack1_hosts = ' '.join(self.storage_nodes[0:region1_x])
+        self.master_remote.sh(cmd.format(hosts=rack1_hosts, rack='rack1'))
+        rack2_hosts = self.storage_nodes[region1_x:region1_y]
+        self.master_remote.sh(cmd.format(hosts=rack2_hosts, rack='rack2'))
+        self.log.info("End of rack_dc_region_unavailability test")
+
+    def begin(self):
+        if not self.config:
+            self.log.warning("empty config: nothing to do")
+            return None
+        config_keys = len(self.config)
+        if config_keys > 1:
+            raise ConfigError(
+                self.err_prefix +
+                "config dictionary may contain only one key. "
+                "You provided ->{}<- keys".format(config_keys)
+                )
+        testspec, _ = self.config.items()[0]
+        method = getattr(self, testspec, None)
+        if method:
+            method()
+        else:
+            raise ConfigError(self.err_prefix + "No such CrushMap test ->{}<-"
+                              .format(method))
 
     def teardown(self):
         pass
@@ -1787,7 +1874,7 @@ echo "According to \"ceph --version\", the ceph upstream version is ->$CEPH_CEPH
 test -n "$RPM_CEPH_VERSION"
 test "$RPM_CEPH_VERSION" = "$CEPH_CEPH_VERSION"
 """,
-        "rados_write_test": """Write a RADOS object and read it back
+        "rados_write_test": """# Write a RADOS object and read it back
 #
 # NOTE: function assumes the pool "write_test" already exists. Pool can be
 # created by calling e.g. "create_all_pools_at_once write_test" immediately
@@ -1799,6 +1886,11 @@ echo "dummy_content" > verify.txt
 rados -p write_test put test_object verify.txt
 rados -p write_test get test_object verify_returned.txt
 test "x$(cat verify.txt)" = "x$(cat verify_returned.txt)"
+""",
+        "crush_map": """# Dump the CRUSH map
+ceph osd getcrushmap -o crushmap.bin 2>&1 >/dev/null
+crushtool -d crushmap.bin -o crushmap.txt 2>&1 >/dev/null
+cat crushmap.txt
 """,
         }
 
@@ -1828,6 +1920,10 @@ test "x$(cat verify.txt)" = "x$(cat verify_returned.txt)"
             self.script_dict["create_all_pools_at_once"],
             args=args,
             )
+
+    def crush_map(self, *args, **kwargs):
+        write_file(self.master_remote, 'crush_map.sh', self.script_dict["crush_map"])
+        return self.master_remote.sh('sudo bash crush_map.sh')
 
     def custom_storage_profile(self, *args, **kwargs):
         sourcefile = args[0]
@@ -2020,6 +2116,7 @@ class Validation(DeepSea):
 task = DeepSea
 ceph_conf = CephConf
 create_pools = CreatePools
+crushmap = CrushMap
 dummy = Dummy
 health_ok = HealthOK
 orch = Orch
