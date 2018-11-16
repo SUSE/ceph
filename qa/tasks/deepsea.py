@@ -963,16 +963,16 @@ class CrushMap(DeepSea):
         self.log.info("region1_x == {}, region1_y == {}".format(region1_x, region1_y))
         rack1_hosts = region1_hosts[0:region1_x]
         rack2_hosts = region1_hosts[region1_x:region1_y]
-        self.master_remote.sh(cmd.format(hosts=rack1_hosts, rack='rack1'))
-        self.master_remote.sh(cmd.format(hosts=rack2_hosts, rack='rack2'))
+        self.master_remote.sh(cmd.format(hosts=' '.join(rack1_hosts), rack='rack1'))
+        self.master_remote.sh(cmd.format(hosts=' '.join(rack2_hosts), rack='rack2'))
         # region2 (rack3, rack4)
         region2_hosts = hosts[hosts_x:hosts_y]
         region2_x, region2_y = split_a_number(len(region2_hosts))
         self.log.info("region2_x == {}, region2_y == {}".format(region2_x, region2_y))
         rack3_hosts = region2_hosts[0:region2_x]
         rack4_hosts = region2_hosts[region2_x:region2_y]
-        self.master_remote.sh(cmd.format(hosts=rack3_hosts, rack='rack3'))
-        self.master_remote.sh(cmd.format(hosts=rack4_hosts, rack='rack4'))
+        self.master_remote.sh(cmd.format(hosts=' '.join(rack3_hosts), rack='rack3'))
+        self.master_remote.sh(cmd.format(hosts=' '.join(rack4_hosts), rack='rack4'))
         # rack unavailability test
         rack4_remotes = self._remotes_from_short_hostnames(rack4_hosts)
         self.log.info("Bringing down rack4, consisting of ->{}<-".format(rack4_hosts))
