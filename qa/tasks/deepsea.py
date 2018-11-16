@@ -896,7 +896,7 @@ class CrushMap(DeepSea):
     def _hostnames(self, fqdns):
         hostnames = []
         for h in fqdns:
-            hostnames += [self._lop_off_domain_part(h)]
+            hostnames += [self.__lop_off_domain_part(h)]
         return hostnames
 
     def _unblock_ceph_ports(self, remote):
