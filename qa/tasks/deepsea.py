@@ -883,7 +883,7 @@ class CrushMap(DeepSea):
         self.crush_tree = self.master_remote.sh("sudo ceph osd crush tree")
 
     def __lop_off_domain_part(self, fqdn):
-        return self.domain_part_regex('', fqdn)
+        return self.domain_part_regex.sub('', fqdn)
 
     def _block_ceph_ports(self, remote):
         remote.sh('sudo iptables -A INPUT -m multiport -p tcp --dports 6800:7300 -j DROP\n'
