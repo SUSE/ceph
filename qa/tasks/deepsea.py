@@ -625,6 +625,12 @@ class DeepSea(Task):
         host = role_dict[role_dict.keys()[0]] if role_dict else ''
         return host
 
+    def wait_for_health_ok(self):
+        cmd = 'sudo salt-call wait.until status=HEALTH_OK timeout=900 check=1'
+        if self.quiet_salt:
+            cmd += ' 2> /dev/null'
+        self.master_remote.run(args=cmd)
+
     # Teuthology iterates through the tasks stanza twice: once to "execute"
     # the tasks and a second time to "unwind" them. During the first pass
     # it pushes each task onto a stack, and during the second pass it "unwinds"
@@ -915,6 +921,7 @@ class CrushMap(DeepSea):
                'done\n')
         write_file(self.master_remote, 'wait_for_rack_down_reported.sh', cmd)
         self.master_remote.sh('timeout 15m bash wait_for_rack_down_reported.sh')
+        self.master_remote.sh('sudo ceph -s ; ceph osd crush tree')
 
     def rack_dc_region_unavailability(self):
         if len(self.storage_nodes) < 4:
@@ -959,13 +966,16 @@ class CrushMap(DeepSea):
         rack4_hosts = region2_hosts[region2_x:region2_y]
         self.master_remote.sh(cmd.format(hosts=rack3_hosts, rack='rack3'))
         self.master_remote.sh(cmd.format(hosts=rack4_hosts, rack='rack4'))
-        # bring down rack4
+        # rack unavailability test
         rack4_remotes = []
         for hostname in rack4_hosts:
             fqdn = hostname + '.teuthology'
             rack4_remotes += [self.remotes[fqdn]]
         self._block_ceph_ports_on_multiple_remotes(rack4_remotes)
         self._wait_for_rack_down_reported()
+        self._unblock_ceph_ports_on_multiple_remotes(rack4_remotes)
+        self.wait_for_health_ok()
+        # datacenter (dc) unavailability test
         self.log.info("End of rack_dc_region_unavailability test")
 
     def begin(self):
@@ -1124,12 +1134,6 @@ class Orch(DeepSea):
                 "unrecognized Stage ->{}<-".format(self.stage)
                 )
         self.log.debug("munged config is {}".format(self.config))
-
-    def __ceph_health_test(self):
-        cmd = 'sudo salt-call wait.until status=HEALTH_OK timeout=900 check=1'
-        if self.quiet_salt:
-            cmd += ' 2> /dev/null'
-        self.master_remote.run(args=cmd)
 
     def __check_salt_api_service(self):
         base_cmd = 'sudo systemctl status --full --lines={} {}.service'
@@ -1359,7 +1363,7 @@ class Orch(DeepSea):
             )
         self.__dump_lvm_status()
         self.scripts.ceph_cluster_status()
-        self.__ceph_health_test()
+        self.wait_for_health_ok()
 
     def _run_stage_4(self):
         """
@@ -1371,7 +1375,7 @@ class Orch(DeepSea):
         self.__log_stage_start(stage)
         self._run_orch(("stage", stage))
         self.__maybe_cat_ganesha_conf()
-        self.__ceph_health_test()
+        self.wait_for_health_ok()
 
     def _run_stage_5(self):
         """
