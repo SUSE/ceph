@@ -5,6 +5,7 @@ Linter:
     flake8 --max-line-length=100
 """
 import logging
+import re
 import yaml
 
 from salt_manager import SaltManager
@@ -870,6 +871,8 @@ class CrushMap(DeepSea):
 
     err_prefix = "(crushmap subtask) "
 
+    domain_part_regex = re.compile('\..*$')
+
     def __init__(self, ctx, config):
         deepsea_ctx['logger_obj'] = log.getChild('crushmap')
         self.name = 'deepsea.crushmap'
@@ -878,6 +881,15 @@ class CrushMap(DeepSea):
         self.crush_map = self.scripts.crush_map()
         self.log.info("Initial CRUSH tree:")
         self.crush_tree = self.master_remote.sh("sudo ceph osd crush tree")
+
+    def __lop_off_domain_part(self, fqdn):
+        return self.domain_part_regex('', fqdn)
+
+    def _hostnames(self, fqdns):
+        hostnames = []
+        for h in fqdns:
+            hostnames += [self._lop_off_domain_part(h)]
+        return hostnames
 
     def rack_dc_region_unavailability(self):
         if len(self.storage_nodes) < 4:
@@ -896,12 +908,9 @@ class CrushMap(DeepSea):
                '    sudo ceph osd crush move rack$r root=default\n'
                'done\n')
         self.master_remote.sh(cmd)
-        hosts_x, hosts_y = split_a_number(len(self.storage_nodes))
+        hosts = self._hostnames(self.storage_nodes)
+        hosts_x, hosts_y = split_a_number(len(hosts))
         self.log.info("hosts_x == {}, hosts_y == {}".format(hosts_x, hosts_y))
-        region1_hosts = self.storage_nodes[0:hosts_x]
-        # region2_hosts = self.storage_nodes[hosts_x:hosts_y]
-        region1_x, region1_y = split_a_number(len(region1_hosts))
-        self.log.info("region1_x == {}, region1_y == {}".format(region1_x, region1_y))
         cmd = ('set -ex\n'
                'CRUSH_HOSTS="{hosts}"\n'
                'echo "move some crush hosts to {rack} (region1)" >/dev/null\n'
@@ -909,10 +918,23 @@ class CrushMap(DeepSea):
                '    sudo ceph osd crush move $host rack={rack}\n'
                'done\n'
                'sudo ceph osd crush tree\n')
-        rack1_hosts = ' '.join(self.storage_nodes[0:region1_x])
+        # region1 (rack1, rack2)
+        region1_hosts = hosts[0:hosts_x]
+        region1_x, region1_y = split_a_number(len(region1_hosts))
+        self.log.info("region1_x == {}, region1_y == {}".format(region1_x, region1_y))
+        rack1_hosts = region1_hosts[0:region1_x]
+        rack2_hosts = region1_hosts[region1_x:region1_y]
         self.master_remote.sh(cmd.format(hosts=rack1_hosts, rack='rack1'))
-        rack2_hosts = self.storage_nodes[region1_x:region1_y]
         self.master_remote.sh(cmd.format(hosts=rack2_hosts, rack='rack2'))
+        # region2 (rack3, rack4)
+        region2_hosts = hosts[hosts_x:hosts_y]
+        region2_x, region2_y = split_a_number(len(region2_hosts))
+        self.log.info("region2_x == {}, region2_y == {}".format(region2_x, region2_y))
+        rack3_hosts = region2_hosts[0:region2_x]
+        rack4_hosts = region2_hosts[region2_x:region2_y]
+        self.master_remote.sh(cmd.format(hosts=rack3_hosts, rack='rack3'))
+        self.master_remote.sh(cmd.format(hosts=rack4_hosts, rack='rack4'))
+        # bring down rack4
         self.log.info("End of rack_dc_region_unavailability test")
 
     def begin(self):
