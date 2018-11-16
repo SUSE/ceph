@@ -885,11 +885,36 @@ class CrushMap(DeepSea):
     def __lop_off_domain_part(self, fqdn):
         return self.domain_part_regex('', fqdn)
 
+    def _block_ceph_ports(self, remote):
+        remote.sh('sudo iptables -A INPUT -m multiport -p tcp --dports 6800:7300 -j DROP\n'
+                  'sudo iptables -A OUTPUT -m multiport -p tcp --dports 6800:7300 -j DROP\n')
+
+    def _block_ceph_ports_on_multiple_remotes(self, list_of_remotes):
+        for remote in list_of_remotes:
+            self._block_ceph_ports(remote)
+
     def _hostnames(self, fqdns):
         hostnames = []
         for h in fqdns:
             hostnames += [self._lop_off_domain_part(h)]
         return hostnames
+
+    def _unblock_ceph_ports(self, remote):
+        remote.sh('sudo iptables -F')
+
+    def _unblock_ceph_ports_on_multiple_remotes(self, list_of_remotes):
+        for remote in list_of_remotes:
+            self._unblock_ceph_ports(remote)
+
+    def _wait_for_rack_down_reported(self):
+        cmd = ('set -ex\n'
+               'echo "Waiting till rack will become reported" >/dev/null\n'
+               'until ceph -s | grep ".* rack .* down"\n'
+               'do\n'
+               '    sleep 30\n'
+               'done\n')
+        write_file(self.master_remote, 'wait_for_rack_down_reported.sh', cmd)
+        self.master_remote.sh('timeout 15m bash wait_for_rack_down_reported.sh')
 
     def rack_dc_region_unavailability(self):
         if len(self.storage_nodes) < 4:
@@ -935,6 +960,12 @@ class CrushMap(DeepSea):
         self.master_remote.sh(cmd.format(hosts=rack3_hosts, rack='rack3'))
         self.master_remote.sh(cmd.format(hosts=rack4_hosts, rack='rack4'))
         # bring down rack4
+        rack4_remotes = []
+        for hostname in rack4_hosts:
+            fqdn = hostname + '.teuthology'
+            rack4_remotes += [self.remotes[fqdn]]
+        self._block_ceph_ports_on_multiple_remotes(rack4_remotes)
+        self._wait_for_rack_down_reported()
         self.log.info("End of rack_dc_region_unavailability test")
 
     def begin(self):
