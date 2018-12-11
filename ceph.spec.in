@@ -362,8 +362,6 @@ Requires:      gperftools-libs >= 2.6.1
 %if 0%{?suse_version}
 Recommends:    chrony
 Requires:      gptfdisk
-Provides:      libxio = 1.7
-Obsoletes:     libxio <= 1.7
 %endif
 %description base
 Base is the package that includes all the files shared amongst ceph servers
