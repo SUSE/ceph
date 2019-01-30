@@ -63,7 +63,7 @@ download_boost() {
 
 _python_autoselect() {
   python_command=
-  for interpreter in python2.7 python3 ; do
+  for interpreter in python3 python2.7 ; do
     type $interpreter > /dev/null 2>&1 || continue
     python_command=$interpreter
     break
