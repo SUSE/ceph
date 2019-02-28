@@ -1325,7 +1325,6 @@ fi
 
 %postun base
 /sbin/ldconfig
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph.target
@@ -1333,7 +1332,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1462,7 +1461,6 @@ fi
 %endif
 
 %postun mds
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-mds@\*.service ceph-mds.target
@@ -1470,7 +1468,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-mds@\*.service ceph-mds.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1537,7 +1535,6 @@ fi
 %endif
 
 %postun mgr
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-mgr@\*.service ceph-mgr.target
@@ -1545,7 +1542,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-mgr@\*.service ceph-mgr.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1652,7 +1649,6 @@ fi
 %endif
 
 %postun mon
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-mon@\*.service ceph-mon.target
@@ -1660,7 +1656,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-mon@\*.service ceph-mon.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1711,7 +1707,6 @@ fi
 %endif
 
 %postun -n rbd-mirror
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-rbd-mirror@\*.service ceph-rbd-mirror.target
@@ -1719,7 +1714,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-rbd-mirror@\*.service ceph-rbd-mirror.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1767,7 +1762,6 @@ fi
 %endif
 
 %postun radosgw
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-radosgw@\*.service ceph-radosgw.target
@@ -1775,7 +1769,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-radosgw@\*.service ceph-radosgw.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
@@ -1835,7 +1829,6 @@ fi
 %endif
 
 %postun osd
-test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
 %service_del_postun ceph-osd@\*.service ceph-volume@\*.service ceph-osd.target
@@ -1843,7 +1836,7 @@ DISABLE_RESTART_ON_UPDATE="yes"
 %if 0%{?fedora} || 0%{?rhel}
 %systemd_postun ceph-osd@\*.service ceph-volume@\*.service ceph-osd.target
 %endif
-if [ $FIRST_ARG -ge 1 ] ; then
+if [ $1 -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
   # "yes". In any case: if units are not running, do not touch them.
   SYSCONF_CEPH=%{_sysconfdir}/sysconfig/ceph
