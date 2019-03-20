@@ -446,7 +446,6 @@ Recommends:	ceph-mgr-dashboard = %{_epoch_prefix}%{version}-%{release}
 Recommends:	ceph-mgr-diskprediction-local = %{_epoch_prefix}%{version}-%{release}
 Recommends:	ceph-mgr-diskprediction-cloud = %{_epoch_prefix}%{version}-%{release}
 Recommends:	ceph-mgr-rook = %{_epoch_prefix}%{version}-%{release}
-Recommends:	ceph-mgr-ssh = %{_epoch_prefix}%{version}-%{release}
 %endif
 %if 0%{?rhel} == 7
 Requires:       pyOpenSSL
