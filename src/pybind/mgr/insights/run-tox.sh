@@ -20,7 +20,7 @@ export CEPH_BUILD_DIR=$CEPH_BUILD_DIR
 source ${MGR_INSIGHTS_VIRTUALENV}/bin/activate
 
 if [ "$WITH_PYTHON2" = "ON" ]; then
-  ENV_LIST+="py27"
+  ENV_LIST+="py27,"
 fi
 if [ "$WITH_PYTHON3" = "ON" ]; then
   ENV_LIST+="py3"
