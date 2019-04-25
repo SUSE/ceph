@@ -30,6 +30,10 @@ smaller than 2GB because ceph-volume creates vgs with PE = 1GB.
 # TODO add error handling at every step
 # TODO what happens on disk failures?
 # TODO make sure nothing breaks on filestore/non-LVM bluestore
+# TODO add pvremove after removing the cache? I've seen a case where there was
+#   still a label on a partition. `pvs` listed the partition although there was
+#   no cache.
+# TODO add cache size to `cache info`
 
 
 """
