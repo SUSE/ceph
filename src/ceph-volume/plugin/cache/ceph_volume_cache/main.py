@@ -5,7 +5,7 @@ import os
 import json
 from ceph_volume.api import lvm as api
 from ceph_volume.util import disk
-from ceph_volume import process
+from ceph_volume import process, terminal
 
 """
 The user is responsible for splitting the disk into data and metadata partitions.
@@ -49,7 +49,7 @@ Q: What if you run cache add twice on the same OSD?
 A: This plugin makes sure the origin LV isn't cached by looking at the tag ceph.cache_lv.
 
 Q: What happens after hard reset?
-A: 'ceph-volume cache info' shows that LVs are still cached as expeted.
+A: 'ceph-volume cache info' shows that LVs are still cached as expected.
 
 """
 
@@ -202,11 +202,9 @@ def _create_cache_lvs(vg_name, md_partition, data_partition, osdid):
     data_partition_size = disk.size_from_human_readable(disk.lsblk(data_partition)['SIZE'])
 
     if md_partition_size < disk.Size(gb=2):
-        print('Metadata partition is too small')
-        return
+        raise Exception('Metadata partition is too small')
     if data_partition_size < disk.Size(gb=2):
-        print('Data partition is too small')
-        return
+        raise Exception('Data partition is too small')
 
     # ceph-volume creates volumes with extent size = 1GB
     # when a new lv is created, one extent needs to be used by LVM itself
@@ -267,14 +265,29 @@ def add_lvmcache(vgname, origin_lv, md_partition, cache_data_partition, osdid):
     vg = api.get_vg(vg_name=vgname)
     # TODO don't fail if the LVs are already part of the vg
     api.extend_vg(vg, [md_partition, cache_data_partition])
-    cache_md_lv, cache_data_lv = _create_cache_lvs(
-        vg.name,
-        md_partition,
-        cache_data_partition,
-        osdid
-    )
-    cachelv = _create_lvmcache(vg.name, origin_lv, cache_md_lv,
-        cache_data_lv)
+    try:
+        cache_md_lv, cache_data_lv = _create_cache_lvs(
+            vg.name,
+            md_partition,
+            cache_data_partition,
+            osdid
+        )
+    except Exception as e:
+        terminal.error(e)
+        terminal.error('Reverting changes...')
+        api.reduce_vg(vg, [md_partition, cache_data_partition])
+        return None
+
+    try:
+        cachelv = _create_lvmcache(vg.name, origin_lv, cache_md_lv,
+            cache_data_lv)
+    except Exception as e:
+        terminal.error(e)
+        terminal.error('Reverting changes...')
+        api.remove_lv(vg.name + '/' + cache_md_lv.name)
+        api.remove_lv(vg.name + '/' + cache_data_lv.name)
+        api.reduce_vg(vg, [md_partition, cache_data_partition])
+        return None
 
     return cachelv
 
@@ -303,7 +316,7 @@ def rm_lvmcache(vgname, osd_lv_name):
 
 class Cache(object):
 
-    help_menu = 'Deploy Cache'
+    help_menu = 'Manage LVM cache'
     _help = """
 Manage lvmcache.
 
@@ -463,12 +476,15 @@ $> ceph-volume cache dump
                     print('Can\'t find origin LV ' + args.origin)
                 osdid = origin_lv.tags.get('ceph.osd_id', None)
 
-            add_lvmcache(
-                vg_name,
-                origin_lv,
-                args.cachemetadata,
-                args.cachedata,
-                osdid)
+            try:
+                add_lvmcache(
+                    vg_name,
+                    origin_lv,
+                    args.cachemetadata,
+                    args.cachedata,
+                    osdid)
+            except Exception as e:
+                print(e)
         elif self.argv[0] == 'rm':
             # TODO handle when passing --origin instead of --osdid
             if args.osdid and not args.origin:
