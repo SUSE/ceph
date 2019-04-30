@@ -126,7 +126,8 @@ def get_lvs_caching_stats():
 
 
 def print_cache_stats(osdid=None):
-    # TODO print hit rate
+    # TODO print cache hit rate
+    # TODO fix output for osdid == None. It's ugly.
     osd_id_width = 8
     rows, columns = get_terminal_size()
     column_width = min(int(columns / 4), 18)
