@@ -127,7 +127,6 @@ def get_lvs_caching_stats():
 
 def print_cache_stats(osdid=None):
     # TODO print cache hit rate
-    # TODO fix output for osdid == None. It's ugly.
     osd_id_width = 8
     rows, columns = get_terminal_size()
     column_width = min(int(columns / 4), 18)
@@ -146,6 +145,8 @@ def print_cache_stats(osdid=None):
     # TODO show the table's header again when it disappears
     while True:
         try:
+            if not osdid:
+                print(h)
             for item in get_lvs_caching_stats():
                 # Need to test that lv_tags isn't empty because each OSD has two LVs
                 # that will have cache_mode non-empty, its origin LV and the (new hidden) cache LV
@@ -156,15 +157,14 @@ def print_cache_stats(osdid=None):
                     if not osdid or (osdid and v.tags['ceph.osd_id'] == osdid):
                         s = ''
                         if not osdid:
-                            print(h)
                             s = '{0:>{w}}'.format(v.tags['ceph.osd_id'], w=osd_id_width)
                         s = s + '{0:>{w}}'.format(item['cache_read_hits'], w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_read_misses'], w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_write_hits'], w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_write_misses'], w=column_width)
                         print(s)
-                        if not osdid:
-                            print()
+            if not osdid:
+                print()
             time.sleep(1)
         except KeyboardInterrupt:
             print('Interrupted')
