@@ -126,18 +126,19 @@ def get_lvs_caching_stats():
 
 
 def print_cache_stats(osdid=None):
-    # TODO print cache hit rate
     osd_id_width = 8
     rows, columns = get_terminal_size()
-    column_width = min(int(columns / 4), 18)
+    column_width = min(int(columns / 6), 18)
     h = ''
     if not osdid:
         h = '{0:>{w}}'.format('OSD', w=osd_id_width)
-        column_width = min(int((columns - osd_id_width) / 4), 18)
+        column_width = min(int((columns - osd_id_width) / 6), 18)
     h = h + '{0:>{w}}'.format('Read hits', w=column_width)
     h = h + '{0:>{w}}'.format('Read misses', w=column_width)
+    h = h + '{0:>{w}}'.format('Read hit rate', w=column_width)
     h = h + '{0:>{w}}'.format('Write hits', w=column_width)
     h = h + '{0:>{w}}'.format('Write misses', w=column_width)
+    h = h + '{0:>{w}}'.format('Write hit rate', w=column_width)
     if osdid:
         print(h)
 
@@ -155,13 +156,30 @@ def print_cache_stats(osdid=None):
                 if item['cache_mode'] is not "" and item['lv_tags'] is not "":
                     v = api.Volume(**item)
                     if not osdid or (osdid and v.tags['ceph.osd_id'] == osdid):
+                        rd_hits = int(item['cache_read_hits'])
+                        rd_misses = int(item['cache_read_misses'])
+                        wr_hits = int(item['cache_write_hits'])
+                        wr_misses = int(item['cache_write_misses'])
+
+                        if rd_misses + rd_hits > 0:
+                            rd_hit_rate = str(int(rd_hits / (rd_hits + rd_misses) * 100)) + ' %'
+                        else:
+                            rd_hit_rate = '-'
+
+                        if wr_misses + wr_hits > 0:
+                            wr_hit_rate = str(int(wr_hits / (wr_hits + wr_misses) * 100)) + ' %'
+                        else:
+                            wr_hit_rate = '-'
+
                         s = ''
                         if not osdid:
                             s = '{0:>{w}}'.format(v.tags['ceph.osd_id'], w=osd_id_width)
                         s = s + '{0:>{w}}'.format(item['cache_read_hits'], w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_read_misses'], w=column_width)
+                        s = s + '{0:>{w}}'.format(rd_hit_rate, w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_write_hits'], w=column_width)
                         s = s + '{0:>{w}}'.format(item['cache_write_misses'], w=column_width)
+                        s = s + '{0:>{w}}'.format(wr_hit_rate, w=column_width)
                         print(s)
             if not osdid:
                 print()
