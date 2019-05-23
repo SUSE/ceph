@@ -24,6 +24,7 @@
 %bcond_with zbd
 %bcond_with cmake_verbose_logging
 %bcond_without ceph_test_package
+%bcond_with minimal_debugging_information
 %ifarch s390
 %bcond_with tcmalloc
 %else
@@ -1287,6 +1288,9 @@ done
 
 %if 0%{?suse_version}
 %limit_build -m 3000
+%endif
+%if %{with minimal_debugging_information}
+RPM_OPT_FLAGS="$(echo $RPM_OPT_FLAGS | sed -e 's/^-g /-g1 /g' -e 's/ -g / -g1 /g' -e 's/ -g$/ -g1/g')"
 %endif
 
 export CPPFLAGS="$java_inc"
