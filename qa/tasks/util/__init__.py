@@ -18,7 +18,7 @@ def enumerate_osds(remote, logger):
     logger.info("Enumerating OSDs on {}".format(hostname))
     cmd = ("sudo ceph osd tree -f json | "
            "jq -c '[.nodes[] | select(.name == \"{}\")][0].children'"
-           .format(hostname.rstrip(".teuthology")))
+           .format(hostname.split(".")[0]))
     osds = json.loads(remote.sh(cmd))
     return osds
 
