@@ -850,7 +850,7 @@ Unit test caveats
 .. _`integration testing`:
 .. _`integration tests`:
 
-Testing - integration tests
+Testing - Integration Tests
 ===========================
 
 Ceph has two types of tests: `make check`_ tests and integration tests.
@@ -880,7 +880,7 @@ Teuthology deploys these platforms on machines (bare-metal or
 cloud-provisioned), installs the packages on them, and deploys Ceph
 clusters on them - all as called for by the test.
 
-The nightlies
+The Nightlies
 -------------
 
 A number of integration tests are run on a regular basis in the `Sepia
@@ -894,7 +894,7 @@ test results URL and in the first column of the Pulpito dashboard.  The
 results are also reported on the `ceph-qa mailing list
 <https://ceph.com/irc/>`_ for analysis.
 
-Testing priority
+Testing Priority
 ----------------
 
 The ``teuthology-suite`` command includes an almost mandatory option ``-p <N>``
@@ -913,17 +913,22 @@ the following recommendations should be followed:
 
 * **10 <= Priority < 50:** Use this if your tests are urgent and blocking other important development.
 
-* **50 <= Priority < 75:** Use this if you are testing a particular feature/fix and running fewer than about 25 jobs.
+* **50 <= Priority < 75:** Use this if you are testing a particular feature/fix and running fewer than about 25 jobs. This range can also be used for urgent release testing.
 
 * **75 <= Priority < 100:** Tech Leads will regularly schedule integration tests with this priority to verify pull requests against master.
 
-* **100 <= Priority < 150:** This priority is to be used for release QA.
+* **100 <= Priority < 150:** This priority is to be used for QE validation of point releases.
 
 * **150 <= Priority < 200:** Use this priority for 100 jobs or fewer of a particular feature/fix that you'd like results on in a day or so.
 
 * **200 <= Priority < 1000:** Use this priority for large test runs that can be done over the course of a week.
 
-Suites inventory
+In case you don't know how many jobs would be triggered by
+``teuthology-suite`` command, use ``--dry-run`` to get a count first and then
+issue ``teuthology-suite`` command again, this time without ``--dry-run`` and
+with ``-p`` and an appropriate number as an argument to it.
+
+Suites Inventory
 ----------------
 
 The ``suites`` directory of the `ceph/qa sub-directory`_ contains
@@ -937,13 +942,16 @@ all the integration tests, for all the Ceph components.
   verify the `integration testing`_ infrastructure works as expected)
 
 `fs <https://github.com/ceph/ceph/tree/master/qa/suites/fs>`_
-  test CephFS
+  test CephFS mounted using FUSE
 
 `kcephfs <https://github.com/ceph/ceph/tree/master/qa/suites/kcephfs>`_
-  test the CephFS kernel module
+  test CephFS mounted using kernel
 
 `krbd <https://github.com/ceph/ceph/tree/master/qa/suites/krbd>`_
   test the RBD kernel module
+
+`multimds <https://github.com/ceph/ceph/tree/master/qa/suites/multimds>`_
+  test CephFS with multiple MDSs
 
 `powercycle <https://github.com/ceph/ceph/tree/master/qa/suites/powercycle>`_
   verify the Ceph cluster behaves when machines are powered off

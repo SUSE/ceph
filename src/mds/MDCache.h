@@ -110,6 +110,12 @@ enum {
   l_mdc_last,
 };
 
+// flags for path_traverse();
+static const int MDS_TRAVERSE_DISCOVER		= (1 << 0);
+static const int MDS_TRAVERSE_LAST_XLOCKED	= (1 << 1);
+static const int MDS_TRAVERSE_WANT_DENTRY	= (1 << 2);
+static const int MDS_TRAVERSE_WANT_AUTH		= (1 << 3);
+
 
 // flags for predirty_journal_parents()
 static const int PREDIRTY_PRIMARY = 1; // primary dn, adjust nested accounting
@@ -180,16 +186,12 @@ class MDCache {
   explicit MDCache(MDSRank *m, PurgeQueue &purge_queue_);
   ~MDCache();
 
-  uint64_t cache_limit_inodes(void) {
-    return cache_inode_limit;
-  }
   uint64_t cache_limit_memory(void) {
     return cache_memory_limit;
   }
   double cache_toofull_ratio(void) const {
-    double inode_reserve = cache_inode_limit*(1.0-cache_reservation);
     double memory_reserve = cache_memory_limit*(1.0-cache_reservation);
-    return fmax(0.0, fmax((cache_size()-memory_reserve)/memory_reserve, cache_inode_limit == 0 ? 0.0 : (CInode::count()-inode_reserve)/inode_reserve));
+    return fmax(0.0, (cache_size()-memory_reserve)/memory_reserve);
   }
   bool cache_toofull(void) const {
     return cache_toofull_ratio() > 0.0;
@@ -198,7 +200,7 @@ class MDCache {
     return mempool::get_pool(mempool::mds_co::id).allocated_bytes();
   }
   bool cache_overfull(void) const {
-    return (cache_inode_limit > 0 && CInode::count() > cache_inode_limit*cache_health_threshold) || (cache_size() > cache_memory_limit*cache_health_threshold);
+    return cache_size() > cache_memory_limit*cache_health_threshold;
   }
 
   void advance_stray() {
@@ -759,19 +761,25 @@ class MDCache {
    * @param mdr The MDRequest associated with the path. Can be null.
    * @param cf A MDSContextFactory for waiter building.
    * @param path The path to traverse to.
+   *
+   * @param flags Specifies different lookup behaviors.
+   * By default, path_traverse() forwards the request to the auth MDS if that
+   * is appropriate (ie, if it doesn't know the contents of a directory).
+   * MDS_TRAVERSE_DISCOVER: Instead of forwarding request, path_traverse()
+   * attempts to look up the path from a different MDS (and bring them into
+   * its cache as replicas).
+   * MDS_TRAVERSE_LAST_XLOCKED: path_traverse() will procceed when xlocked tail
+   * dentry is encountered.
+   * MDS_TRAVERSE_WANT_DENTRY: Caller wants tail dentry. Add a null dentry if
+   * tail dentry does not exist. return 0 even tail dentry is null.
+   * MDS_TRAVERSE_WANT_AUTH: Always forward request to auth MDS of target inode
+   * or auth MDS of tail dentry (MDS_TRAVERSE_WANT_DENTRY is set).
+   *
    * @param pdnvec Data return parameter -- on success, contains a
    * vector of dentries. On failure, is either empty or contains the
    * full trace of traversable dentries.
    * @param pin Data return parameter -- if successful, points to the inode
    * associated with filepath. If unsuccessful, is null.
-   * @param onfail Specifies different lookup failure behaviors. If set to
-   * MDS_TRAVERSE_DISCOVERXLOCK, path_traverse will succeed on null
-   * dentries (instead of returning -ENOENT). If set to
-   * MDS_TRAVERSE_FORWARD, it will forward the request to the auth
-   * MDS if that becomes appropriate (ie, if it doesn't know the contents
-   * of a directory). If set to MDS_TRAVERSE_DISCOVER, it
-   * will attempt to look up the path from a different MDS (and bring them
-   * into its cache as replicas).
    *
    * @returns 0 on success, 1 on "not done yet", 2 on "forwarding", -errno otherwise.
    * If it returns 1, the requester associated with this call has been placed
@@ -779,8 +787,9 @@ class MDCache {
    * If it returns 2 the request has been forwarded, and again the requester
    * should unwind itself and back out.
    */
-  int path_traverse(MDRequestRef& mdr, MDSContextFactory& cf, const filepath& path,
-		    vector<CDentry*> *pdnvec, CInode **pin, int onfail);
+  int path_traverse(MDRequestRef& mdr, MDSContextFactory& cf,
+		    const filepath& path, int flags,
+		    vector<CDentry*> *pdnvec, CInode **pin=nullptr);
 
   CInode *cache_traverse(const filepath& path);
 
@@ -1256,7 +1265,6 @@ class MDCache {
   void finish_uncommitted_fragment(dirfrag_t basedirfrag, int op);
   void rollback_uncommitted_fragment(dirfrag_t basedirfrag, frag_vec_t&& old_frags);
 
-  uint64_t cache_inode_limit;
   uint64_t cache_memory_limit;
   double cache_reservation;
   double cache_health_threshold;

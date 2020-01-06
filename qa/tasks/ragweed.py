@@ -10,13 +10,10 @@ import os
 import random
 import string
 
-import util.rgw as rgw_utils
-
 from teuthology import misc as teuthology
 from teuthology import contextutil
 from teuthology.config import config as teuth_config
 from teuthology.orchestra import run
-from teuthology.orchestra.connection import split_user
 
 log = logging.getLogger(__name__)
 
@@ -256,7 +253,8 @@ def run_tests(ctx, config, run_stages):
             'RAGWEED_CONF={tdir}/archive/ragweed.{client}.conf'.format(tdir=testdir, client=client),
             'RAGWEED_STAGES={stages}'.format(stages=stages),
             'BOTO_CONFIG={tdir}/boto.cfg'.format(tdir=testdir),
-            '{tdir}/ragweed/virtualenv/bin/nosetests'.format(tdir=testdir),
+            '{tdir}/ragweed/virtualenv/bin/python'.format(tdir=testdir),
+            '-m', 'nose',
             '-w',
             '{tdir}/ragweed'.format(tdir=testdir),
             '-v',

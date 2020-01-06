@@ -43,10 +43,6 @@ namespace {
 
 template <typename I>
 int disable_mirroring(I *ictx) {
-  if (!ictx->test_features(RBD_FEATURE_JOURNALING)) {
-    return 0;
-  }
-
   cls::rbd::MirrorImage mirror_image;
   int r = cls_client::mirror_image_get(&ictx->md_ctx, ictx->id, &mirror_image);
   if (r == -ENOENT) {
@@ -111,7 +107,8 @@ int enable_mirroring(IoCtx &io_ctx, const std::string &image_id) {
   ContextWQ *op_work_queue;
   ImageCtx::get_thread_pool_instance(cct, &thread_pool, &op_work_queue);
   C_SaferCond ctx;
-  auto req = mirror::EnableRequest<I>::create(io_ctx, image_id, "",
+  auto req = mirror::EnableRequest<I>::create(io_ctx, image_id,
+                                              RBD_MIRROR_IMAGE_MODE_JOURNAL, "",
                                               op_work_queue, &ctx);
   req->send();
   r = ctx.wait();

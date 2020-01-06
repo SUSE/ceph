@@ -391,29 +391,45 @@ bool DaemonServer::handle_open(const ref_t<MMgrOpen>& m)
 				   m->get_connection()->get_peer_type(),
 				   m->daemon_name);
 
-  dout(10) << "from " << m->get_connection() << "  " << key << dendl;
+  auto con = m->get_connection();
+  dout(10) << "from " << key << " " << con->get_peer_addr() << dendl;
 
-  _send_configure(m->get_connection());
+  _send_configure(con);
 
   DaemonStatePtr daemon;
   if (daemon_state.exists(key)) {
+    dout(20) << "updating existing DaemonState for " << key << dendl;
     daemon = daemon_state.get(key);
   }
-  if (m->service_daemon && !daemon) {
-    dout(4) << "constructing new DaemonState for " << key << dendl;
-    daemon = std::make_shared<DaemonState>(daemon_state.types);
-    daemon->key = key;
-    daemon->service_daemon = true;
-    daemon_state.insert(daemon);
+  if (!daemon) {
+    if (m->service_daemon) {
+      dout(4) << "constructing new DaemonState for " << key << dendl;
+      daemon = std::make_shared<DaemonState>(daemon_state.types);
+      daemon->key = key;
+      daemon->service_daemon = true;
+      daemon_state.insert(daemon);
+    } else {
+      /* A normal Ceph daemon has connected but we are or should be waiting on
+       * metadata for it. Close the session so that it tries to reconnect.
+       */
+      dout(2) << "ignoring open from " << key << " " << con->get_peer_addr()
+              << "; not ready for session (expect reconnect)" << dendl;
+      con->mark_down();
+      return true;
+    }
   }
   if (daemon) {
-    dout(20) << "updating existing DaemonState for " << m->daemon_name << dendl;
+    if (m->service_daemon) {
+      // update the metadata through the daemon state index to
+      // ensure it's kept up-to-date
+      daemon_state.update_metadata(daemon, m->daemon_metadata);
+    }
+
     std::lock_guard l(daemon->lock);
     daemon->perf_counters.clear();
 
     daemon->service_daemon = m->service_daemon;
     if (m->service_daemon) {
-      daemon->set_metadata(m->daemon_metadata);
       daemon->service_status = m->daemon_status;
 
       utime_t now = ceph_clock_now();
@@ -443,13 +459,13 @@ bool DaemonServer::handle_open(const ref_t<MMgrOpen>& m)
 	     << " bytes" << dendl;
   }
 
-  if (m->get_connection()->get_peer_type() != entity_name_t::TYPE_CLIENT &&
+  if (con->get_peer_type() != entity_name_t::TYPE_CLIENT &&
       m->service_name.empty())
   {
     // Store in set of the daemon/service connections, i.e. those
     // connections that require an update in the event of stats
     // configuration changes.
-    daemon_connections.insert(m->get_connection());
+    daemon_connections.insert(con);
   }
 
   return true;
@@ -620,6 +636,11 @@ bool DaemonServer::handle_report(const ref_t<MMgrReport>& m)
 
   if (m->get_connection()->peer_is_osd()) {
     osd_perf_metric_collector.process_reports(m->osd_perf_metric_reports);
+  }
+
+  if (m->metric_report_message) {
+    const MetricReportMessage &message = *m->metric_report_message;
+    boost::apply_visitor(HandlePayloadVisitor(this), message.payload);
   }
 
   return true;
@@ -1404,33 +1425,6 @@ bool DaemonServer::_handle_command(
 	    safe_to_destroy.insert(osd);
 	    continue;  // clearly safe to destroy
 	  }
-          set<int64_t> pools;
-          osdmap.get_pool_ids_by_osd(g_ceph_context, osd, &pools);
-          if (pools.empty()) {
-            // osd does not belong to any pools yet
-            safe_to_destroy.insert(osd);
-            continue;
-          }
-          if (osdmap.is_down(osd) && osdmap.is_out(osd)) {
-            // if osd is down&out and all relevant pools are active+clean,
-            // then should be safe to destroy
-            bool all_osd_pools_active_clean = true;
-            for (auto &ps: pg_map.pg_stat) {
-              auto& pg = ps.first;
-              auto state = ps.second.state;
-              if (!pools.count(pg.pool()))
-                continue;
-              if ((state & (PG_STATE_ACTIVE | PG_STATE_CLEAN)) !=
-                           (PG_STATE_ACTIVE | PG_STATE_CLEAN)) {
-                all_osd_pools_active_clean = false;
-                break;
-              }
-            }
-            if (all_osd_pools_active_clean) {
-              safe_to_destroy.insert(osd);
-              continue;
-            }
-          }
 	  auto q = pg_map.num_pg_by_osd.find(osd);
 	  if (q != pg_map.num_pg_by_osd.end()) {
 	    if (q->second.acting > 0 || q->second.up_not_acting > 0) {
@@ -1577,7 +1571,9 @@ bool DaemonServer::_handle_command(
 		found = true;
 		continue;
 	      }
-	      pg_acting.insert(anm.osd);
+	      if (anm.osd != CRUSH_ITEM_NONE) {
+		pg_acting.insert(anm.osd);
+	      }
 	    }
 	  } else {
 	    for (auto& a : q.second.acting) {
@@ -1585,7 +1581,9 @@ bool DaemonServer::_handle_command(
 		found = true;
 		continue;
 	      }
-	      pg_acting.insert(a);
+	      if (a != CRUSH_ITEM_NONE) {
+		pg_acting.insert(a);
+	      }
 	    }
 	  }
 	  if (!found) {
@@ -2741,7 +2739,10 @@ void DaemonServer::got_service_map()
     });
 
   // cull missing daemons, populate new ones
+  std::set<std::string> types;
   for (auto& [type, service] : pending_service_map.services) {
+    types.insert(type);
+
     std::set<std::string> names;
     for (auto& q : service.daemons) {
       names.insert(q.first);
@@ -2757,6 +2758,7 @@ void DaemonServer::got_service_map()
     }
     daemon_state.cull(type, names);
   }
+  daemon_state.cull_services(types);
 }
 
 void DaemonServer::got_mgr_map()
@@ -2837,20 +2839,20 @@ void DaemonServer::_send_configure(ConnectionRef c)
   c->send_message2(configure);
 }
 
-OSDPerfMetricQueryID DaemonServer::add_osd_perf_query(
+MetricQueryID DaemonServer::add_osd_perf_query(
     const OSDPerfMetricQuery &query,
     const std::optional<OSDPerfMetricLimit> &limit)
 {
   return osd_perf_metric_collector.add_query(query, limit);
 }
 
-int DaemonServer::remove_osd_perf_query(OSDPerfMetricQueryID query_id)
+int DaemonServer::remove_osd_perf_query(MetricQueryID query_id)
 {
   return osd_perf_metric_collector.remove_query(query_id);
 }
 
 int DaemonServer::get_osd_perf_counters(
-    OSDPerfMetricQueryID query_id,
+    MetricQueryID query_id,
     std::map<OSDPerfMetricKey, PerformanceCounters> *counters)
 {
   return osd_perf_metric_collector.get_counters(query_id, counters);

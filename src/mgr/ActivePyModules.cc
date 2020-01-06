@@ -183,7 +183,7 @@ PyObject *ActivePyModules::get_python(const std::string &what)
       osd_map.crush->encode(rdata, CEPH_FEATURES_SUPPORTED_DEFAULT);
     });
     std::string crush_text = rdata.to_str();
-    return PyString_FromString(crush_text.c_str());
+    return PyUnicode_FromString(crush_text.c_str());
   } else if (what.substr(0, 7) == "osd_map") {
     cluster_state.with_osdmap([&f, &what, &tstate](const OSDMap &osd_map){
       PyEval_RestoreThread(tstate);
@@ -953,7 +953,7 @@ void ActivePyModules::get_health_checks(health_check_map_t *checks)
 {
   std::lock_guard l(lock);
   for (auto& [name, module] : modules) {
-    dout(15) << "getting health checks for" << name << dendl;
+    dout(15) << "getting health checks for " << name << dendl;
     module->get_health_checks(checks);
   }
 }
@@ -1011,14 +1011,14 @@ void ActivePyModules::set_uri(const std::string& module_name,
   modules.at(module_name)->set_uri(uri);
 }
 
-OSDPerfMetricQueryID ActivePyModules::add_osd_perf_query(
+MetricQueryID ActivePyModules::add_osd_perf_query(
     const OSDPerfMetricQuery &query,
     const std::optional<OSDPerfMetricLimit> &limit)
 {
   return server.add_osd_perf_query(query, limit);
 }
 
-void ActivePyModules::remove_osd_perf_query(OSDPerfMetricQueryID query_id)
+void ActivePyModules::remove_osd_perf_query(MetricQueryID query_id)
 {
   int r = server.remove_osd_perf_query(query_id);
   if (r < 0) {
@@ -1027,7 +1027,7 @@ void ActivePyModules::remove_osd_perf_query(OSDPerfMetricQueryID query_id)
   }
 }
 
-PyObject *ActivePyModules::get_osd_perf_counters(OSDPerfMetricQueryID query_id)
+PyObject *ActivePyModules::get_osd_perf_counters(MetricQueryID query_id)
 {
   std::map<OSDPerfMetricKey, PerformanceCounters> counters;
 
@@ -1079,4 +1079,26 @@ void ActivePyModules::cluster_log(const std::string &channel, clog_type prio,
   } else {
     clog->do_log(prio, message);
   }
+}
+
+void ActivePyModules::register_client(std::string_view name, std::string addrs)
+{
+  std::lock_guard l(lock);
+
+  entity_addrvec_t addrv;
+  addrv.parse(addrs.data());
+
+  dout(7) << "registering msgr client handle " << addrv << dendl;
+  py_module_registry.register_client(name, std::move(addrv));
+}
+
+void ActivePyModules::unregister_client(std::string_view name, std::string addrs)
+{
+  std::lock_guard l(lock);
+
+  entity_addrvec_t addrv;
+  addrv.parse(addrs.data());
+
+  dout(7) << "unregistering msgr client handle " << addrv << dendl;
+  py_module_registry.unregister_client(name, addrv);
 }

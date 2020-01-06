@@ -218,42 +218,9 @@ if(WITH_CEPHFS_JAVA)
 endif()
 
 # Python stuff
-option(WITH_PYTHON2 "build python2 bindings" ON)
+option(WITH_PYTHON2 "build python2 bindings" OFF)
 if(WITH_PYTHON2)
-  find_package(Python2 REQUIRED
-    COMPONENTS Interpreter Development)
-endif()
-
-set(WITH_PYTHON3 "OFF" CACHE STRING "build python3 bindings with specified python3 version")
-if(WITH_PYTHON3)
-  if(WITH_PYTHON3 MATCHES "^(1|ON|YES|TRUE|Y)$")
-    set(WITH_PYTHON3 "3")
-  endif()
-  if(NOT WITH_PYTHON3 STREQUAL "3")
-    set(find_python3_exact "EXACT")
-  endif()
-  find_package(Python3 ${WITH_PYTHON3} ${find_python3_exact} REQUIRED
-    COMPONENTS Interpreter Development)
-  unset(find_python3_exact)
-endif()
-
-# the major version of the python bindings as a dependency of other
-# targets
-if(WITH_PYTHON2)
-  set(PY_BINDING_INFIX 2)
-else()
-  set(PY_BINDING_INFIX 3)
-endif()
-# use python2 by default for python bindings, tools and tests, before
-# switching to python3
-# Python_EXECUTABLE` can be set by `find_package(Python ...)` also. and we do
-# call `find_package(Python ...)` in `ceph/CMakeLists.txt`. but we do so before
-# `add_subdirectory(src)` where `Python_EXECUTABLE` is set. so it's safe to
-# use this variable name and call `find_package(Python ...)`.
-if(WITH_PYTHON2)
-  set(Python_EXECUTABLE ${Python2_EXECUTABLE})
-else()
-  set(Python_EXECUTABLE ${Python3_EXECUTABLE})
+  message(FATAL_ERROR "Python 2 is not supported anymore")
 endif()
 
 # sort out which allocator to use
@@ -349,6 +316,8 @@ set(libcommon_files
   osd/osd_types.cc
   osd/PGPeeringEvent.cc
   osd/OpRequest.cc
+  osd/ClassHandler.cc
+  osd/osd_op_util.cc
   osdc/Striper.cc
   osdc/Objecter.cc
   librbd/Features.cc
@@ -385,6 +354,7 @@ set(ceph_common_deps
   Boost::date_time
   Boost::iostreams
   StdFilesystem::filesystem
+  fmt::fmt
   ${BLKID_LIBRARIES}
   ${Backtrace_LIBRARIES}
   ${BLKIN_LIBRARIES}
@@ -416,9 +386,14 @@ if(WITH_DPDK)
   list(APPEND ceph_common_deps common_async_dpdk)
 endif()
 
-if(WITH_BLUESTORE_PMEM)
+if(WITH_BLUESTORE_PMEM OR WITH_RBD_RWL)
   if(WITH_SYSTEM_PMDK)
-    find_package(pmem REQUIRED)
+    if(WITH_BLUESTORE_PMEM)
+      find_package(pmem REQUIRED COMPONENTS pmem)
+    endif()
+    if(WITH_RBD_RWL)
+      find_package(pmem REQUIRED COMPONENTS pmemobj)
+    endif()
   else()
     include(Buildpmem)
     build_pmem()
@@ -501,7 +476,7 @@ endif()
 add_subdirectory(pybind)
 add_subdirectory(ceph-volume)
 add_subdirectory(python-common)
-add_subdirectory(ceph-daemon)
+add_subdirectory(cephadm)
 
 # Monitor
 add_subdirectory(mon)
@@ -780,17 +755,17 @@ add_custom_target(vstart-base DEPENDS
     monmaptool
     crushtool
     rados
-    cython${PY_BINDING_INFIX}_rados)
+    cython_rados)
 if (WITH_MGR)
   add_dependencies(vstart-base ceph-mgr)
 endif()
 
 add_custom_target(vstart DEPENDS vstart-base)
-if (WITH_RBD)
-  add_dependencies(vstart cython${PY_BINDING_INFIX}_rbd)
+if(WITH_RBD)
+  add_dependencies(vstart cython_rbd)
 endif()
 if (WITH_CEPHFS)
-  add_dependencies(vstart ceph-mds cephfs cython${PY_BINDING_INFIX}_cephfs)
+  add_dependencies(vstart ceph-mds cephfs cython_cephfs)
 endif()
 if(WITH_RADOSGW)
   add_dependencies(vstart radosgw radosgw-admin)
@@ -812,7 +787,7 @@ endif()
 add_custom_target(cephfs_testing DEPENDS
     vstart
     rados
-    cython${PY_BINDING_INFIX}_modules
+    cython_modules
     cephfs
     cls_cephfs
     ceph-fuse

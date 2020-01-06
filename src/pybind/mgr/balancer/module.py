@@ -67,7 +67,7 @@ class Plan:
                             'plan %s final' % self.name)
 
     def dump(self):
-        return json.dumps(self.inc.dump(), indent=4)
+        return json.dumps(self.inc.dump(), indent=4, sort_keys=True)
 
     def show(self):
         ls = []
@@ -303,12 +303,11 @@ class Module(MgrModule):
         },
         {
             'name': 'upmap_max_deviation',
-            'type': 'float',
-            'default': .01,
-            'min': 0,
-            'max': 1,
+            'type': 'int',
+            'default': 1,
+            'min': 1,
             'desc': 'deviation below which no optimization is attempted',
-            'long_desc': 'If the ratio between the fullest and least-full OSD is below this value then we stop trying to optimize placement.',
+            'long_desc': 'If the number of PGs are within this count then no optimization is attempted',
             'runtime': True,
         },
         {
@@ -430,7 +429,7 @@ class Module(MgrModule):
                 'optimize_result': self.optimize_result,
                 'mode': self.get_module_option('mode'),
             }
-            return (0, json.dumps(s, indent=4), '')
+            return (0, json.dumps(s, indent=4, sort_keys=True), '')
         elif command['prefix'] == 'balancer mode':
             if command['mode'] == 'upmap':
                 min_compat_client = self.get_osdmap().dump().get('require_min_compat_client', '')
@@ -477,7 +476,7 @@ class Module(MgrModule):
                     should_prune = True
             if should_prune: # some pools were gone, prune
                 self.set_module_option('pool_ids', ','.join(final_ids))
-            return (0, json.dumps(final_names, indent=4), '')
+            return (0, json.dumps(final_names, indent=4, sort_keys=True), '')
         elif command['prefix'] == 'balancer pool add':
             raw_names = command['pools']
             pool_id_by_name = dict((p['pool_name'], p['pool']) for p in self.get_osdmap().dump().get('pools', []))
@@ -566,7 +565,7 @@ class Module(MgrModule):
             self.plans = {}
             return (0, '', '')
         elif command['prefix'] == 'balancer ls':
-            return (0, json.dumps([p for p in self.plans], indent=4), '')
+            return (0, json.dumps([p for p in self.plans], indent=4, sort_keys=True), '')
         elif command['prefix'] == 'balancer dump':
             plan = self.plans.get(command['plan'])
             if not plan:
@@ -955,7 +954,7 @@ class Module(MgrModule):
         inc = plan.inc
         total_did = 0
         left = max_optimizations
-        osdmap_dump = self.get_osdmap().dump()
+        osdmap_dump = ms.osdmap_dump
         pools_with_pg_merge = [p['pool_name'] for p in osdmap_dump.get('pools', [])
                                if p['pg_num'] > p['pg_num_target']]
         crush_rule_by_pool_name = dict((p['pool_name'], p['crush_rule']) for p in osdmap_dump.get('pools', []))
@@ -985,7 +984,7 @@ class Module(MgrModule):
             # since scrubbing activities have significant impacts on performance
             pool_ids = list(p['pool'] for p in pool_dump if p['pool_name'] in it)
             num_pg_active_clean = 0
-            pg_dump = self.get('pg_dump')
+            pg_dump = ms.pg_dump
             for p in pg_dump['pg_stats']:
                 pg_pool = p['pgid'].split('.')[0]
                 if len(pool_ids) and int(pg_pool) not in pool_ids:
@@ -1000,7 +999,7 @@ class Module(MgrModule):
         self.log.info('prepared %d changes in total' % total_did)
         if total_did == 0:
             return -errno.EALREADY, 'Unable to find further optimization, ' \
-                                    'or pool(s)\' pg_num is decreasing, ' \
+                                    'or pool(s) pg_num is decreasing, ' \
                                     'or distribution is already perfect'
         return 0, ''
 

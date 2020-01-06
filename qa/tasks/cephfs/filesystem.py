@@ -173,6 +173,12 @@ class CephCluster(object):
         self._ctx = ctx
         self.mon_manager = ceph_manager.CephManager(self.admin_remote, ctx=ctx, logger=log.getChild('ceph_manager'))
 
+    def set_config_opt(self, section, opt, val):
+        self.mon_manager.raw_cluster_cmd('config', 'set', section, opt, val)
+
+    def rm_config_opt(self, section, opt):
+        self.mon_manager.raw_cluster_cmd('config', 'rm', section)
+
     def get_config(self, key, service_type=None):
         """
         Get config from mon by default, or a specific service if caller asks for it
@@ -1185,7 +1191,7 @@ class Filesystem(MDSCluster):
     def dirfrag_exists(self, ino, frag):
         try:
             self.rados(["stat", "{0:x}.{1:08x}".format(ino, frag)])
-        except CommandFailedError as e:
+        except CommandFailedError:
             return False
         else:
             return True

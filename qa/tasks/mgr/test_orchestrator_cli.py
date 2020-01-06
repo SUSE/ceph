@@ -1,7 +1,7 @@
 import errno
 import json
 import logging
-from tempfile import NamedTemporaryFile
+from time import sleep
 
 from teuthology.exceptions import CommandFailedError
 
@@ -124,7 +124,7 @@ class TestOrchestratorCli(MgrTestCase):
         self._orch_cmd("mds", "add", "service_name")
 
     def test_rgw_add(self):
-        self._orch_cmd("rgw", "add", "service_name")
+        self._orch_cmd("rgw", "add", "myrealm", "myzone")
 
     def test_nfs_add(self):
         self._orch_cmd("nfs", "add", "service_name", "pool", "--namespace", "ns")
@@ -137,14 +137,16 @@ class TestOrchestratorCli(MgrTestCase):
         self._orch_cmd("mds", "rm", "foo")
 
     def test_rgw_rm(self):
-        self._orch_cmd("rgw", "rm", "foo")
+        self._orch_cmd("rgw", "rm", "myrealm", "myzone")
 
     def test_nfs_rm(self):
         self._orch_cmd("nfs", "rm", "service_name")
 
     def test_host_ls(self):
-        out = self._orch_cmd("host", "ls")
-        self.assertEqual(out, "localhost\n")
+        out = self._orch_cmd("host", "ls", "--format=json")
+        hosts = json.loads(out)
+        self.assertEqual(len(hosts), 1)
+        self.assertEqual(hosts[0]["host"], "localhost")
 
     def test_host_add(self):
         self._orch_cmd("host", "add", "hostname")
@@ -154,8 +156,8 @@ class TestOrchestratorCli(MgrTestCase):
 
     def test_mon_update(self):
         self._orch_cmd("mon", "update", "3")
-        self._orch_cmd("mon", "update", "3", "host1", "host2", "host3")
-        self._orch_cmd("mon", "update", "3", "host1:network", "host2:network", "host3:network")
+        self._orch_cmd("mon", "update", "3", "host1:1.2.3.0/24", "host2:1.2.3.0/24", "host3:10.0.0.0/8")
+        self._orch_cmd("mon", "update", "3", "host1:1.2.3.4", "host2:1.2.3.4", "host3:10.0.0.1")
 
     def test_mgr_update(self):
         self._orch_cmd("mgr", "update", "3")
@@ -180,6 +182,7 @@ class TestOrchestratorCli(MgrTestCase):
         evs = json.loads(self._progress_cmd('json'))['completed']
         self.assertEqual(len(evs), 0)
         self._orch_cmd("mgr", "update", "4")
+        sleep(6)  # There is a sleep(5) in the test_orchestrator.module.serve()
         evs = json.loads(self._progress_cmd('json'))['completed']
         self.assertEqual(len(evs), 1)
         self.assertIn('update_mgrs', evs[0]['message'])

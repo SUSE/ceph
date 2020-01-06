@@ -1849,8 +1849,8 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     return;
   }
 
-  if (op->rmw_flags == 0) {
-    int r = osd->osd->init_op_flags(op);
+  {
+    int r = op->maybe_init_op_info(*get_osdmap());
     if (r) {
       osd->reply_op_error(op, r);
       return;
@@ -2584,11 +2584,10 @@ int PrimaryLogPG::do_manifest_flush(OpRequestRef op, ObjectContextRef obc, Flush
     fin->last_offset = last_offset;
     manifest_fop->chunks++;
 
-    unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
     tid = osd->objecter->mutate(
       tgt_soid.oid, oloc, obj_op, snapc,
       ceph::real_clock::from_ceph_timespec(obc->obs.oi.mtime),
-      flags, new C_OnFinisher(fin, osd->objecter_finishers[n]));
+      flags, new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard())));
     fin->tid = tid;
     manifest_fop->io_tids[iter->first] = tid;
 
@@ -3071,11 +3070,10 @@ void PrimaryLogPG::do_proxy_read(OpRequestRef op, ObjectContextRef obc)
 
   C_ProxyRead *fin = new C_ProxyRead(this, soid, get_last_peering_reset(),
 				     prdop);
-  unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
   ceph_tid_t tid = osd->objecter->read(
     soid.oid, oloc, obj_op,
     m->get_snapid(), NULL,
-    flags, new C_OnFinisher(fin, osd->objecter_finishers[n]),
+    flags, new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard())),
     &prdop->user_version,
     &prdop->data_offset,
     m->get_features());
@@ -3268,11 +3266,10 @@ void PrimaryLogPG::do_proxy_write(OpRequestRef op, ObjectContextRef obc)
 
   C_ProxyWrite_Commit *fin = new C_ProxyWrite_Commit(
       this, soid, get_last_peering_reset(), pwop);
-  unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
   ceph_tid_t tid = osd->objecter->mutate(
     soid.oid, oloc, obj_op, snapc,
     ceph::real_clock::from_ceph_timespec(pwop->mtime),
-    flags, new C_OnFinisher(fin, osd->objecter_finishers[n]),
+    flags, new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard())),
     &pwop->user_version, pwop->reqid);
   fin->tid = tid;
   pwop->objecter_tid = tid;
@@ -3447,10 +3444,9 @@ void PrimaryLogPG::refcount_manifest(ObjectContextRef obc, object_locator_t oloc
   
   Context *c = nullptr;
   if (cb) {
-    unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
     C_SetManifestRefCountDone *fin =
       new C_SetManifestRefCountDone(cb, obc->obs.oi.soid);
-    c = new C_OnFinisher(fin, osd->objecter_finishers[n]);
+    c = new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard()));
   }
 
   auto tid = osd->objecter->mutate(
@@ -3518,11 +3514,10 @@ void PrimaryLogPG::do_proxy_chunked_read(OpRequestRef op, ObjectContextRef obc, 
   fin->obc = obc;
   fin->req_total_len = req_total_len;
 
-  unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
   ceph_tid_t tid = osd->objecter->read(
     soid.oid, oloc, obj_op,
     m->get_snapid(), NULL,
-    flags, new C_OnFinisher(fin, osd->objecter_finishers[n]),
+    flags, new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard())),
     &prdop->user_version,
     &prdop->data_offset,
     m->get_features());
@@ -5900,7 +5895,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       result = 0;
       {
 	tracepoint(osd, do_osd_op_pre_try_flush, soid.oid.name.c_str(), soid.snap.val);
-	if (ctx->lock_type != ObjectContext::RWState::RWNONE) {
+	if (ctx->lock_type != RWState::RWNONE) {
 	  dout(10) << "cache-try-flush without SKIPRWLOCKS flag set" << dendl;
 	  result = -EINVAL;
 	  break;
@@ -5933,7 +5928,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
       result = 0;
       {
 	tracepoint(osd, do_osd_op_pre_cache_flush, soid.oid.name.c_str(), soid.snap.val);
-	if (ctx->lock_type == ObjectContext::RWState::RWNONE) {
+	if (ctx->lock_type == RWState::RWNONE) {
 	  dout(10) << "cache-flush with SKIPRWLOCKS flag set" << dendl;
 	  result = -EINVAL;
 	  break;
@@ -9022,9 +9017,8 @@ void PrimaryLogPG::_copy_some(ObjectContextRef obc, CopyOpRef cop)
 
   C_Copyfrom *fin = new C_Copyfrom(this, obc->obs.oi.soid,
 				   get_last_peering_reset(), cop);
-  unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
   gather.set_finisher(new C_OnFinisher(fin,
-				       osd->objecter_finishers[n]));
+				       osd->get_objecter_finisher(get_pg_shard())));
 
   ceph_tid_t tid = osd->objecter->read(cop->src.oid, cop->oloc, op,
 				  cop->src.snap, NULL,
@@ -9111,14 +9105,14 @@ void PrimaryLogPG::_copy_some_manifest(ObjectContextRef obc, CopyOpRef cop, uint
     C_CopyChunk *fin = new C_CopyChunk(this, obc->obs.oi.soid,
 				     get_last_peering_reset(), cop);
     fin->offset = obj_offset;
-    unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
 
-    ceph_tid_t tid = osd->objecter->read(soid.oid, oloc, op,
-				    sub_cop->src.snap, NULL,
-				    flags,
-				    new C_OnFinisher(fin, osd->objecter_finishers[n]),
-				    // discover the object version if we don't know it yet
-				    sub_cop->results.user_version ? NULL : &sub_cop->results.user_version);
+    ceph_tid_t tid = osd->objecter->read(
+      soid.oid, oloc, op,
+      sub_cop->src.snap, NULL,
+      flags,
+      new C_OnFinisher(fin, osd->get_objecter_finisher(get_pg_shard())),
+      // discover the object version if we don't know it yet
+      sub_cop->results.user_version ? NULL : &sub_cop->results.user_version);
     fin->tid = tid;
     sub_cop->objecter_tid = tid;
     if (last_offset < iter->first) {
@@ -10139,13 +10133,12 @@ int PrimaryLogPG::start_flush(
   }
   C_Flush *fin = new C_Flush(this, soid, get_last_peering_reset());
 
-  unsigned n = info.pgid.hash_to_shard(osd->m_objecter_finishers);
   ceph_tid_t tid = osd->objecter->mutate(
     soid.oid, base_oloc, o, snapc,
     ceph::real_clock::from_ceph_timespec(oi.mtime),
     CEPH_OSD_FLAG_IGNORE_OVERLAY | CEPH_OSD_FLAG_ENFORCE_SNAPC,
     new C_OnFinisher(fin,
-		     osd->objecter_finishers[n]));
+		     osd->get_objecter_finisher(get_pg_shard())));
   /* we're under the pg lock and fin->finish() is grabbing that */
   fin->tid = tid;
   fop->objecter_tid = tid;
@@ -10276,7 +10269,7 @@ int PrimaryLogPG::try_flush_mark_clean(FlushOpRef fop)
   // try to take the lock manually, since we don't
   // have a ctx yet.
   if (ctx->lock_manager.get_lock_type(
-	ObjectContext::RWState::RWWRITE,
+	RWState::RWWRITE,
 	oid,
 	obc,
 	fop->op)) {
@@ -10287,7 +10280,7 @@ int PrimaryLogPG::try_flush_mark_clean(FlushOpRef fop)
     // fop->op is now waiting on the lock; get fop->dup_ops to wait too.
     for (auto op : fop->dup_ops) {
       bool locked = ctx->lock_manager.get_lock_type(
-	ObjectContext::RWState::RWWRITE,
+	RWState::RWWRITE,
 	oid,
 	obc,
 	op);
@@ -14233,7 +14226,7 @@ bool PrimaryLogPG::agent_maybe_evict(ObjectContextRef& obc, bool after_flush)
 
   auto null_op_req = OpRequestRef();
   if (!ctx->lock_manager.get_lock_type(
-	ObjectContext::RWState::RWWRITE,
+	RWState::RWWRITE,
 	obc->obs.oi.soid,
 	obc,
 	null_op_req)) {

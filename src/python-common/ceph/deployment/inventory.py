@@ -3,6 +3,8 @@ try:
 except ImportError:
     pass  # for type checking
 
+import json
+
 
 class Devices(object):
     """
@@ -64,6 +66,8 @@ class Device(object):
     @classmethod
     def from_json(cls, input):
         # type: (Dict[str, Any]) -> Device
+        if not isinstance(input, dict):
+            raise ValueError('Device: Expected dict. Got `{}...`'.format(json.dumps(input)[:10]))
         ret = cls(
             **{
                 key: input.get(key, None)
@@ -78,4 +82,4 @@ class Device(object):
         # type: () -> str
         if self.sys_api is None or 'rotational' not in self.sys_api:
             return "unknown"
-        return 'hdd' if self.sys_api["rotational"] == "1" else 'ssd/nvme'
+        return 'hdd' if self.sys_api["rotational"] == "1" else 'ssd'

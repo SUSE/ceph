@@ -130,6 +130,7 @@ cdef extern from "cephfs/libcephfs.h" nogil:
     int ceph_init(ceph_mount_info *cmount)
     void ceph_shutdown(ceph_mount_info *cmount)
 
+    int ceph_getaddrs(ceph_mount_info* cmount, char** addrs)
     int ceph_conf_read_file(ceph_mount_info *cmount, const char *path_list)
     int ceph_conf_parse_argv(ceph_mount_info *cmount, int argc, const char **argv)
     int ceph_conf_get(ceph_mount_info *cmount, const char *option, char *buf, size_t len)
@@ -503,6 +504,27 @@ cdef class LibCephFS(object):
             for key, value in conf.iteritems():
                 self.conf_set(key, value)
 
+    def get_addrs(self):
+        """
+        Get associated client addresses with this RADOS session.
+        """
+        self.require_state("mounted")
+
+        cdef:
+            char* addrs = NULL
+
+        try:
+
+            with nogil:
+                ret = ceph_getaddrs(self.cluster, &addrs)
+            if ret:
+                raise make_ex(ret, "error calling getaddrs")
+
+            return decode_cstr(addrs)
+        finally:
+            free(addrs)
+
+
     def conf_read_file(self, conffile=None):
         """
         Load the ceph configuration from the specified config file.
@@ -865,7 +887,7 @@ cdef class LibCephFS(object):
         if ret < 0:
             raise make_ex(ret, "error in chmod {}".format(path.decode('utf-8')))
 
-    def chown(self, path, int uid, int gid):
+    def chown(self, path, uid, gid):
         """
         Change directory ownership
         :param path: the path of the directory to change.

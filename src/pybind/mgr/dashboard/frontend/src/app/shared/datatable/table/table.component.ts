@@ -53,6 +53,8 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   executingTpl: TemplateRef<any>;
   @ViewChild('classAddingTpl', { static: true })
   classAddingTpl: TemplateRef<any>;
+  @ViewChild('badgeTpl', { static: true })
+  badgeTpl: TemplateRef<any>;
 
   // This is the array with the items to be shown.
   @Input()
@@ -66,9 +68,15 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   // Method used for setting column widths.
   @Input()
   columnMode? = 'flex';
+  // Display only actions in header (make sure to disable toolHeader) and use ".only-table-actions"
+  @Input()
+  onlyActionHeader? = false;
   // Display the tool header, including reload button, pagination and search fields?
   @Input()
   toolHeader? = true;
+  // Display search field inside tool header?
+  @Input()
+  searchField? = true;
   // Display the table header?
   @Input()
   header? = true;
@@ -367,6 +375,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     this.cellTemplates.perSecond = this.perSecondTpl;
     this.cellTemplates.executing = this.executingTpl;
     this.cellTemplates.classAdding = this.classAddingTpl;
+    this.cellTemplates.badge = this.badgeTpl;
   }
 
   useCustomClass(value: any): string {
@@ -473,11 +482,11 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
       return;
     }
     this.selection.selected = newSelected;
-    this.onSelect();
+    this.onSelect(this.selection);
   }
 
-  onSelect() {
-    this.selection.update();
+  onSelect($event) {
+    this.selection.selected = $event['selected'];
     this.updateSelection.emit(_.clone(this.selection));
   }
 

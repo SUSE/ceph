@@ -75,6 +75,9 @@
 /* Defined if you have libaio */
 #cmakedefine HAVE_LIBAIO
 
+/* Defined if you have liburing */
+#cmakedefine HAVE_LIBURING
+
 /* Defind if you have POSIX AIO */
 #cmakedefine HAVE_POSIXAIO
 
@@ -335,5 +338,8 @@
 
 /* Define if unit tests are built. */
 #cmakedefine UNIT_TESTS_BUILT
+
+/* Define if RWL is enabled */
+#cmakedefine WITH_RBD_RWL
 
 #endif /* CONFIG_H */

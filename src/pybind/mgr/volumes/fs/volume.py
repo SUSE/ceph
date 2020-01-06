@@ -82,11 +82,14 @@ class ConnectionPool(object):
             log.debug("CephFS mounting...")
             self.fs.mount(filesystem_name=self.fs_name.encode('utf-8'))
             log.debug("Connection to cephfs '{0}' complete".format(self.fs_name))
+            self.mgr._ceph_register_client(self.fs.get_addrs())
 
         def disconnect(self):
             assert self.ops_in_progress == 0
             log.info("disconnecting from cephfs '{0}'".format(self.fs_name))
+            addrs = self.fs.get_addrs()
             self.fs.shutdown()
+            self.mgr._ceph_unregister_client(addrs)
             self.fs = None
 
         def abort(self):
@@ -100,10 +103,14 @@ class ConnectionPool(object):
         recurring timer variant of Timer
         """
         def run(self):
-            while not self.finished.is_set():
-                self.finished.wait(self.interval)
-                self.function(*self.args, **self.kwargs)
-            self.finished.set()
+            try:
+                while not self.finished.is_set():
+                    self.finished.wait(self.interval)
+                    self.function(*self.args, **self.kwargs)
+                self.finished.set()
+            except Exception as e:
+                log.error("ConnectionPool.RTimer: %s", e)
+                raise
 
     # TODO: make this configurable
     TIMER_TASK_RUN_INTERVAL = 30.0  # seconds
@@ -121,7 +128,7 @@ class ConnectionPool(object):
     def cleanup_connections(self):
         with self.lock:
             log.info("scanning for idle connections..")
-            idle_fs = [fs_name for fs_name,conn in self.connections.iteritems()
+            idle_fs = [fs_name for fs_name,conn in self.connections.items()
                        if conn.is_connection_idle(ConnectionPool.CONNECTION_IDLE_INTERVAL)]
             for fs_name in idle_fs:
                 log.info("cleaning up connection for '{}'".format(fs_name))
@@ -257,13 +264,7 @@ class VolumeClient(object):
                    'data': data_pool}
         return self.mgr.mon_command(command)
 
-    def remove_filesystem(self, fs_name, confirm):
-        if confirm != "--yes-i-really-mean-it":
-            return -errno.EPERM, "", "WARNING: this will *PERMANENTLY DESTROY* all data " \
-                "stored in the filesystem '{0}'. If you are *ABSOLUTELY CERTAIN* " \
-                "that is what you want, re-issue the command followed by " \
-                "--yes-i-really-mean-it.".format(fs_name)
-
+    def remove_filesystem(self, fs_name):
         command = {'prefix': 'fs fail', 'fs_name': fs_name}
         r, outb, outs = self.mgr.mon_command(command)
         if r != 0:
@@ -319,6 +320,12 @@ class VolumeClient(object):
         if self.stopping.isSet():
             return -errno.ESHUTDOWN, "", "shutdown in progress"
 
+        if confirm != "--yes-i-really-mean-it":
+            return -errno.EPERM, "", "WARNING: this will *PERMANENTLY DESTROY* all data " \
+                "stored in the filesystem '{0}'. If you are *ABSOLUTELY CERTAIN* " \
+                "that is what you want, re-issue the command followed by " \
+                "--yes-i-really-mean-it.".format(volname)
+
         self.purge_queue.cancel_purge_job(volname)
         self.connection_pool.del_fs_handle(volname, wait=True)
         # Tear down MDS daemons
@@ -337,7 +344,7 @@ class VolumeClient(object):
         # In case orchestrator didn't tear down MDS daemons cleanly, or
         # there was no orchestrator, we force the daemons down.
         if self.volume_exists(volname):
-            r, outb, outs = self.remove_filesystem(volname, confirm)
+            r, outb, outs = self.remove_filesystem(volname)
             if r != 0:
                 return r, outb, outs
         else:
@@ -358,7 +365,7 @@ class VolumeClient(object):
         fs_map = self.mgr.get("fs_map")
         for f in fs_map['filesystems']:
             result.append({'name': f['mdsmap']['fs_name']})
-        return 0, json.dumps(result, indent=2), ""
+        return 0, json.dumps(result, indent=4, sort_keys=True), ""
 
     def group_exists(self, sv, spec):
         # default group need not be explicitly created (as it gets created
@@ -414,7 +421,7 @@ class VolumeClient(object):
         namedict = []
         for i in range(len(names)):
             namedict.append({'name': names[i].decode('utf-8')})
-        return json.dumps(namedict, indent=2)
+        return json.dumps(namedict, indent=4, sort_keys=True)
 
     ### subvolume operations
 

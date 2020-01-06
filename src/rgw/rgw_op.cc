@@ -2363,7 +2363,8 @@ void RGWListBuckets::execute()
       started = true;
     }
 
-    if (!m.empty()) {
+    if (read_count > 0 &&
+        !m.empty()) {
       map<string, rgw::sal::RGWBucket*>::reverse_iterator riter = m.rbegin();
       marker = riter->first;
 
@@ -2545,6 +2546,20 @@ void RGWSetBucketVersioning::execute()
       !s->mfa_verified) {
     op_ret = -ERR_MFA_REQUIRED;
     return;
+  }
+  //if mfa is enabled for bucket, make sure mfa code is validated in case versioned status gets changed
+  if (cur_mfa_status) {
+    bool req_versioning_status = false;
+    //if requested versioning status is not the same as the one set for the bucket, return error
+    if (versioning_status == VersioningEnabled) {
+      req_versioning_status = (s->bucket_info.flags & BUCKET_VERSIONS_SUSPENDED) != 0;
+    } else if (versioning_status == VersioningSuspended) {
+      req_versioning_status = (s->bucket_info.flags & BUCKET_VERSIONS_SUSPENDED) == 0;
+    }
+    if (req_versioning_status && !s->mfa_verified) {
+      op_ret = -ERR_MFA_REQUIRED;
+      return;
+    }
   }
 
   if (!store->svc()->zone->is_meta_master()) {

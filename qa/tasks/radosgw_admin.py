@@ -10,13 +10,11 @@ Rgw admin testing against a running instance
 #	python qa/tasks/radosgw_admin.py [USER] HOSTNAME
 #
 
-import copy
 import json
 import logging
 import time
 import datetime
 import Queue
-import bunch
 
 import sys
 
@@ -25,11 +23,9 @@ from cStringIO import StringIO
 import boto.exception
 import boto.s3.connection
 import boto.s3.acl
-from boto.utils import RequestHook
 
 import httplib2
 
-import util.rgw as rgw_utils
 
 from util.rgw import rgwadmin, get_user_summary, get_user_successful_ops
 
@@ -207,7 +203,7 @@ class requestlog_queue():
 	    pass
 	elif response.status < 200 or response.status >= 400:
 	    error = True
-        self.q.put(bunch.Bunch({'t': now, 'o': request, 'i': response, 'e': error}))
+        self.q.put({'t': now, 'o': request, 'i': response, 'e': error})
     def clear(self):
         with self.q.mutex:
             self.q.queue.clear()
@@ -215,16 +211,16 @@ class requestlog_queue():
         while not self.q.empty():
             j = self.q.get()
 	    bytes_out = 0
-            if 'Content-Length' in j.o.headers:
-		bytes_out = int(j.o.headers['Content-Length'])
+            if 'Content-Length' in j['o'].headers:
+		bytes_out = int(j['o'].headers['Content-Length'])
             bytes_in = 0
-            if 'content-length' in j.i.msg.dict:
-		bytes_in = int(j.i.msg.dict['content-length'])
+            if 'content-length' in j['i'].msg.dict:
+		bytes_in = int(j['i'].msg.dict['content-length'])
             log.info('RL: %s %s %s bytes_out=%d bytes_in=%d failed=%r'
-		% (cat, bucket, user, bytes_out, bytes_in, j.e))
+		% (cat, bucket, user, bytes_out, bytes_in, j['e']))
 	    if add_entry == None:
 		add_entry = self.adder
-	    add_entry(cat, bucket, user, bytes_out, bytes_in, j.e)
+	    add_entry(cat, bucket, user, bytes_out, bytes_in, j['e'])
 
 def create_presigned_url(conn, method, bucket_name, key_name, expiration):
     return conn.generate_url(expires_in=expiration,
@@ -292,7 +288,6 @@ def task(ctx, config):
     display_name2='Fud'
     display_name3='Bar'
     email='foo@foo.com'
-    email2='bar@bar.com'
     access_key='9te6NH5mcdcq0Tc5i8i1'
     secret_key='Ny4IOauQoL18Gp2zM7lC1vLmoawgqcYP/YGcWfXu'
     access_key2='p5YnriCv1nAtykxBrupQ'
@@ -1053,8 +1048,6 @@ def task(ctx, config):
     # TESTCASE 'zonegroup-info', 'zonegroup', 'get', 'get zonegroup info', 'succeeds'
     (err, out) = rgwadmin(ctx, client, ['zonegroup', 'get'], check_status=True)
 
-import sys
-from tasks.radosgw_admin import task
 from teuthology.config import config
 from teuthology.orchestra import cluster, remote
 import argparse;

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 import json
+import logging
 from . import ApiController, RESTController, Endpoint, ReadPermission, UpdatePermission
-from .. import mgr, logger
+from .. import mgr
 from ..security import Scope
 from ..services.ceph_service import CephService, SendCommandError
 from ..services.exception import handle_send_command_error
@@ -11,6 +12,9 @@ try:
     from typing import Dict, List, Any, Union  # noqa: F401 pylint: disable=unused-import
 except ImportError:
     pass  # For typing only
+
+
+logger = logging.getLogger('controllers.osd')
 
 
 @ApiController('/osd', Scope.OSD)
@@ -66,30 +70,13 @@ class Osd(RESTController):
         return resp if svc_id is None else resp[int(svc_id)]
 
     @staticmethod
-    def _get_smart_data(svc_id):
+    def _get_smart_data(osd_id):
         # type: (str) -> dict
-        """
-        Returns S.M.A.R.T data for the given OSD ID.
-        :type svc_id: Numeric ID of the OSD
-        """
-        devices = CephService.send_command(
-            'mon', 'device ls-by-daemon', who='osd.{}'.format(svc_id))
-        smart_data = {}
-        for dev_id in [d['devid'] for d in devices]:
-            if dev_id not in smart_data:
-                dev_smart_data = mgr.remote('devicehealth', 'do_scrape_daemon', 'osd', svc_id,
-                                            dev_id)
-                if dev_smart_data:
-                    for _, dev_data in dev_smart_data.items():
-                        if 'error' in dev_data:
-                            logger.warning(
-                                '[OSD] Error retrieving smartctl data for device ID %s: %s', dev_id,
-                                dev_smart_data)
-                    smart_data.update(dev_smart_data)
-        return smart_data
+        """Returns S.M.A.R.T data for the given OSD ID."""
+        return CephService.get_smart_data_by_daemon('osd', osd_id)
 
     @RESTController.Resource('GET')
-    def get_smart_data(self, svc_id):
+    def smart(self, svc_id):
         # type: (str) -> dict
         return self._get_smart_data(svc_id)
 

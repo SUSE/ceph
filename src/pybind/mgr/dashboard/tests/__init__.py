@@ -3,16 +3,19 @@
 from __future__ import absolute_import
 
 import json
+import logging
 import threading
+import sys
 import time
 
 import cherrypy
 from cherrypy._cptools import HandlerWrapperTool
 from cherrypy.test import helper
+from pyfakefs import fake_filesystem
 
 from mgr_module import CLICommand
 
-from .. import logger, mgr
+from .. import mgr
 from ..controllers import json_error_page, generate_controller_routes
 from ..services.auth import AuthManagerTool
 from ..services.exception import dashboard_exception_handler
@@ -23,6 +26,9 @@ from ..plugins import feature_toggles, debug  # noqa # pylint: disable=unused-im
 
 PLUGIN_MANAGER.hook.init()
 PLUGIN_MANAGER.hook.register_commands()
+
+
+logger = logging.getLogger('tests')
 
 
 class CmdException(Exception):
@@ -82,6 +88,17 @@ class CLICommandTestMixin(KVStoreMockMixin):
     @classmethod
     def exec_cmd(cls, cmd, **kwargs):
         return exec_dashboard_cmd(None, cmd, **kwargs)
+
+
+class FakeFsMixin(object):
+    fs = fake_filesystem.FakeFilesystem()
+    f_open = fake_filesystem.FakeFileOpen(fs)
+    f_os = fake_filesystem.FakeOsModule(fs)
+
+    if sys.version_info > (3, 0):
+        builtins_open = 'builtins.open'
+    else:
+        builtins_open = '__builtin__.open'
 
 
 class ControllerTestCase(helper.CPWebCase):

@@ -8,16 +8,18 @@ from orchestrator import InventoryNode, ServiceDescription
 
 from . import ControllerTestCase
 from .. import mgr
+from ..controllers.orchestrator import get_device_osd_map
 from ..controllers.orchestrator import Orchestrator
 from ..controllers.orchestrator import OrchestratorInventory
+from ..controllers.orchestrator import OrchestratorOsd
 from ..controllers.orchestrator import OrchestratorService
-from ..controllers.orchestrator import get_device_osd_map
 
 
 class OrchestratorControllerTest(ControllerTestCase):
     URL_STATUS = '/api/orchestrator/status'
     URL_INVENTORY = '/api/orchestrator/inventory'
     URL_SERVICE = '/api/orchestrator/service'
+    URL_OSD = '/api/orchestrator/osd'
 
     @classmethod
     def setup_server(cls):
@@ -25,7 +27,11 @@ class OrchestratorControllerTest(ControllerTestCase):
         Orchestrator._cp_config['tools.authenticate.on'] = False
         OrchestratorInventory._cp_config['tools.authenticate.on'] = False
         OrchestratorService._cp_config['tools.authenticate.on'] = False
-        cls.setup_controllers([Orchestrator, OrchestratorInventory, OrchestratorService])
+        OrchestratorOsd._cp_config['tools.authenticate.on'] = False
+        cls.setup_controllers([Orchestrator,
+                               OrchestratorInventory,
+                               OrchestratorService,
+                               OrchestratorOsd])
 
     @mock.patch('dashboard.controllers.orchestrator.OrchClient.instance')
     def test_status_get(self, instance):
@@ -67,14 +73,14 @@ class OrchestratorControllerTest(ControllerTestCase):
                 'name': 'host-0',
                 'devices': [
                     {'path': 'nvme0n1'},
-                    {'path': 'sdb'},
-                    {'path': 'sdc'},
+                    {'path': '/dev/sdb'},
+                    {'path': '/dev/sdc'},
                 ]
             },
             {
                 'name': 'host-1',
                 'devices': [
-                    {'path': 'sda'},
+                    {'path': '/dev/sda'},
                     {'path': 'sdb'},
                 ]
             }
@@ -164,6 +170,28 @@ class OrchestratorControllerTest(ControllerTestCase):
         fake_client.available.return_value = False
         self._get(self.URL_SERVICE)
         self.assertStatus(503)
+
+    @mock.patch('dashboard.controllers.orchestrator.OrchClient.instance')
+    def test_osd_create(self, instance):
+        # with orchestrator service
+        fake_client = mock.Mock()
+        fake_client.available.return_value = False
+        instance.return_value = fake_client
+        self._post(self.URL_OSD, {})
+        self.assertStatus(503)
+
+        # without orchestrator service
+        fake_client.available.return_value = True
+        # incorrect drive group
+        self._post(self.URL_OSD, {'drive_group': {}})
+        self.assertStatus(400)
+
+        # correct drive group
+        dg = {
+            'host_pattern': '*'
+        }
+        self._post(self.URL_OSD, {'drive_group': dg})
+        self.assertStatus(201)
 
 
 class TestOrchestrator(unittest.TestCase):

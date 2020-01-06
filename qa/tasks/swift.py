@@ -13,7 +13,6 @@ from teuthology import misc as teuthology
 from teuthology import contextutil
 from teuthology.config import config as teuth_config
 from teuthology.orchestra import run
-from teuthology.orchestra.connection import split_user
 
 log = logging.getLogger(__name__)
 
@@ -152,7 +151,8 @@ def run_tests(ctx, config):
     for client, client_config in config.items():
         args = [
                 'SWIFT_TEST_CONFIG_FILE={tdir}/archive/testswift.{client}.conf'.format(tdir=testdir, client=client),
-                '{tdir}/swift/virtualenv/bin/nosetests'.format(tdir=testdir),
+                '{tdir}/swift/virtualenv/bin/python'.format(tdir=testdir),
+                '-m', 'nose',
                 '-w',
                 '{tdir}/swift/test/functional'.format(tdir=testdir),
                 '-v',

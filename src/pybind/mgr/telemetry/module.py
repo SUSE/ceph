@@ -689,7 +689,7 @@ class Module(MgrModule):
                     self.last_upload = now
                     self.set_store('last_upload', str(now))
                     success.append('Ceph report sent to {0}'.format(self.url))
-                    self.info('Sent report to {0}'.format(self.url))
+                    self.log.info('Sent report to {0}'.format(self.url))
             elif e == 'device':
                 if 'device' in self.get_active_channels():
                     self.log.info('hi')
@@ -730,7 +730,7 @@ class Module(MgrModule):
             r = {}
             for opt in self.MODULE_OPTIONS:
                 r[opt['name']] = getattr(self, opt['name'])
-            return 0, json.dumps(r, indent=4), ''
+            return 0, json.dumps(r, indent=4, sort_keys=True), ''
         elif command['prefix'] == 'telemetry on':
             if command.get('license') != LICENSE:
                 return -errno.EPERM, '', "Telemetry data is licensed under the " + LICENSE_NAME + " (" + LICENSE_URL + ").\nTo enable, add '--license " + LICENSE + "' to the 'ceph telemetry on' command."
@@ -749,7 +749,7 @@ class Module(MgrModule):
             report = self.compile_report(
                 channels=command.get('channels', None)
             )
-            return 0, json.dumps(report, indent=4), ''
+            return 0, json.dumps(report, indent=4, sort_keys=True), ''
         else:
             return (-errno.EINVAL, '',
                     "Command not found '{0}'".format(command['prefix']))

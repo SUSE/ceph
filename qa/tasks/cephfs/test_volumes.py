@@ -11,7 +11,7 @@ from teuthology.exceptions import CommandFailedError
 log = logging.getLogger(__name__)
 
 class TestVolumes(CephFSTestCase):
-    TEST_VOLUME_NAME = "fs_test_vol"
+    TEST_VOLUME_PREFIX = "volume"
     TEST_SUBVOLUME_PREFIX="subvolume"
     TEST_GROUP_PREFIX="group"
     TEST_SNAPSHOT_PREFIX="snapshot"
@@ -26,6 +26,11 @@ class TestVolumes(CephFSTestCase):
 
     def _fs_cmd(self, *args):
         return self.mgr_cluster.mon_manager.raw_cluster_cmd("fs", *args)
+
+    def _generate_random_volume_name(self, count=1):
+        r = random.sample(range(10000), count)
+        volumes = ["{0}_{1}".format(TestVolumes.TEST_VOLUME_PREFIX, c) for c in r]
+        return volumes[0] if count == 1 else volumes
 
     def _generate_random_subvolume_name(self, count=1):
         r = random.sample(range(10000), count)
@@ -49,7 +54,7 @@ class TestVolumes(CephFSTestCase):
         result = json.loads(self._fs_cmd("volume", "ls"))
         if len(result) == 0:
             self.vol_created = True
-            self.volname = TestVolumes.TEST_VOLUME_NAME
+            self.volname = self._generate_random_volume_name()
             self._fs_cmd("volume", "create", self.volname)
         else:
             self.volname = result[0]['name']
@@ -102,7 +107,68 @@ class TestVolumes(CephFSTestCase):
             self._delete_test_volume()
         super(TestVolumes, self).tearDown()
 
+    def test_connection_expiration(self):
+        # unmount any cephfs mounts
+        self.mount_a.umount_wait()
+        sessions = self._session_list()
+        self.assertLessEqual(len(sessions), 1) # maybe mgr is already mounted
+
+        # Get the mgr to definitely mount cephfs
+        subvolume = self._generate_random_subvolume_name()
+        self._fs_cmd("subvolume", "create", self.volname, subvolume)
+        sessions = self._session_list()
+        self.assertEqual(len(sessions), 1)
+
+        # Now wait for the mgr to expire the connection:
+        self.wait_until_evicted(sessions[0]['id'], timeout=90)
+
+    def test_volume_create(self):
+        """
+        That the volume can be created and then cleans up
+        """
+        volname = self._generate_random_volume_name()
+        self._fs_cmd("volume", "create", volname)
+        volumels = json.loads(self._fs_cmd("volume", "ls"))
+        try:
+            if (not (volname in ([volume['name'] for volume in volumels]))):
+                raise RuntimeError("Error creating volume '{0}'".format(volname))
+        finally:
+            # clean up
+            self._fs_cmd("volume", "rm", volname, "--yes-i-really-mean-it")
+
+    def test_volume_ls(self):
+        """
+        That the existing and the newly created volumes can be listed and
+        finally cleans up.
+        """
+        vls = json.loads(self._fs_cmd("volume", "ls"))
+        volumes = [volume['name'] for volume in vls]
+
+        #create new volumes and add it to the existing list of volumes
+        volumenames = self._generate_random_volume_name(3)
+        for volumename in volumenames:
+            self._fs_cmd("volume", "create", volumename)
+        volumes.extend(volumenames)
+
+        # list volumes
+        try:
+            volumels = json.loads(self._fs_cmd('volume', 'ls'))
+            if len(volumels) == 0:
+                raise RuntimeError("Expected the 'fs volume ls' command to list the created volumes.")
+            else:
+                volnames = [volume['name'] for volume in volumels]
+                if collections.Counter(volnames) != collections.Counter(volumes):
+                    raise RuntimeError("Error creating or listing volumes")
+        finally:
+            # clean up
+            for volume in volumenames:
+                self._fs_cmd("volume", "rm", volume, "--yes-i-really-mean-it")
+
     def test_volume_rm(self):
+        """
+        That the volume can only be removed when --yes-i-really-mean-it is used
+        and verify that the deleted volume is not listed anymore.
+        """
         try:
             self._fs_cmd("volume", "rm", self.volname)
         except CommandFailedError as ce:
@@ -113,9 +179,10 @@ class TestVolumes(CephFSTestCase):
                 self._fs_cmd("volume", "rm", self.volname, "--yes-i-really-mean-it")
 
                 #check if it's gone
-                volumes = json.loads(self.mgr_cluster.mon_manager.raw_cluster_cmd('fs', 'volume', 'ls', '--format=json-pretty'))
+                volumes = json.loads(self._fs_cmd("volume", "ls", "--format=json-pretty"))
                 if (self.volname in [volume['name'] for volume in volumes]):
-                    raise RuntimeError("Expected the 'fs volume rm' command to succeed. The volume {0} not removed.".format(self.volname))
+                    raise RuntimeError("Expected the 'fs volume rm' command to succeed. "
+                                       "The volume {0} not removed.".format(self.volname))
         else:
             raise RuntimeError("expected the 'fs volume rm' command to fail.")
 
@@ -138,6 +205,8 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
+        else:
+            raise RuntimeError("expected the 'fs subvolume getpath' command to fail. Subvolume not removed.")
 
         # verify trash dir is clean
         self._wait_for_trash_empty()
@@ -274,7 +343,7 @@ class TestVolumes(CephFSTestCase):
         nsize = usedsize/2
         try:
             self._fs_cmd("subvolume", "resize", self.volname, subvolname, str(nsize))
-        except CommandFailedError as ce:
+        except CommandFailedError:
             raise RuntimeError("expected the 'fs subvolume resize' command to succeed")
 
         # verify the quota
@@ -391,9 +460,15 @@ class TestVolumes(CephFSTestCase):
             if ce.exitstatus != errno.EINVAL:
                 raise
         else:
-            raise
-        # clean up
-        self._fs_cmd("subvolume", "rm", self.volname, subvolume, "--force")
+            raise RuntimeError("expected the 'fs subvolume create' command to fail")
+
+    def test_subvolume_rm_force(self):
+        # test removing non-existing subvolume with --force
+        subvolume = self._generate_random_subvolume_name()
+        try:
+            self._fs_cmd("subvolume", "rm", self.volname, subvolume, "--force")
+        except CommandFailedError as ce:
+            raise RuntimeError("expected the 'fs subvolume rm --force' command to succeed")
 
     def test_subvolume_create_with_auto_cleanup_on_fail(self):
         subvolume = self._generate_random_subvolume_name()
@@ -409,7 +484,7 @@ class TestVolumes(CephFSTestCase):
             if ce.exitstatus != errno.ENOENT:
                 raise
         else:
-            raise
+            raise RuntimeError("expected the 'fs subvolume getpath' command to fail")
 
     def test_subvolume_create_with_invalid_size(self):
         # create subvolume with an invalid size -1
@@ -432,9 +507,8 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
-
-        # force remove subvolume
-        self._fs_cmd("subvolume", "rm", self.volname, subvolume, "--force")
+        else:
+            raise RuntimeError("expected the 'fs subvolume rm' command to fail")
 
     def test_nonexistent_subvolume_group_create(self):
         subvolume = self._generate_random_subvolume_name()
@@ -446,6 +520,8 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
+        else:
+            raise RuntimeError("expected the 'fs subvolume create' command to fail")
 
     def test_default_uid_gid_subvolume(self):
         subvolume = self._generate_random_subvolume_name()
@@ -606,9 +682,15 @@ class TestVolumes(CephFSTestCase):
             if ce.exitstatus != errno.EINVAL:
                 raise
         else:
-            raise
-        # clean up
-        self._fs_cmd("subvolumegroup", "rm", self.volname, group, "--force")
+            raise RuntimeError("expected the 'fs subvolumegroup create' command to fail")
+
+    def test_subvolume_group_rm_force(self):
+        # test removing non-existing subvolume group with --force
+        group = self._generate_random_group_name()
+        try:
+            self._fs_cmd("subvolumegroup", "rm", self.volname, group, "--force")
+        except CommandFailedError as ce:
+            raise RuntimeError("expected the 'fs subvolumegroup rm --force' command to succeed")
 
     def test_subvolume_group_create_with_auto_cleanup_on_fail(self):
         group = self._generate_random_group_name()
@@ -624,7 +706,7 @@ class TestVolumes(CephFSTestCase):
             if ce.exitstatus != errno.ENOENT:
                 raise
         else:
-            raise
+            raise RuntimeError("expected the 'fs subvolumegroup getpath' command to fail")
 
     def test_subvolume_create_with_desired_data_pool_layout_in_group(self):
         subvol1 = self._generate_random_subvolume_name()
@@ -768,7 +850,7 @@ class TestVolumes(CephFSTestCase):
         # remove subvolume
         self._fs_cmd("subvolume", "rm", self.volname, subvolname)
 
-    def test_nonexistent_subvolme_group_rm(self):
+    def test_nonexistent_subvolume_group_rm(self):
         group = "non_existent_group"
 
         # try, remove subvolume group
@@ -777,9 +859,8 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
-
-        # force remove subvolume
-        self._fs_cmd("subvolumegroup", "rm", self.volname, group, "--force")
+        else:
+            raise RuntimeError("expected the 'fs subvolumegroup rm' command to fail")
 
     def test_default_uid_gid_subvolume_group(self):
         group = self._generate_random_group_name()
@@ -887,15 +968,25 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
-
-        # force remove snapshot
-        self._fs_cmd("subvolume", "snapshot", "rm", self.volname, subvolume, snapshot, "--force")
+        else:
+            raise RuntimeError("expected the 'fs subvolume snapshot rm' command to fail")
 
         # remove subvolume
         self._fs_cmd("subvolume", "rm", self.volname, subvolume)
 
         # verify trash dir is clean
         self._wait_for_trash_empty()
+
+    def test_subvolume_snapshot_rm_force(self):
+        # test removing non existing subvolume snapshot with --force
+        subvolume = self._generate_random_subvolume_name()
+        snapshot = self._generate_random_snapshot_name()
+
+        # remove snapshot
+        try:
+            self._fs_cmd("subvolume", "snapshot", "rm", self.volname, subvolume, snapshot, "--force")
+        except CommandFailedError as ce:
+            raise RuntimeError("expected the 'fs subvolume snapshot rm --force' command to succeed")
 
     def test_subvolume_snapshot_in_group(self):
         subvolume = self._generate_random_subvolume_name()
@@ -1023,6 +1114,8 @@ class TestVolumes(CephFSTestCase):
         except CommandFailedError as ce:
             if ce.exitstatus != errno.ENOENT:
                 raise
+        else:
+            raise RuntimeError("expected the 'fs subvolumegroup snapshot rm' command to fail")
 
         # remove subvolume
         self._fs_cmd("subvolume", "rm", self.volname, subvolume, group)
@@ -1032,6 +1125,16 @@ class TestVolumes(CephFSTestCase):
 
         # remove group
         self._fs_cmd("subvolumegroup", "rm", self.volname, group)
+
+    def test_subvolume_group_snapshot_rm_force(self):
+        # test removing non-existing subvolume group snapshot with --force
+        group = self._generate_random_group_name()
+        snapshot = self._generate_random_snapshot_name()
+        # remove snapshot
+        try:
+            self._fs_cmd("subvolumegroup", "snapshot", "rm", self.volname, group, snapshot, "--force")
+        except CommandFailedError as ce:
+            raise RuntimeError("expected the 'fs subvolumegroup snapshot rm --force' command to succeed")
 
     def test_subvolume_group_snapshot_ls(self):
         # tests the 'fs subvolumegroup snapshot ls' command
@@ -1073,3 +1176,20 @@ class TestVolumes(CephFSTestCase):
 
         # verify trash dir is clean
         self._wait_for_trash_empty()
+
+    def test_mgr_eviction(self):
+        # unmount any cephfs mounts
+        self.mount_a.umount_wait()
+        sessions = self._session_list()
+        self.assertLessEqual(len(sessions), 1) # maybe mgr is already mounted
+
+        # Get the mgr to definitely mount cephfs
+        subvolume = self._generate_random_subvolume_name()
+        self._fs_cmd("subvolume", "create", self.volname, subvolume)
+        sessions = self._session_list()
+        self.assertEqual(len(sessions), 1)
+
+        # Now fail the mgr, check the session was evicted
+        mgr = self.mgr_cluster.get_active_id()
+        self.mgr_cluster.mgr_fail(mgr)
+        self.wait_until_evicted(sessions[0]['id'])
