@@ -1,0 +1,5 @@
+tasks:
+        - ceph_salt:
+                repo: https://github.com/suse/ceph-salt.git
+                branch: master
+
