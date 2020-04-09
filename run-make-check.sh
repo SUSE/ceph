@@ -67,7 +67,7 @@ function main() {
     fi
     FOR_MAKE_CHECK=1 prepare
     # Init defaults after deps are installed.
-    configure "-DWITH_GTEST_PARALLEL=ON -DWITH_FIO=ON -DWITH_SEASTAR=ON -DENABLE_GIT_VERSION=OFF $@"
+    configure "-DWITH_GTEST_PARALLEL=ON -DWITH_FIO=ON -DENABLE_GIT_VERSION=OFF $@"
     build tests
     echo "make check: successful build on $(git rev-parse HEAD)"
     run
