@@ -100,7 +100,6 @@ function run() {
     fi
 
     if test -f ./install-deps.sh ; then
-	    export WITH_SEASTAR=1
 	    export FOR_MAKE_CHECK=1
 	    $DRY_RUN source ./install-deps.sh || return 1
         trap clean_up_after_myself EXIT
@@ -111,7 +110,7 @@ function run() {
     BUILD_MAKEOPTS=${BUILD_MAKEOPTS:-$DEFAULT_MAKEOPTS}
     test "$BUILD_MAKEOPTS" && echo "make will run with option(s) $BUILD_MAKEOPTS"
     CHECK_MAKEOPTS=${CHECK_MAKEOPTS:-$DEFAULT_MAKEOPTS}
-    CMAKE_BUILD_OPTS="-DWITH_GTEST_PARALLEL=ON -DWITH_FIO=ON -DWITH_SEASTAR=ON"
+    CMAKE_BUILD_OPTS="-DWITH_GTEST_PARALLEL=ON -DWITH_FIO=ON"
     CMAKE_BUILD_OPTS+=$(detect_ceph_dev_pkgs)
     cat <<EOM
 Note that the binaries produced by this script do not contain correct time
