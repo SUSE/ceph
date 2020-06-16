@@ -373,6 +373,10 @@ nav#sidebar {
   }
 }
 
+.nav-item.active .fa-heartbeat.health-ok {
+  color: #ffffff !important;
+}
+
 // Logo
 
 .cd-navbar-top .cd-navbar-brand .navbar-brand > img {
