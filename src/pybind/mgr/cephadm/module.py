@@ -92,10 +92,10 @@ CEPH_TYPES = set(CEPH_UPGRADE_ORDER)
 
 # Default container images -----------------------------------------------------
 DEFAULT_IMAGE = 'quay.io/ceph/ceph'
-DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.18.1'
-DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v0.18.1'
-DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.20.0'
-DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:6.7.4'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/caasp/v5/prometheus-server:2.18.0'
+DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.com/caasp/v5/prometheus-node-exporter:0.17.0'
+DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.com/caasp/v5/prometheus-alertmanager:0.16.2'
+DEFAULT_GRAFANA_IMAGE = 'registry.suse.com/ses/7/ceph/grafana:7.0.3'
 # ------------------------------------------------------------------------------
 
 
