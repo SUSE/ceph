@@ -148,7 +148,7 @@ class CephadmOrchestrator(orchestrator.Orchestrator, MgrModule):
         },
         {
             'name': 'container_image_base',
-            'default': 'docker.io/ceph/ceph',
+            'default': 'registry.suse.com/ses/7/ceph/ceph',
             'desc': 'Container image name, without the tag',
             'runtime': True,
         },
