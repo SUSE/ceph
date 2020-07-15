@@ -91,7 +91,7 @@ Host *
 CEPH_TYPES = set(CEPH_UPGRADE_ORDER)
 
 # Default container images -----------------------------------------------------
-DEFAULT_IMAGE = 'quay.io/ceph/ceph'
+DEFAULT_IMAGE = 'registry.suse.com/ses/7/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/caasp/v5/prometheus-server:2.18.0'
 DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.com/caasp/v5/prometheus-node-exporter:0.17.0'
 DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.com/caasp/v5/prometheus-alertmanager:0.16.2'
