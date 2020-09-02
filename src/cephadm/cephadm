@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 # Default container images -----------------------------------------------------
-DEFAULT_IMAGE = 'quay.io/ceph/ceph:v15'
+DEFAULT_IMAGE = 'registry.suse.com/ses/7/ceph/ceph:latest'
 DEFAULT_IMAGE_IS_MASTER = False
 DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.18.1'
 DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v0.18.1'
