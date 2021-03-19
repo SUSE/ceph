@@ -35,7 +35,7 @@ curl --insecure --silent $URL 2>&1 > login.html
 test_screen login
 
 # set a password for the admin user
-ceph dashboard ac-user-set-password admin admin >/dev/null
+echo -n admin | ceph dashboard ac-user-set-password admin -i - >/dev/null
 
 # get JWT token
 TOKEN=$(curl --insecure -s -H "Content-Type: application/json" -X POST \

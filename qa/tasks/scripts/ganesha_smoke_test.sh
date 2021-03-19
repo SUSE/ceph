@@ -52,7 +52,7 @@ if [ ! -n "$API_URL" ]; then
 fi
 
 # set a password for the admin user
-ceph dashboard ac-user-set-password admin admin >/dev/null
+echo -n admin | ceph dashboard ac-user-set-password admin -i - >/dev/null
 
 # getting authentication token to call the REST API
 TOKEN=$(curl --insecure -s -H "Content-Type: application/json" -X POST \
