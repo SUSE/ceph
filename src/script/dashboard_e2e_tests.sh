@@ -101,7 +101,7 @@ echo $?
 set -e
 
 # set dashboard admin password
-sudo ceph dashboard ac-user-set-password admin admin
+echo -n admin | sudo ceph dashboard ac-user-set-password admin -i -
 
 # setup RGW for E2E
 sudo radosgw-admin user create --uid=dev --display-name=Developer --system
