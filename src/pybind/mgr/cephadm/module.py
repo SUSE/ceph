@@ -95,7 +95,7 @@ DEFAULT_IMAGE = 'registry.suse.com/ses/7/ceph/ceph'
 DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/caasp/v4.5/prometheus-server:2.18.0'
 DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.com/caasp/v4.5/prometheus-node-exporter:0.17.0'
 DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.com/caasp/v4.5/prometheus-alertmanager:0.16.2'
-DEFAULT_GRAFANA_IMAGE = 'registry.suse.com/ses/7/ceph/grafana:7.0.3'
+DEFAULT_GRAFANA_IMAGE = 'registry.suse.com/ses/7/ceph/grafana:7.3.1'
 DEFAULT_HAPROXY_IMAGE = 'docker.io/library/haproxy:2.3'
 DEFAULT_KEEPALIVED_IMAGE = 'docker.io/arcts/keepalived'
 # ------------------------------------------------------------------------------
