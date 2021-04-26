@@ -1225,6 +1225,7 @@ class Orch(DeepSea):
             self.master_remote,
             'ceph_cluster_status.sh',
             )
+        self.master_remote.sh('sudo ceph config set mon auth_allow_insecure_global_id_reclaim false || true')
         self.__ceph_health_test()
 
     def _run_stage_4(self):
