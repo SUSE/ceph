@@ -430,6 +430,7 @@ enum {
 
 extern const char *ceph_mds_op_name(int op);
 
+// setattr mask is an int
 #ifndef CEPH_SETATTR_MODE
 #define CEPH_SETATTR_MODE		(1 << 0)
 #define CEPH_SETATTR_UID		(1 << 1)

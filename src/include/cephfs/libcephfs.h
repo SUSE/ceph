@@ -111,7 +111,7 @@ struct snap_info {
   struct snap_metadata *snap_metadata;
 };
 
-/* setattr mask bits */
+/* setattr mask bits (up to an int in size) */
 #ifndef CEPH_SETATTR_MODE
 #define CEPH_SETATTR_MODE		(1 << 0)
 #define CEPH_SETATTR_UID		(1 << 1)
