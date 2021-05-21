@@ -21,7 +21,7 @@ tasks:
                         osd.0:
         - exec:
                 client.salt_master:
-                        - 'ceph -s'
+                        - 'timeout -v 5m ceph -s'
         - deepsea.toolbox:
                 assert_bluestore:
                         osd.0:
