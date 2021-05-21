@@ -173,6 +173,7 @@ class Validation(SESQA):
         self.scripts.run(
                 self.master_remote,
                 'ses_rack_dc_region_unavailability.sh',
+                timeout='60m'
                 )
 
     def ses_network_failure(self, **kwargs):
