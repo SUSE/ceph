@@ -18,7 +18,7 @@ class Scripts:
                 copy_directory_recursively(local_path, remote_obj, "scripts")
             ctx['scripts_copied'] = True
 
-    def run(self, remote, script_name, args=[], as_root=True):
+    def run(self, remote, script_name, args=[], as_root=True, timeout=None):
         class_name = type(remote).__name__
         self.log.debug(
             '(scripts) run method was passed a remote object of class {}'
@@ -33,6 +33,8 @@ class Scripts:
                       )
         path = 'scripts/' + script_name
         cmd = 'bash {}'.format(path)
+        if timeout:
+            cmd = 'timeout -v ' + timeout + ' ' + cmd
         if as_root:
             cmd = "sudo " + cmd
         if args:
