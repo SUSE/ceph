@@ -4,7 +4,8 @@ import { ActivatedRoute, Router } from '@angular/router';
 
 import { I18n } from '@ngx-translate/i18n-polyfill';
 import * as _ from 'lodash';
-import { Observable } from 'rxjs';
+import { AsyncSubject, Observable } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 
 import { PoolService } from '../../../shared/api/pool.service';
 import { RbdService } from '../../../shared/api/rbd.service';
@@ -20,6 +21,7 @@ import { DimlessBinaryPipe } from '../../../shared/pipes/dimless-binary.pipe';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
 import { FormatterService } from '../../../shared/services/formatter.service';
 import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
+import { RBDImageFormat, RbdModel } from '../rbd-list/rbd-model';
 import { RbdImageFeature } from './rbd-feature.interface';
 import { RbdFormCloneRequestModel } from './rbd-form-clone-request.model';
 import { RbdFormCopyRequestModel } from './rbd-form-copy-request.model';
@@ -82,6 +84,7 @@ export class RbdFormComponent implements OnInit {
   ];
   action: string;
   resource: string;
+  private rbdImage = new AsyncSubject();
 
   constructor(
     private authStorageService: AuthStorageService,
@@ -186,6 +189,15 @@ export class RbdFormComponent implements OnInit {
     this.rbdForm.get('obj_size').disable();
     this.rbdForm.get('stripingUnit').disable();
     this.rbdForm.get('stripingCount').disable();
+
+    /* RBD Image Format v1 */
+    this.rbdImage.subscribe((image: RbdModel) => {
+      if (image.image_format === RBDImageFormat.V1) {
+        this.rbdForm.get('deep-flatten').disable();
+        this.rbdForm.get('layering').disable();
+        this.rbdForm.get('exclusive-lock').disable();
+      }
+    });
   }
 
   disableForClone() {
@@ -227,6 +239,7 @@ export class RbdFormComponent implements OnInit {
         }
         this.rbdService.get(poolName, rbdName).subscribe((resp: RbdFormResponseModel) => {
           this.setResponse(resp, this.snapName);
+          this.rbdImage.next(resp);
         });
       });
     } else {
@@ -638,22 +651,28 @@ export class RbdFormComponent implements OnInit {
   }
 
   submit() {
-    let action: Observable<any>;
-
-    if (this.mode === this.rbdFormMode.editing) {
-      action = this.editAction();
-    } else if (this.mode === this.rbdFormMode.cloning) {
-      action = this.cloneAction();
-    } else if (this.mode === this.rbdFormMode.copying) {
-      action = this.copyAction();
-    } else {
-      action = this.createAction();
+    if (!this.mode) {
+      this.rbdImage.next('create');
     }
-
-    action.subscribe(
-      undefined,
-      () => this.rbdForm.setErrors({ cdSubmitButton: true }),
-      () => this.router.navigate(['/block/rbd'])
-    );
+    this.rbdImage.complete();
+    this.rbdImage
+      .pipe(
+        switchMap(() => {
+          if (this.mode === this.rbdFormMode.editing) {
+            return this.editAction();
+          } else if (this.mode === this.rbdFormMode.cloning) {
+            return this.cloneAction();
+          } else if (this.mode === this.rbdFormMode.copying) {
+            return this.copyAction();
+          } else {
+            return this.createAction();
+          }
+        })
+      )
+      .subscribe(
+        () => {},
+        () => this.rbdForm.setErrors({ cdSubmitButton: true }),
+        () => this.router.navigate(['/block/rbd'])
+      );
   }
 }

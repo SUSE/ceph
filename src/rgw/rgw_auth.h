@@ -57,7 +57,7 @@ public:
    * with the reason. */
   virtual uint32_t get_perm_mask() const = 0;
 
-  virtual bool is_anonymous() const final {
+  virtual bool is_anonymous() const {
     /* If the identity owns the anonymous account (rgw_user), it's considered
      * the anonymous identity. On error throws rgw::auth::Exception storing
      * the reason. */
@@ -75,6 +75,9 @@ public:
 
   /* Name of Account */
   virtual string get_acct_name() const = 0;
+
+  /* Subuser of Account */
+  virtual string get_subuser() const = 0;
 };
 
 inline std::ostream& operator<<(std::ostream& out,
@@ -403,6 +406,10 @@ public:
     return token_claims.user_name;
   }
 
+  string get_subuser() const override {
+    return {};
+  }
+
   struct Factory {
     virtual ~Factory() {}
 
@@ -411,6 +418,43 @@ public:
                                               const rgw::web_idp::WebTokenClaims& token) const = 0;
   };
 };
+
+class ImplicitTenants: public md_config_obs_t {
+public:
+  enum implicit_tenant_flag_bits {IMPLICIT_TENANTS_SWIFT=1,
+	IMPLICIT_TENANTS_S3=2, IMPLICIT_TENANTS_BAD = -1, };
+private:
+  int saved;
+  void recompute_value(const ConfigProxy& );
+  class ImplicitTenantValue {
+    friend class ImplicitTenants;
+    int v;
+    ImplicitTenantValue(int v) : v(v) {};
+  public:
+    bool inline is_split_mode()
+    {
+      assert(v != IMPLICIT_TENANTS_BAD);
+      return v == IMPLICIT_TENANTS_SWIFT || v == IMPLICIT_TENANTS_S3;
+    }
+    bool inline implicit_tenants_for_(const implicit_tenant_flag_bits bit)
+    {
+      assert(v != IMPLICIT_TENANTS_BAD);
+      return static_cast<bool>(v&bit);
+    }
+  };
+public:
+  ImplicitTenants(const ConfigProxy& c) { recompute_value(c);}
+  ImplicitTenantValue get_value() {
+    return ImplicitTenantValue(saved);
+  }
+private:
+  const char** get_tracked_conf_keys() const override;
+  void handle_conf_change(const ConfigProxy& conf,
+    const std::set <std::string> &changed) override;
+};
+
+std::tuple<bool,bool> implicit_tenants_enabled_for_swift(CephContext * const cct);
+std::tuple<bool,bool> implicit_tenants_enabled_for_s3(CephContext * const cct);
 
 /* rgw::auth::RemoteApplier targets those authentication engines which don't
  * need to ask the RADOS store while performing the auth process. Instead,
@@ -464,10 +508,12 @@ protected:
   const acl_strategy_t extra_acl_strategy;
 
   const AuthInfo info;
-  const bool implicit_tenants;
+  rgw::auth::ImplicitTenants& implicit_tenant_context;
+  const rgw::auth::ImplicitTenants::implicit_tenant_flag_bits implicit_tenant_bit;
 
   virtual void create_account(const DoutPrefixProvider* dpp,
                               const rgw_user& acct_user,
+                              bool implicit_tenant,
                               RGWUserInfo& user_info) const;          /* out */
 
 public:
@@ -475,12 +521,14 @@ public:
                 RGWRados* const store,
                 acl_strategy_t&& extra_acl_strategy,
                 const AuthInfo& info,
-                const bool implicit_tenants)
+		rgw::auth::ImplicitTenants& implicit_tenant_context,
+                rgw::auth::ImplicitTenants::implicit_tenant_flag_bits implicit_tenant_bit)
     : cct(cct),
       store(store),
       extra_acl_strategy(std::move(extra_acl_strategy)),
       info(info),
-      implicit_tenants(implicit_tenants) {
+      implicit_tenant_context(implicit_tenant_context),
+      implicit_tenant_bit(implicit_tenant_bit) {
   }
 
   uint32_t get_perms_from_aclspec(const DoutPrefixProvider* dpp, const aclspec_t& aclspec) const override;
@@ -493,6 +541,7 @@ public:
   void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
   uint32_t get_identity_type() const override { return info.acct_type; }
   string get_acct_name() const override { return info.acct_name; }
+  string get_subuser() const override { return {}; }
 
   struct Factory {
     virtual ~Factory() {}
@@ -554,6 +603,7 @@ public:
   void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
   uint32_t get_identity_type() const override { return TYPE_RGW; }
   string get_acct_name() const override { return {}; }
+  string get_subuser() const override { return subuser; }
 
   struct Factory {
     virtual ~Factory() {}
@@ -598,6 +648,7 @@ public:
   void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
   uint32_t get_identity_type() const override { return TYPE_ROLE; }
   string get_acct_name() const override { return {}; }
+  string get_subuser() const override { return {}; }
   void modify_request_state(const DoutPrefixProvider* dpp, req_state* s) const override;
 
   struct Factory {

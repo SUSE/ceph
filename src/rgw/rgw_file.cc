@@ -107,6 +107,42 @@ namespace rgw {
     return fhr;
   }
 
+  LookupFHResult RGWLibFS::fake_leaf(RGWFileHandle* parent,
+				     const char *path,
+				     enum rgw_fh_type type,
+				     struct stat *st, uint32_t st_mask,
+				     uint32_t flags)
+  {
+    /* synthesize a minimal handle from parent, path, type, and st */
+    using std::get;
+
+    flags |= RGWFileHandle::FLAG_CREATE;
+
+    switch (type) {
+    case RGW_FS_TYPE_DIRECTORY:
+      flags |= RGWFileHandle::FLAG_DIRECTORY;
+      break;
+    default:
+      /* file */
+      break;
+    };
+
+    LookupFHResult fhr = lookup_fh(parent, path, flags);
+    if (get<0>(fhr)) {
+      RGWFileHandle* rgw_fh = get<0>(fhr);
+      if (st) {	
+	lock_guard guard(rgw_fh->mtx);
+	if (st_mask & RGW_SETATTR_SIZE) {
+	  rgw_fh->set_size(st->st_size);
+	}
+	if (st_mask & RGW_SETATTR_MTIME) {
+	  rgw_fh->set_times(st->st_mtim);
+	}
+      } /* st */
+    } /* rgw_fh */
+    return fhr;
+  } /* RGWLibFS::fake_leaf */
+
   LookupFHResult RGWLibFS::stat_leaf(RGWFileHandle* parent,
 				     const char *path,
 				     enum rgw_fh_type type,
@@ -355,6 +391,7 @@ namespace rgw {
 	 * atomicity at this endpoint */
 	struct rgw_file_handle *fh;
 	rc = rgw_lookup(get_fs(), parent->get_fh(), name, &fh,
+			nullptr /* st */, 0 /* mask */,
 			RGW_LOOKUP_FLAG_NONE);
 	if (!! rc)
 	  return rc;
@@ -528,6 +565,7 @@ namespace rgw {
     rgw_file_handle *lfh;
 
     rc = rgw_lookup(get_fs(), parent->get_fh(), name, &lfh,
+		    nullptr /* st */, 0 /* mask */,
 		    RGW_LOOKUP_FLAG_NONE);
     if (! rc) {
       /* conflict! */
@@ -642,6 +680,7 @@ namespace rgw {
 
     rgw_file_handle *lfh;
     rc = rgw_lookup(get_fs(), parent->get_fh(), name, &lfh,
+		    nullptr /* st */, 0 /* mask */,
 		    RGW_LOOKUP_FLAG_NONE);
     if (! rc) {
       /* conflict! */
@@ -709,7 +748,8 @@ namespace rgw {
     using std::get;
 
     rgw_file_handle *lfh;
-    rc = rgw_lookup(get_fs(), parent->get_fh(), name, &lfh, 
+    rc = rgw_lookup(get_fs(), parent->get_fh(), name, &lfh,
+		    nullptr /* st */, 0 /* mask */,
                     RGW_LOOKUP_FLAG_NONE);
     if (! rc) {
       /* conflict! */
@@ -1161,10 +1201,19 @@ namespace rgw {
     return dar;
   } /* RGWFileHandle::decode_attrs */
 
-  bool RGWFileHandle::reclaim() {
+  bool RGWFileHandle::reclaim(const cohort::lru::ObjectFactory* newobj_fac) {
     lsubdout(fs->get_context(), rgw, 17)
       << __func__ << " " << *this
       << dendl;
+    auto factory = dynamic_cast<const RGWFileHandle::Factory*>(newobj_fac);
+    if (factory == nullptr) {
+      return false;
+    }
+    /* make sure the reclaiming object is the same partiton with newobject factory,
+     * then we can recycle the object, and replace with newobject */
+    if (!fs->fh_cache.is_same_partition(factory->fhk.fh_hk.object, fh.fh_hk.object)) {
+      return false;
+    }
     /* in the non-delete case, handle may still be in handle table */
     if (fh_hook.is_linked()) {
       /* in this case, we are being called from a context which holds
@@ -1936,7 +1985,8 @@ int rgw_unlink(struct rgw_fs *rgw_fs, struct rgw_file_handle *parent_fh,
 */
 int rgw_lookup(struct rgw_fs *rgw_fs,
 	      struct rgw_file_handle *parent_fh, const char* path,
-	      struct rgw_file_handle **fh, uint32_t flags)
+	      struct rgw_file_handle **fh,
+	      struct stat *st, uint32_t mask, uint32_t flags)
 {
   //CephContext* cct = static_cast<CephContext*>(rgw_fs->rgw);
   RGWLibFS *fs = static_cast<RGWLibFS*>(rgw_fs->fs_private);
@@ -1972,14 +2022,29 @@ int rgw_lookup(struct rgw_fs *rgw_fs,
 	<< dendl;
       fs->ref(rgw_fh);
     } else {
-      /* lookup in a readdir callback */
       enum rgw_fh_type fh_type = fh_type_of(flags);
 
       uint32_t sl_flags = (flags & RGW_LOOKUP_FLAG_RCB)
 	? RGWFileHandle::FLAG_NONE
 	: RGWFileHandle::FLAG_EXACT_MATCH;
 
-      fhr = fs->stat_leaf(parent, path, fh_type, sl_flags);
+      bool fast_attrs= fs->get_context()->_conf->rgw_nfs_s3_fast_attrs;
+
+      if ((flags & RGW_LOOKUP_FLAG_RCB) && fast_attrs) {
+	/* FAKE STAT--this should mean, interpolate special
+	 * owner, group, and perms masks */
+	fhr = fs->fake_leaf(parent, path, fh_type, st, mask, sl_flags);
+      } else {
+	if ((fh_type == RGW_FS_TYPE_DIRECTORY) && fast_attrs) {
+	  /* trust cached dir, if present */
+	  fhr = fs->lookup_fh(parent, path, RGWFileHandle::FLAG_DIRECTORY);
+	  if (get<0>(fhr)) {
+	    rgw_fh = get<0>(fhr);
+	    goto done;
+	  }
+	}
+	fhr = fs->stat_leaf(parent, path, fh_type, sl_flags);
+      }
       if (! get<0>(fhr)) {
 	if (! (flags & RGW_LOOKUP_FLAG_CREATE))
 	  return -ENOENT;
@@ -1990,6 +2055,7 @@ int rgw_lookup(struct rgw_fs *rgw_fs,
     }
   } /* !root */
 
+done:
   struct rgw_file_handle *rfh = rgw_fh->get_fh();
   *fh = rfh;
 
@@ -2124,8 +2190,8 @@ int rgw_readdir(struct rgw_fs *rgw_fs,
   if ((*offset == 0) &&
       (flags & RGW_READDIR_FLAG_DOTDOT)) {
     /* send '.' and '..' with their NFS-defined offsets */
-    rcb(".", cb_arg, 1, RGW_LOOKUP_FLAG_DIR);
-    rcb("..", cb_arg, 2, RGW_LOOKUP_FLAG_DIR);
+    rcb(".", cb_arg, 1, nullptr, 0, RGW_LOOKUP_FLAG_DIR);
+    rcb("..", cb_arg, 2, nullptr, 0, RGW_LOOKUP_FLAG_DIR);
   }
 
   int rc = parent->readdir(rcb, cb_arg, offset, eof, flags);
@@ -2152,8 +2218,8 @@ int rgw_readdir2(struct rgw_fs *rgw_fs,
   if ((! name) &&
       (flags & RGW_READDIR_FLAG_DOTDOT)) {
     /* send '.' and '..' with their NFS-defined offsets */
-    rcb(".", cb_arg, 1, RGW_LOOKUP_FLAG_DIR);
-    rcb("..", cb_arg, 2, RGW_LOOKUP_FLAG_DIR);
+    rcb(".", cb_arg, 1, nullptr, 0, RGW_LOOKUP_FLAG_DIR);
+    rcb("..", cb_arg, 2, nullptr, 0, RGW_LOOKUP_FLAG_DIR);
   }
 
   int rc = parent->readdir(rcb, cb_arg, name, eof, flags);

@@ -33,6 +33,7 @@ protected:
   mutable set<snapid_t> cached_snaps;
   mutable SnapContext cached_snap_context;
   mutable bufferlist cached_snap_trace;
+  mutable inodeno_t cached_subvolume_ino = 0;
 
   void check_cache() const;
 
@@ -133,6 +134,11 @@ public:
     return (p != s.end() && *p <= last);
   }
 
+  inodeno_t get_subvolume_ino() {
+    check_cache();
+    return cached_subvolume_ino;
+  }
+
   void adjust_parent();
 
   void split_at(SnapRealm *child);
@@ -147,9 +153,10 @@ public:
   }
   void remove_cap(client_t client, Capability *cap) {
     cap->item_snaprealm_caps.remove_myself();
-    if (client_caps[client]->empty()) {
-      delete client_caps[client];
-      client_caps.erase(client);
+    auto found = client_caps.find(client);
+    if (found != client_caps.end() && found->second->empty()) {
+      delete found->second;
+      client_caps.erase(found);
     }
   }
 };

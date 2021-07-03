@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
-from . import ApiController, RESTController, UpdatePermission
+
+from mgr_util import get_most_recent_rate
+
+from . import ApiController, RESTController, UpdatePermission, \
+    allow_empty_body
 from .. import mgr, logger
 from ..security import Scope
 from ..services.ceph_service import CephService, SendCommandError
@@ -43,8 +47,9 @@ class Osd(RESTController):
                 continue
             for stat in ['osd.op_w', 'osd.op_in_bytes', 'osd.op_r', 'osd.op_out_bytes']:
                 prop = stat.split('.')[1]
-                osd['stats'][prop] = CephService.get_rate('osd', osd_spec, stat)
-                osd['stats_history'][prop] = CephService.get_rates('osd', osd_spec, stat)
+                rates = CephService.get_rates('osd', osd_spec, stat)
+                osd['stats'][prop] = get_most_recent_rate(rates)
+                osd['stats_history'][prop] = rates
             # Gauge stats
             for stat in ['osd.numpg', 'osd.stat_bytes', 'osd.stat_bytes_used']:
                 osd['stats'][stat.split('.')[1]] = mgr.get_latest('osd', osd_spec, stat)
@@ -88,23 +93,28 @@ class Osd(RESTController):
 
     @RESTController.Resource('POST', query_params=['deep'])
     @UpdatePermission
+    @allow_empty_body
     def scrub(self, svc_id, deep=False):
         api_scrub = "osd deep-scrub" if str_to_bool(deep) else "osd scrub"
         CephService.send_command("mon", api_scrub, who=svc_id)
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def mark_out(self, svc_id):
         CephService.send_command('mon', 'osd out', ids=[svc_id])
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def mark_in(self, svc_id):
         CephService.send_command('mon', 'osd in', ids=[svc_id])
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def mark_down(self, svc_id):
         CephService.send_command('mon', 'osd down', ids=[svc_id])
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def reweight(self, svc_id, weight):
         """
         Reweights the OSD temporarily.
@@ -126,6 +136,7 @@ class Osd(RESTController):
             weight=float(weight))
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def mark_lost(self, svc_id):
         """
         Note: osd must be marked `down` before marking lost.
@@ -151,6 +162,7 @@ class Osd(RESTController):
         }
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def purge(self, svc_id):
         """
         Note: osd must be marked `down` before removal.
@@ -159,6 +171,7 @@ class Osd(RESTController):
                                  yes_i_really_mean_it=True)
 
     @RESTController.Resource('POST')
+    @allow_empty_body
     def destroy(self, svc_id):
         """
         Mark osd as being destroyed. Keeps the ID intact (allowing reuse), but

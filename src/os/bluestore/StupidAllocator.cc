@@ -10,10 +10,13 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "stupidalloc 0x" << this << " "
 
-StupidAllocator::StupidAllocator(CephContext* cct)
-  : cct(cct), num_free(0),
+StupidAllocator::StupidAllocator(CephContext* cct,
+                                 const std::string& name,
+                                 int64_t _block_size)
+  : Allocator(name), cct(cct), num_free(0),
     free(10),
-    last_alloc(0)
+    last_alloc(0),
+    block_size(_block_size)
 {
 }
 
@@ -193,6 +196,8 @@ int64_t StupidAllocator::allocate(
   if (max_alloc_size == 0) {
     max_alloc_size = want_size;
   }
+  // cap with 32-bit val
+  max_alloc_size = std::min(max_alloc_size, 0x10000000 - alloc_unit);
 
   while (allocated_size < want_size) {
     res = allocate_int(std::min(max_alloc_size, (want_size - allocated_size)),
@@ -251,15 +256,15 @@ uint64_t StupidAllocator::get_free()
   return num_free;
 }
 
-double StupidAllocator::get_fragmentation(uint64_t alloc_unit)
+double StupidAllocator::get_fragmentation()
 {
-  ceph_assert(alloc_unit);
+  ceph_assert(block_size);
   double res;
   uint64_t max_intervals = 0;
   uint64_t intervals = 0;
   {
     std::lock_guard l(lock);
-    max_intervals = p2roundup<uint64_t>(num_free, alloc_unit) / alloc_unit;
+    max_intervals = p2roundup<uint64_t>(num_free, block_size) / block_size;
     for (unsigned bin = 0; bin < free.size(); ++bin) {
       intervals += free[bin].num_intervals();
     }
@@ -291,8 +296,20 @@ void StupidAllocator::dump()
   }
 }
 
+void StupidAllocator::dump(std::function<void(uint64_t offset, uint64_t length)> notify)
+{
+  std::lock_guard l(lock);
+  for (unsigned bin = 0; bin < free.size(); ++bin) {
+    for (auto p = free[bin].begin(); p != free[bin].end(); ++p) {
+      notify(p.get_start(), p.get_len());
+    }
+  }
+}
+
 void StupidAllocator::init_add_free(uint64_t offset, uint64_t length)
 {
+  if (!length)
+    return;
   std::lock_guard l(lock);
   ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << length
 		 << std::dec << dendl;
@@ -302,6 +319,8 @@ void StupidAllocator::init_add_free(uint64_t offset, uint64_t length)
 
 void StupidAllocator::init_rm_free(uint64_t offset, uint64_t length)
 {
+  if (!length)
+    return;
   std::lock_guard l(lock);
   ldout(cct, 10) << __func__ << " 0x" << std::hex << offset << "~" << length
 	   	 << std::dec << dendl;

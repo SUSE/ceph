@@ -136,49 +136,22 @@ public:
 MDCache::MDCache(MDSRank *m, PurgeQueue &purge_queue_) :
   mds(m),
   filer(m->objecter, m->finisher),
-  exceeded_size_limit(false),
   recovery_queue(m),
   stray_manager(m, purge_queue_),
   trim_counter(g_conf().get_val<double>("mds_cache_trim_decay_rate")),
   open_file_table(m)
 {
   migrator.reset(new Migrator(mds, this));
-  root = NULL;
-  myin = NULL;
-  readonly = false;
-
-  stray_index = 0;
-  for (int i = 0; i < NUM_STRAY; ++i) {
-    strays[i] = NULL;
-  }
-
-  num_shadow_inodes = 0;
-  num_inodes_with_caps = 0;
 
   max_dir_commit_size = g_conf()->mds_dir_max_commit_size ?
                         (g_conf()->mds_dir_max_commit_size << 20) :
                         (0.9 *(g_conf()->osd_max_write_size << 20));
 
-  discover_last_tid = 0;
-  open_ino_last_tid = 0;
-  find_ino_peer_last_tid = 0;
-
-  last_cap_id = 0;
-
-  client_lease_durations[0] = 5.0;
-  client_lease_durations[1] = 30.0;
-  client_lease_durations[2] = 300.0;
-
-  resolves_pending = false;
-  rejoins_pending = false;
-  cap_imports_num_opening = 0;
-
-  opening_root = open = false;
-
   cache_inode_limit = g_conf().get_val<int64_t>("mds_cache_size");
   cache_memory_limit = g_conf().get_val<Option::size_t>("mds_cache_memory_limit");
   cache_reservation = g_conf().get_val<double>("mds_cache_reservation");
   cache_health_threshold = g_conf().get_val<double>("mds_health_cache_threshold");
+  forward_all_requests_to_auth = g_conf().get_val<bool>("mds_forward_all_requests_to_auth");
 
   lru.lru_set_midpoint(g_conf().get_val<double>("mds_cache_mid"));
 
@@ -186,9 +159,7 @@ MDCache::MDCache(MDSRank *m, PurgeQueue &purge_queue_) :
 
   decayrate.set_halflife(g_conf()->mds_decay_halflife);
 
-  did_shutdown_log_cap = false;
-
-  global_snaprealm = NULL;
+  upkeeper = std::thread(&MDCache::upkeep_main, this);
 }
 
 MDCache::~MDCache() 
@@ -196,11 +167,11 @@ MDCache::~MDCache()
   if (logger) {
     g_ceph_context->get_perfcounters_collection()->remove(logger.get());
   }
+  if (upkeeper.joinable())
+    upkeeper.join();
 }
 
-void MDCache::handle_conf_change(const ConfigProxy& conf,
-                                 const std::set <std::string> &changed,
-                                 const MDSMap &mdsmap)
+void MDCache::handle_conf_change(const std::set<std::string>& changed, const MDSMap& mdsmap)
 {
   if (changed.count("mds_cache_size"))
     cache_inode_limit = g_conf().get_val<int64_t>("mds_cache_size");
@@ -215,9 +186,12 @@ void MDCache::handle_conf_change(const ConfigProxy& conf,
   if (changed.count("mds_cache_trim_decay_rate")) {
     trim_counter = DecayCounter(g_conf().get_val<double>("mds_cache_trim_decay_rate"));
   }
+  if (changed.count("mds_forward_all_requests_to_auth")){
+    forward_all_requests_to_auth = g_conf().get_val<bool>("mds_forward_all_requests_to_auth");
+  }
 
-  migrator->handle_conf_change(conf, changed, mdsmap);
-  mds->balancer->handle_conf_change(conf, changed, mdsmap);
+  migrator->handle_conf_change(changed, mdsmap);
+  mds->balancer->handle_conf_change(changed, mdsmap);
 }
 
 void MDCache::log_stat()
@@ -230,6 +204,11 @@ void MDCache::log_stat()
   mds->logger->set(l_mds_inodes_pin_tail, lru.lru_get_pintail());
   mds->logger->set(l_mds_inodes_with_caps, num_inodes_with_caps);
   mds->logger->set(l_mds_caps, Capability::count());
+  if (root) {
+    mds->logger->set(l_mds_root_rfiles, root->inode.rstat.rfiles);
+    mds->logger->set(l_mds_root_rbytes, root->inode.rstat.rbytes);
+    mds->logger->set(l_mds_root_rsnaps, root->inode.rstat.rsnaps);
+  }
 }
 
 
@@ -237,6 +216,11 @@ void MDCache::log_stat()
 
 bool MDCache::shutdown()
 {
+  {
+    std::scoped_lock lock(upkeep_mutex);
+    upkeep_trim_shutdown = true;
+    upkeep_cvar.notify_one();
+  }
   if (lru.lru_get_size() > 0) {
     dout(7) << "WARNING: mdcache shutdown with non-empty cache" << dendl;
     //show_cache();
@@ -264,7 +248,7 @@ void MDCache::add_inode(CInode *in)
   }
 
   if (in->ino() < MDS_INO_SYSTEM_BASE) {
-    if (in->ino() == MDS_INO_ROOT)
+    if (in->ino() == CEPH_INO_ROOT)
       root = in;
     else if (in->ino() == MDS_INO_MDSDIR(mds->get_nodeid()))
       myin = in;
@@ -275,10 +259,6 @@ void MDCache::add_inode(CInode *in)
     }
     if (in->is_base())
       base_inodes.insert(in);
-  }
-
-  if (cache_toofull()) {
-    exceeded_size_limit = true;
   }
 }
 
@@ -304,6 +284,9 @@ void MDCache::remove_inode(CInode *o)
 
   if (o->state_test(CInode::STATE_QUEUEDEXPORTPIN))
     export_pin_queue.erase(o);
+
+  if (o->state_test(CInode::STATE_DELAYEDEXPORTPIN))
+    export_pin_delayed_queue.erase(o);
 
   // remove from inode map
   if (o->last == CEPH_NOSNAP) {
@@ -370,6 +353,7 @@ void MDCache::create_unlinked_system_inode(CInode *in, inodeno_t ino,
   in->inode.change_attr = 0;
   in->inode.export_pin = MDS_RANK_NONE;
 
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(&in->inode.dir_layout, 0, sizeof(in->inode.dir_layout));
   if (in->inode.is_dir()) {
     in->inode.dir_layout.dl_dir_hash = g_conf()->mds_default_dir_hash;
@@ -403,7 +387,7 @@ CInode *MDCache::create_system_inode(inodeno_t ino, int mode)
 
 CInode *MDCache::create_root_inode()
 {
-  CInode *i = create_system_inode(MDS_INO_ROOT, S_IFDIR|0755);
+  CInode *i = create_system_inode(CEPH_INO_ROOT, S_IFDIR|0755);
   i->inode.uid = g_conf()->mds_root_ino_uid;
   i->inode.gid = g_conf()->mds_root_ino_gid;
   i->inode.layout = default_file_layout;
@@ -596,10 +580,10 @@ void MDCache::open_root_inode(MDSContext *c)
 {
   if (mds->get_nodeid() == mds->mdsmap->get_root()) {
     CInode *in;
-    in = create_system_inode(MDS_INO_ROOT, S_IFDIR|0755);  // initially inaccurate!
+    in = create_system_inode(CEPH_INO_ROOT, S_IFDIR|0755);  // initially inaccurate!
     in->fetch(c);
   } else {
-    discover_base_ino(MDS_INO_ROOT, c, mds->mdsmap->get_root());
+    discover_base_ino(CEPH_INO_ROOT, c, mds->mdsmap->get_root());
   }
 }
 
@@ -996,7 +980,7 @@ void MDCache::adjust_bounded_subtree_auth(CDir *dir, const set<CDir*>& bounds, m
   show_subtrees();
 
   CDir *root;
-  if (dir->ino() == MDS_INO_ROOT) {
+  if (dir->ino() == CEPH_INO_ROOT) {
     root = dir;  // bootstrap hack.
     if (subtrees.count(root) == 0) {
       subtrees[root];
@@ -1468,17 +1452,16 @@ CInode *MDCache::cow_inode(CInode *in, snapid_t last)
     auto ret = head_in->split_need_snapflush(oldin, in);
     if (ret.first) {
       oldin->client_snap_caps = in->client_snap_caps;
-      for (const auto &p : oldin->client_snap_caps) {
-	SimpleLock *lock = oldin->get_lock(p.first);
-	ceph_assert(lock);
-	for (const auto &q : p.second) {
+      if (!oldin->client_snap_caps.empty()) {
+	for (int i = 0; i < num_cinode_locks; i++) {
+	  SimpleLock *lock = oldin->get_lock(cinode_lock_info[i].lock);
+	  ceph_assert(lock);
 	  if (lock->get_state() != LOCK_SNAP_SYNC) {
 	    ceph_assert(lock->is_stable());
 	    lock->set_state(LOCK_SNAP_SYNC);  // gathering
 	    oldin->auth_pin(lock);
 	  }
 	  lock->get_wrlock(true);
-	  (void)q; /* unused */
 	}
       }
     }
@@ -1487,17 +1470,21 @@ CInode *MDCache::cow_inode(CInode *in, snapid_t last)
       in->client_snap_caps.clear();
       in->item_open_file.remove_myself();
       in->item_caps.remove_myself();
-      for (const auto &p : client_snap_caps) {
-	SimpleLock *lock = in->get_lock(p.first);
-	ceph_assert(lock);
-	ceph_assert(lock->get_state() == LOCK_SNAP_SYNC); // gathering
-	for (const auto &q : p.second) {
+
+      if (!client_snap_caps.empty()) {
+	MDSContext::vec finished;
+	for (int i = 0; i < num_cinode_locks; i++) {
+	  SimpleLock *lock = in->get_lock(cinode_lock_info[i].lock);
+	  ceph_assert(lock);
+	  ceph_assert(lock->get_state() == LOCK_SNAP_SYNC); // gathering
 	  lock->put_wrlock();
-	  (void)q; /* unused */
+	  if (!lock->get_num_wrlocks()) {
+	    lock->set_state(LOCK_SYNC);
+	    lock->take_waiting(SimpleLock::WAIT_STABLE|SimpleLock::WAIT_RD, finished);
+	    in->auth_unpin(lock);
+	  }
 	}
-	ceph_assert(!lock->get_num_wrlocks());
-	lock->set_state(LOCK_SYNC);
-	in->auth_unpin(lock);
+	mds->queue_waiters(finished);
       }
     }
     return oldin;
@@ -1512,23 +1499,8 @@ CInode *MDCache::cow_inode(CInode *in, snapid_t last)
       int issued = cap->need_snapflush() ? CEPH_CAP_ANY_WR : cap->issued();
       if ((issued & CEPH_CAP_ANY_WR) &&
 	  cap->client_follows < last) {
-	// note in oldin
-	for (int i = 0; i < num_cinode_locks; i++) {
-	  if (issued & cinode_lock_info[i].wr_caps) {
-	    int lockid = cinode_lock_info[i].lock;
-	    SimpleLock *lock = oldin->get_lock(lockid);
-	    ceph_assert(lock);
-	    if (lock->get_state() != LOCK_SNAP_SYNC) {
-	      ceph_assert(lock->is_stable());
-	      lock->set_state(LOCK_SNAP_SYNC);  // gathering
-	      oldin->auth_pin(lock);
-	    }
-	    lock->get_wrlock(true);
-	    oldin->client_snap_caps[lockid].insert(client);
-	    dout(10) << " client." << client << " cap " << ccap_string(issued & cinode_lock_info[i].wr_caps)
-		     << " wrlock lock " << *lock << " on " << *oldin << dendl;
-	  }
-	}
+	dout(10) << " client." << client << " cap " << ccap_string(issued) << dendl;
+	oldin->client_snap_caps.insert(client);
 	cap->client_follows = last;
 
 	// we need snapflushes for any intervening snaps
@@ -1540,6 +1512,19 @@ CInode *MDCache::cow_inode(CInode *in, snapid_t last)
 	}
       } else {
 	dout(10) << " ignoring client." << client << " cap follows " << cap->client_follows << dendl;
+      }
+    }
+
+    if (!oldin->client_snap_caps.empty()) {
+      for (int i = 0; i < num_cinode_locks; i++) {
+	SimpleLock *lock = oldin->get_lock(cinode_lock_info[i].lock);
+	ceph_assert(lock);
+	if (lock->get_state() != LOCK_SNAP_SYNC) {
+	  ceph_assert(lock->is_stable());
+	  lock->set_state(LOCK_SNAP_SYNC);  // gathering
+	  oldin->auth_pin(lock);
+	}
+	lock->get_wrlock(true);
       }
     }
   }
@@ -2701,16 +2686,13 @@ void MDCache::send_slave_resolves()
   map<mds_rank_t, MMDSResolve::ref> resolves;
 
   if (mds->is_resolve()) {
-    for (map<mds_rank_t, map<metareqid_t, MDSlaveUpdate*> >::iterator p = uncommitted_slave_updates.begin();
-	 p != uncommitted_slave_updates.end();
+    for (map<metareqid_t, uslave>::iterator p = uncommitted_slaves.begin();
+	 p != uncommitted_slaves.end();
 	 ++p) {
-      resolves[p->first] = MMDSResolve::create();
-      for (map<metareqid_t, MDSlaveUpdate*>::iterator q = p->second.begin();
-	   q != p->second.end();
-	   ++q) {
-	dout(10) << " including uncommitted " << q->first << dendl;
-	resolves[p->first]->add_slave_request(q->first, false);
-      }
+      mds_rank_t master = p->second.master;
+      auto &m = resolves[master];
+      if (!m) m = MMDSResolve::create();
+      m->add_slave_request(p->first, false);
     }
   } else {
     set<mds_rank_t> resolve_set;
@@ -3375,7 +3357,7 @@ void MDCache::handle_resolve_ack(const MMDSResolveAck::const_ref &ack)
 
     if (mds->is_resolve()) {
       // replay
-      MDSlaveUpdate *su = get_uncommitted_slave_update(p.first, from);
+      MDSlaveUpdate *su = get_uncommitted_slave(p.first, from);
       ceph_assert(su);
 
       // log commit
@@ -3384,7 +3366,7 @@ void MDCache::handle_resolve_ack(const MMDSResolveAck::const_ref &ack)
 				     new C_MDC_SlaveCommit(this, from, p.first));
       mds->mdlog->flush();
 
-      finish_uncommitted_slave_update(p.first, from);
+      finish_uncommitted_slave(p.first);
     } else {
       MDRequestRef mdr = request_get(p.first);
       // information about master imported caps
@@ -3400,7 +3382,7 @@ void MDCache::handle_resolve_ack(const MMDSResolveAck::const_ref &ack)
     dout(10) << " abort on slave " << metareq << dendl;
 
     if (mds->is_resolve()) {
-      MDSlaveUpdate *su = get_uncommitted_slave_update(metareq, from);
+      MDSlaveUpdate *su = get_uncommitted_slave(metareq, from);
       ceph_assert(su);
 
       // perform rollback (and journal a rollback entry)
@@ -3437,24 +3419,45 @@ void MDCache::handle_resolve_ack(const MMDSResolveAck::const_ref &ack)
   }
 }
 
-void MDCache::add_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master, MDSlaveUpdate *su)
+void MDCache::add_uncommitted_slave(metareqid_t reqid, LogSegment *ls, mds_rank_t master, MDSlaveUpdate *su)
 {
-  ceph_assert(uncommitted_slave_updates[master].count(reqid) == 0);
-  uncommitted_slave_updates[master][reqid] = su;
+  auto const &ret = uncommitted_slaves.emplace(std::piecewise_construct,
+                                               std::forward_as_tuple(reqid),
+                                               std::forward_as_tuple());
+  ceph_assert(ret.second);
+  ls->uncommitted_slaves.insert(reqid);
+  uslave &u = ret.first->second;
+  u.master = master;
+  u.ls = ls;
+  u.su = su;
+  if (su == nullptr) {
+    return;
+  }
   for(set<CInode*>::iterator p = su->olddirs.begin(); p != su->olddirs.end(); ++p)
     uncommitted_slave_rename_olddir[*p]++;
   for(set<CInode*>::iterator p = su->unlinked.begin(); p != su->unlinked.end(); ++p)
     uncommitted_slave_unlink[*p]++;
 }
 
-void MDCache::finish_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master)
+void MDCache::finish_uncommitted_slave(metareqid_t reqid, bool assert_exist)
 {
-  ceph_assert(uncommitted_slave_updates[master].count(reqid));
-  MDSlaveUpdate* su = uncommitted_slave_updates[master][reqid];
+  auto it = uncommitted_slaves.find(reqid);
+  if (it == uncommitted_slaves.end()) {
+    ceph_assert(!assert_exist);
+    return;
+  }
+  uslave &u = it->second;
+  MDSlaveUpdate* su = u.su;
 
-  uncommitted_slave_updates[master].erase(reqid);
-  if (uncommitted_slave_updates[master].empty())
-    uncommitted_slave_updates.erase(master);
+  if (!u.waiters.empty()) {
+    mds->queue_waiters(u.waiters);
+  }
+  u.ls->uncommitted_slaves.erase(reqid);
+  uncommitted_slaves.erase(it);
+
+  if (su == nullptr) {
+    return;
+  }
   // discard the non-auth subtree we renamed out of
   for(set<CInode*>::iterator p = su->olddirs.begin(); p != su->olddirs.end(); ++p) {
     CInode *diri = *p;
@@ -3492,23 +3495,26 @@ void MDCache::finish_uncommitted_slave_update(metareqid_t reqid, mds_rank_t mast
   delete su;
 }
 
-MDSlaveUpdate* MDCache::get_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master)
+MDSlaveUpdate* MDCache::get_uncommitted_slave(metareqid_t reqid, mds_rank_t master)
 {
 
-  MDSlaveUpdate* su = NULL;
-  if (uncommitted_slave_updates.count(master) &&
-      uncommitted_slave_updates[master].count(reqid)) {
-    su = uncommitted_slave_updates[master][reqid];
-    ceph_assert(su);
+  MDSlaveUpdate* su = nullptr;
+  auto it = uncommitted_slaves.find(reqid);
+  if (it != uncommitted_slaves.end() &&
+      it->second.master == master) {
+    su = it->second.su;
   }
   return su;
 }
 
-void MDCache::finish_rollback(metareqid_t reqid) {
+void MDCache::finish_rollback(metareqid_t reqid, MDRequestRef& mdr) {
   auto p = resolve_need_rollback.find(reqid);
   ceph_assert(p != resolve_need_rollback.end());
-  if (mds->is_resolve())
-    finish_uncommitted_slave_update(reqid, p->second);
+  if (mds->is_resolve()) {
+    finish_uncommitted_slave(reqid, false);
+  } else if (mdr) {
+    finish_uncommitted_slave(mdr->reqid, mdr->more()->slave_update_journaled);
+  }
   resolve_need_rollback.erase(p);
   maybe_finish_slave_resolve();
 }
@@ -5504,17 +5510,17 @@ void MDCache::rebuild_need_snapflush(CInode *head_in, SnapRealm *realm,
 
     dout(10) << " need snapflush from client." << client << " on " << *in << dendl;
 
-    /* TODO: we can check the reconnected/flushing caps to find
-     *       which locks need gathering */
-    for (int i = 0; i < num_cinode_locks; i++) {
-      int lockid = cinode_lock_info[i].lock;
-      SimpleLock *lock = in->get_lock(lockid);
-      ceph_assert(lock);
-      in->client_snap_caps[lockid].insert(client);
-      in->auth_pin(lock);
-      lock->set_state(LOCK_SNAP_SYNC);
-      lock->get_wrlock(true);
+    if (in->client_snap_caps.empty()) {
+      for (int i = 0; i < num_cinode_locks; i++) {
+	int lockid = cinode_lock_info[i].lock;
+	SimpleLock *lock = in->get_lock(lockid);
+	ceph_assert(lock);
+	in->auth_pin(lock);
+	lock->set_state(LOCK_SNAP_SYNC);
+	lock->get_wrlock(true);
+      }
     }
+    in->client_snap_caps.insert(client);
     mds->locker->mark_need_snapflush_inode(in);
   }
 }
@@ -6580,7 +6586,7 @@ std::pair<bool, uint64_t> MDCache::trim_lru(uint64_t count, expiremap& expiremap
   unexpirables.clear();
 
   // trim dentries from the LRU until count is reached
-  // if mds is in standbyreplay and will trim all inodes which aren't in segments
+  // if mds is in standby_replay and skip trimming the inodes
   while (!throttled && (cache_toofull() || count > 0 || is_standby_replay)) {
     throttled |= trim_counter_start+trimmed >= trim_threshold;
     if (throttled) break;
@@ -6588,8 +6594,7 @@ std::pair<bool, uint64_t> MDCache::trim_lru(uint64_t count, expiremap& expiremap
     if (!dn) {
       break;
     }
-    if ((is_standby_replay && dn->get_linkage()->inode &&
-        dn->get_linkage()->inode->item_open_file.is_on_list())) {
+    if (is_standby_replay && dn->get_linkage()->inode) {
       // we move the inodes that need to be trimmed to the end of the lru queue.
       // refer to MDCache::standby_trim_segment
       lru.lru_insert_bot(dn);
@@ -6655,9 +6660,7 @@ std::pair<bool, uint64_t> MDCache::trim(uint64_t count)
       if (!diri->is_auth()) {
 	if (dir->get_num_ref() > 1)  // only subtree pin
 	  continue;
-	list<CDir*> ls;
-	diri->get_subtree_dirfrags(ls);
-	if (diri->get_num_ref() > (int)ls.size()) // only pinned by subtrees
+	if (diri->get_num_ref() > diri->get_num_subtree_roots())
 	  continue;
 
 	// don't trim subtree root if its auth MDS is recovering.
@@ -7303,6 +7306,13 @@ void MDCache::standby_trim_segment(LogSegment *ls)
     in->dirfragtreelock.remove_dirty();
     try_trim_inode(in);
   }
+  while (!ls->truncating_inodes.empty()) {
+    auto it = ls->truncating_inodes.begin();
+    CInode *in = *it;
+    ls->truncating_inodes.erase(it);
+    in->put(CInode::PIN_TRUNCATING);
+    try_trim_inode(in);
+  }
 }
 
 void MDCache::handle_cache_expire(const MCacheExpire::const_ref &m)
@@ -7560,24 +7570,25 @@ void MDCache::trim_client_leases()
   
   dout(10) << "trim_client_leases" << dendl;
 
-  for (int pool=0; pool<client_lease_pools; pool++) {
-    int before = client_leases[pool].size();
-    if (client_leases[pool].empty()) 
+  std::size_t pool = 0;
+  for (const auto& list : client_leases) {
+    pool += 1;
+    if (list.empty())
       continue;
 
-    while (!client_leases[pool].empty()) {
-      ClientLease *r = client_leases[pool].front();
+    auto before = list.size();
+    while (!list.empty()) {
+      ClientLease *r = list.front();
       if (r->ttl > now) break;
       CDentry *dn = static_cast<CDentry*>(r->parent);
       dout(10) << " expiring client." << r->client << " lease of " << *dn << dendl;
       dn->remove_client_lease(r, mds->locker);
     }
-    int after = client_leases[pool].size();
+    auto after = list.size();
     dout(10) << "trim_client_leases pool " << pool << " trimmed "
 	     << (before-after) << " leases, " << after << " left" << dendl;
   }
 }
-
 
 void MDCache::check_memory_usage()
 {
@@ -7604,24 +7615,6 @@ void MDCache::check_memory_usage()
   mds->update_mlogger();
   mds->mlogger->set(l_mdm_rss, last.get_rss());
   mds->mlogger->set(l_mdm_heap, last.get_heap());
-
-  if (cache_toofull()) {
-    mds->server->recall_client_state(nullptr);
-  }
-
-  // If the cache size had exceeded its limit, but we're back in bounds
-  // now, free any unused pool memory so that our memory usage isn't
-  // permanently bloated.
-  if (exceeded_size_limit && !cache_toofull()) {
-    // Only do this once we are back in bounds: otherwise the releases would
-    // slow down whatever process caused us to exceed bounds to begin with
-    if (ceph_using_tcmalloc()) {
-      dout(5) << "check_memory_usage: releasing unused space from tcmalloc"
-	      << dendl;
-      ceph_heap_release_free_memory();
-    }
-    exceeded_size_limit = false;
-  }
 }
 
 
@@ -8344,9 +8337,10 @@ int MDCache::path_traverse(MDRequestRef& mdr, MDSContextFactory& cf,     // who
       // dirfrag/dentry is not mine.
       mds_authority_t dauth = curdir->authority();
 
-      if (forward &&
+      if (!forward_all_requests_to_auth &&
+	  forward &&
 	  mdr && mdr->client_request &&
-	  (int)depth < mdr->client_request->get_num_fwd()) {
+	  (int)depth < mdr->client_request->get_num_fwd()){
 	dout(7) << "traverse: snap " << snapid << " and depth " << depth
 		<< " < fwd " << mdr->client_request->get_num_fwd()
 		<< ", discovering instead of forwarding" << dendl;
@@ -8642,7 +8636,7 @@ void MDCache::_open_ino_backtrace_fetched(inodeno_t ino, bufferlist& bl, int err
   if (err == 0) {
     if (backtrace.ancestors.empty()) {
       dout(10) << " got empty backtrace " << dendl;
-      err = -EIO;
+      err = -ESTALE;
     } else if (!info.ancestors.empty()) {
       if (info.ancestors[0] == backtrace.ancestors[0]) {
 	dout(10) << " got same parents " << info.ancestors[0] << " 2 times" << dendl;
@@ -9357,7 +9351,9 @@ void MDCache::request_finish(MDRequestRef& mdr)
 
 void MDCache::request_forward(MDRequestRef& mdr, mds_rank_t who, int port)
 {
-  mdr->mark_event("forwarding request");
+  CachedStackStringStream css;
+  *css << "forwarding request to mds." << who;
+  mdr->mark_event(css->strv());
   if (mdr->client_request && mdr->client_request->get_source().is_client()) {
     dout(7) << "request_forward " << *mdr << " to mds." << who << " req "
             << *mdr->client_request << dendl;
@@ -9538,7 +9534,8 @@ void MDCache::request_kill(MDRequestRef& mdr)
   mdr->mark_event("killing request");
 
   if (mdr->committing) {
-    dout(10) << "request_kill " << *mdr << " -- already committing, no-op" << dendl;
+    dout(10) << "request_kill " << *mdr << " -- already committing, remove it from sesssion requests" << dendl;
+    mdr->item_session_request.remove_myself();
   } else {
     dout(10) << "request_kill " << *mdr << dendl;
     request_cleanup(mdr);
@@ -9551,7 +9548,7 @@ void MDCache::request_kill(MDRequestRef& mdr)
 void MDCache::create_global_snaprealm()
 {
   CInode *in = new CInode(this); // dummy inode
-  create_unlinked_system_inode(in, MDS_INO_GLOBAL_SNAPREALM, S_IFDIR|0755);
+  create_unlinked_system_inode(in, CEPH_INO_GLOBAL_SNAPREALM, S_IFDIR|0755);
   add_inode(in);
   global_snaprealm = in->snaprealm;
 }
@@ -10534,7 +10531,7 @@ CInode *MDCache::add_replica_inode(bufferlist::const_iterator& p, CDentry *dn, M
     in = new CInode(this, false, 1, last);
     in->decode_replica(p, true);
     add_inode(in);
-    if (in->ino() == MDS_INO_ROOT)
+    if (in->ino() == CEPH_INO_ROOT)
       in->inode_auth.first = 0;
     else if (in->is_mdsdir())
       in->inode_auth.first = in->ino() - MDS_INO_MDSDIR_OFFSET;
@@ -11090,7 +11087,7 @@ bool MDCache::can_fragment(CInode *diri, list<CDir*>& dirs)
     dout(7) << "can_fragment: i won't merge|split anything in stray" << dendl;
     return false;
   }
-  if (diri->is_mdsdir() || diri->is_stray() || diri->ino() == MDS_INO_CEPH) {
+  if (diri->is_mdsdir() || diri->is_stray() || diri->ino() == CEPH_INO_CEPH) {
     dout(7) << "can_fragment: i won't fragment the mdsdir or straydir or .ceph" << dendl;
     return false;
   }
@@ -11178,7 +11175,7 @@ void MDCache::merge_dir(CInode *diri, frag_t frag)
 
   CDir *first = dirs.front();
   int bits = first->get_frag().bits() - frag.bits();
-  dout(10) << " we are merginb by " << bits << " bits" << dendl;
+  dout(10) << " we are merging by " << bits << " bits" << dendl;
 
   dirfrag_t basedirfrag(diri->ino(), frag);
   MDRequestRef mdr = request_start_internal(CEPH_MDS_OP_FRAGMENTDIR);
@@ -11614,6 +11611,9 @@ void MDCache::_fragment_logged(MDRequestRef& mdr)
     CDir *dir = *p;
     dout(10) << " storing result frag " << *dir << dendl;
 
+    dir->mark_dirty(dir->pre_dirty(), mdr->ls);
+    dir->mark_new(mdr->ls);
+
     // freeze and store them too
     dir->auth_pin(this);
     dir->state_set(CDir::STATE_FRAGMENTING);
@@ -11923,6 +11923,15 @@ void MDCache::rollback_uncommitted_fragment(dirfrag_t basedirfrag, frag_vec_t&& 
   }
 }
 
+void MDCache::wait_for_uncommitted_fragments(MDSContext* finisher)
+{
+  MDSGatherBuilder gather(g_ceph_context, finisher);
+  for (auto& p : uncommitted_fragments) {
+    p.second.waiters.push_back(gather.new_sub());
+  }
+  gather.activate();
+}
+
 void MDCache::rollback_uncommitted_fragments()
 {
   dout(10) << "rollback_uncommitted_fragments: " << uncommitted_fragments.size() << " pending" << dendl;
@@ -12160,7 +12169,7 @@ void MDCache::show_subtrees(int dbl, bool force_print)
     dout(ceph::dout::need_dynamic(dbl)) << indent << "|_" << pad << s
 					<< " " << auth << *dir << dendl;
 
-    if (dir->ino() == MDS_INO_ROOT)
+    if (dir->ino() == CEPH_INO_ROOT)
       ceph_assert(dir->inode == root);
     if (dir->ino() == MDS_INO_MDSDIR(mds->get_nodeid()))
       ceph_assert(dir->inode == myin);
@@ -12987,4 +12996,74 @@ bool MDCache::dump_inode(Formatter *f, uint64_t number) {
   in->dump(f, CInode::DUMP_DEFAULT | CInode::DUMP_PATH);
   f->close_section();
   return true;
+}
+
+void MDCache::handle_mdsmap(const MDSMap &mdsmap) {
+  // process export_pin_delayed_queue whenever a new MDSMap received
+  auto &q = export_pin_delayed_queue;
+  for (auto it = q.begin(); it != q.end(); ) {
+    auto *in = *it;
+    mds_rank_t export_pin = in->get_export_pin(false);
+    dout(10) << " delayed export_pin=" << export_pin << " on " << *in 
+      << " max_mds=" << mdsmap.get_max_mds() << dendl;
+    if (export_pin >= mdsmap.get_max_mds()) {
+      it++;
+      continue;
+    }
+
+    in->state_clear(CInode::STATE_DELAYEDEXPORTPIN);
+    it = q.erase(it);
+    in->maybe_export_pin();
+  }
+}
+
+void MDCache::upkeep_main(void)
+{
+  std::unique_lock lock(upkeep_mutex);
+  while (!upkeep_trim_shutdown.load()) {
+    auto now = clock::now();
+    auto since = now-upkeep_last_trim;
+    auto trim_interval = clock::duration(g_conf().get_val<std::chrono::seconds>("mds_cache_trim_interval"));
+    if (since >= trim_interval*.90) {
+      lock.unlock(); /* mds_lock -> upkeep_mutex */
+      std::scoped_lock mds_lock(mds->mds_lock);
+      lock.lock();
+      if (upkeep_trim_shutdown.load())
+        return;
+      check_memory_usage();
+      if (mds->is_cache_trimmable()) {
+        dout(20) << "upkeep thread trimming cache; last trim " << since << " ago" << dendl;
+        bool active_with_clients = mds->is_active() || mds->is_clientreplay() || mds->is_stopping();
+        if (active_with_clients) {
+          trim_client_leases();
+        }
+        trim();
+        if (active_with_clients) {
+          auto recall_flags = Server::RecallFlags::ENFORCE_MAX|Server::RecallFlags::ENFORCE_LIVENESS;
+          if (cache_toofull()) {
+            recall_flags = recall_flags|Server::RecallFlags::TRIM;
+          }
+          mds->server->recall_client_state(nullptr, recall_flags);
+        }
+        upkeep_last_trim = now = clock::now();
+      } else {
+        dout(10) << "cache not ready for trimming" << dendl;
+      }
+    } else {
+      trim_interval -= since;
+    }
+    since = now-upkeep_last_release;
+    auto release_interval = clock::duration(g_conf().get_val<std::chrono::seconds>("mds_cache_release_free_interval"));
+    if (since >= release_interval*.90) {
+      /* XXX not necessary once MDCache uses PriorityCache */
+      dout(10) << "releasing free memory" << dendl;
+      ceph_heap_release_free_memory();
+      upkeep_last_release = clock::now();
+    } else {
+      release_interval -= since;
+    }
+    auto interval = std::min(release_interval, trim_interval);
+    dout(20) << "upkeep thread waiting interval " << interval << dendl;
+    upkeep_cvar.wait_for(lock, interval);
+  }
 }

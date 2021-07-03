@@ -150,6 +150,7 @@ cdef extern from "rados/librados.h" nogil:
     int rados_cluster_stat(rados_t cluster, rados_cluster_stat_t *result)
     int rados_cluster_fsid(rados_t cluster, char *buf, size_t len)
     int rados_blacklist_add(rados_t cluster, char *client_address, uint32_t expire_seconds)
+    int rados_getaddrs(rados_t cluster, char** addrs)
     int rados_application_enable(rados_ioctx_t io, const char *app_name,
                                  int force)
     void rados_set_osdmap_full_try(rados_ioctx_t io)
@@ -556,6 +557,11 @@ def decode_cstr(val, encoding="utf-8"):
     return val.decode(encoding)
 
 
+def flatten_dict(d, name):
+    items = chain.from_iterable(d.items())
+    return cstr(''.join(i + '\0' for i in items), name)
+
+
 cdef char* opt_str(s) except? NULL:
     if s is None:
         return NULL
@@ -573,7 +579,7 @@ cdef size_t * to_csize_t_array(list_int):
     cdef size_t *ret = <size_t *>malloc(len(list_int) * sizeof(size_t))
     if ret == NULL:
         raise MemoryError("malloc failed")
-    for i in xrange(len(list_int)):
+    for i in range(len(list_int)):
         ret[i] = <size_t>list_int[i]
     return ret
 
@@ -582,7 +588,7 @@ cdef char ** to_bytes_array(list_bytes):
     cdef char **ret = <char **>malloc(len(list_bytes) * sizeof(char *))
     if ret == NULL:
         raise MemoryError("malloc failed")
-    for i in xrange(len(list_bytes)):
+    for i in range(len(list_bytes)):
         ret[i] = <char *>list_bytes[i]
     return ret
 
@@ -624,10 +630,15 @@ cdef class Rados(object):
         PyEval_InitThreads()
         self.__setup(*args, **kwargs)
 
-    @requires(('rados_id', opt(str_type)), ('name', opt(str_type)), ('clustername', opt(str_type)),
-              ('conffile', opt(str_type)))
+    NO_CONF_FILE = -1
+    "special value that indicates no conffile should be read when creating a mount handle"
+    DEFAULT_CONF_FILES = -2
+    "special value that indicates the default conffiles should be read when creating a mount handle"
+
+    @requires(('rados_id', opt(str_type)), ('name', opt(str_type)),
+              ('clustername', opt(str_type)), ('conffile', (str_type, int)))
     def __setup(self, rados_id=None, name=None, clustername=None,
-                conf_defaults=None, conffile=None, conf=None, flags=0,
+                conf_defaults=None, conffile=NO_CONF_FILE, conf=None, flags=0,
                 context=None):
         self.monitor_callback = None
         self.monitor_callback2 = None
@@ -669,14 +680,35 @@ cdef class Rados(object):
         if conf_defaults:
             for key, value in conf_defaults.items():
                 self.conf_set(key, value)
-        if conffile is not None:
-            # read the default conf file when '' is given
-            if conffile == '':
-                conffile = None
+        if conffile in (self.NO_CONF_FILE, None):
+            pass
+        elif conffile in (self.DEFAULT_CONF_FILES, ''):
+            self.conf_read_file(None)
+        else:
             self.conf_read_file(conffile)
         if conf:
             for key, value in conf.items():
                 self.conf_set(key, value)
+
+    def get_addrs(self):
+        """
+        Get associated client addresses with this RADOS session.
+        """
+        self.require_state("configuring", "connected")
+
+        cdef:
+            char* addrs = NULL
+
+        try:
+
+            with nogil:
+                ret = rados_getaddrs(self.cluster, &addrs)
+            if ret:
+                raise make_ex(ret, "error calling getaddrs")
+
+            return decode_cstr(addrs)
+        finally:
+            free(addrs)
 
     def require_state(self, *args):
         """
@@ -1510,8 +1542,7 @@ Rados object in state %s." % self.state)
         """
         service = cstr(service, 'service')
         daemon = cstr(daemon, 'daemon')
-        metadata_dict = '\0'.join(chain.from_iterable(metadata.items()))
-        metadata_dict += '\0'
+        metadata_dict = flatten_dict(metadata, 'metadata')
         cdef:
             char *_service = service
             char *_daemon = daemon
@@ -1524,8 +1555,7 @@ Rados object in state %s." % self.state)
 
     @requires(('metadata', dict))
     def service_daemon_update(self, status):
-        status_dict = '\0'.join(chain.from_iterable(status.items()))
-        status_dict += '\0'
+        status_dict = flatten_dict(status, 'status')
         cdef:
             char *_status = status_dict
 
@@ -3365,12 +3395,14 @@ returned %d, but should return zero on success." % (self.name, ret))
             raise Error("Rados(): keys and values must have the same number of items")
 
         keys = cstr_list(keys, 'keys')
+        values = cstr_list(values, 'values')
+        lens = [len(v) for v in values]
         cdef:
             WriteOp _write_op = write_op
             size_t key_num = len(keys)
             char **_keys = to_bytes_array(keys)
             char **_values = to_bytes_array(values)
-            size_t *_lens = to_csize_t_array([len(v) for v in values])
+            size_t *_lens = to_csize_t_array(lens)
 
         try:
             with nogil:

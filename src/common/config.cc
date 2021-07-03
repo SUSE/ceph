@@ -295,8 +295,8 @@ int md_config_t::set_mon_vals(CephContext *cct,
     std::string err;
     int r = _set_val(values, tracker, i.second, *o, CONF_MON, &err);
     if (r < 0) {
-      lderr(cct) << __func__ << " failed to set " << i.first << " = "
-		 << i.second << ": " << err << dendl;
+      ldout(cct, 4) << __func__ << " failed to set " << i.first << " = "
+		    << i.second << ": " << err << dendl;
       ignored_mon_values.emplace(i);
     } else if (r == ConfigValues::SET_NO_CHANGE ||
 	       r == ConfigValues::SET_NO_EFFECT) {
@@ -320,6 +320,11 @@ int md_config_t::set_mon_vals(CephContext *cct,
 		  << " cleared (was " << Option::to_str(config->second) << ")"
 		  << dendl;
     values.rm_val(name, CONF_MON);
+    // if this is a debug option, it needs to propagate to teh subsys;
+    // this isn't covered by update_legacy_vals() below.  similarly,
+    // we want to trigger a config notification for these items.
+    const Option *o = find_option(name);
+    _refresh(values, *o);
   });
   values_bl.clear();
   update_legacy_vals(values);
@@ -646,9 +651,6 @@ int md_config_t::parse_argv(ConfigValues& values,
     else if (ceph_argparse_flag(args, i, "--no-mon-config", (char*)NULL)) {
       values.no_mon_config = true;
     }
-    else if (ceph_argparse_flag(args, i, "--log-early", (char*)NULL)) {
-      values.log_early = true;
-    }
     else if (ceph_argparse_flag(args, i, "--mon-config", (char*)NULL)) {
       values.no_mon_config = false;
     }
@@ -656,6 +658,7 @@ int md_config_t::parse_argv(ConfigValues& values,
       set_val_or_die(values, tracker, "daemonize", "false");
     }
     else if (ceph_argparse_flag(args, i, "-d", (char*)NULL)) {
+      set_val_or_die(values, tracker, "fuse_debug", "true");
       set_val_or_die(values, tracker, "daemonize", "false");
       set_val_or_die(values, tracker, "log_file", "");
       set_val_or_die(values, tracker, "log_to_stderr", "true");
@@ -1104,17 +1107,19 @@ void md_config_t::early_expand_meta(
 bool md_config_t::finalize_reexpand_meta(ConfigValues& values,
 					 const ConfigTracker& tracker)
 {
-  for (auto& [name, value] : may_reexpand_meta) {
-    set_val(values, tracker, name, value);
+  std::vector<std::string> reexpands;
+  reexpands.swap(may_reexpand_meta);
+  for (auto& name : reexpands) {
+    // always refresh the options if they are in the may_reexpand_meta
+    // map, because the options may have already been expanded with old
+    // meta.
+    const auto &opt_iter = schema.find(name);
+    ceph_assert(opt_iter != schema.end());
+    const Option &opt = opt_iter->second;
+    _refresh(values, opt);
   }
-  
-  if (!may_reexpand_meta.empty()) {
-    // meta expands could have modified anything.  Copy it all out again.
-    update_legacy_vals(values);
-    return true;
-  } else {
-    return false;
-  }
+
+  return !may_reexpand_meta.empty();
 }
 
 Option::value_t md_config_t::_expand_meta(
@@ -1198,7 +1203,7 @@ Option::value_t md_config_t::_expand_meta(
       } else if (var == "pid") {
 	out += stringify(getpid());
         if (o) {
-          may_reexpand_meta[o->name] = *str;
+          may_reexpand_meta.push_back(o->name);
         }
       } else if (var == "cctid") {
 	out += stringify((unsigned long long)this);

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5.1)
 
 project(ceph CXX C ASM)
-set(VERSION 14.2.4)
+set(VERSION 14.2.22)
 
 if(POLICY CMP0028)
   cmake_policy(SET CMP0028 NEW)
@@ -23,6 +23,9 @@ if(POLICY CMP0051)
 endif()
 if(POLICY CMP0075)
   cmake_policy(SET CMP0075 NEW)
+endif()
+if(POLICY CMP0093)
+  cmake_policy(SET CMP0093 NEW)
 endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules/")
 
@@ -105,6 +108,7 @@ CHECK_FUNCTION_EXISTS(strerror_r HAVE_Strerror_R)
 CHECK_FUNCTION_EXISTS(name_to_handle_at HAVE_NAME_TO_HANDLE_AT)
 CHECK_FUNCTION_EXISTS(pipe2 HAVE_PIPE2)
 CHECK_FUNCTION_EXISTS(accept4 HAVE_ACCEPT4)
+CHECK_FUNCTION_EXISTS(sigdescr_np HAVE_SIGDESCR_NP)
 
 include(CMakePushCheckState)
 cmake_push_check_state(RESET)
@@ -119,6 +123,7 @@ cmake_pop_check_state()
 
 CHECK_FUNCTION_EXISTS(eventfd HAVE_EVENTFD)
 CHECK_FUNCTION_EXISTS(getprogname HAVE_GETPROGNAME)
+CHECK_FUNCTION_EXISTS(gettid HAVE_GETTID)
 
 CHECK_INCLUDE_FILES("linux/types.h" HAVE_LINUX_TYPES_H)
 CHECK_INCLUDE_FILES("linux/version.h" HAVE_LINUX_VERSION_H)
@@ -210,20 +215,33 @@ endif()
 
 find_package(Backtrace)
 
+# remote block storage
+option(WITH_RBD "Remote block storage is here" ON)
+
 if(LINUX)
   find_package(udev REQUIRED)
   set(HAVE_UDEV ${UDEV_FOUND})
   find_package(blkid REQUIRED)
   set(HAVE_BLKID ${BLKID_FOUND})
+  if(WITH_RBD)
+    find_package(genl REQUIRED)
+    set(HAVE_GENL $GENL_FOUND)
+  endif()
+  find_package(keyutils REQUIRED)
+  set(HAVE_KEYUTILS ${KEYUTILS_FOUND})
 elseif(FREEBSD)
   set(HAVE_UDEV OFF)
   set(HAVE_LIBAIO OFF)
   set(HAVE_BLKID OFF)
+  set(HAVE_GENL OFF)
+  set(HAVE_KEYUTILS OFF)
 else()
   set(HAVE_UDEV OFF)
   message(STATUS "Not using udev")
   set(HAVE_BLKID OFF)
   message(STATUS "Not using BLKID")
+  set(HAVE_GENL OFF)
+  message(STATUS "Not using GENL")
 endif(LINUX)
 
 option(WITH_OPENLDAP "OPENLDAP is here" ON)
@@ -240,7 +258,7 @@ endif()
 
 option(WITH_FUSE "Fuse is here" ON)
 if(WITH_FUSE)
-  find_package(fuse)
+  find_package(FUSE)
   set(HAVE_LIBFUSE ${FUSE_FOUND})
 endif()
 
@@ -267,11 +285,7 @@ if(WITH_BLUESTORE)
   endif()
 endif()
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "i386|i686|amd64|x86_64|AMD64|aarch64")
-  option(WITH_SPDK "Enable SPDK" ON)
-else()
-  option(WITH_SPDK "Enable SPDK" OFF)
-endif()
+option(WITH_SPDK "Enable SPDK" OFF)
 if(WITH_SPDK)
   if(NOT WITH_BLUESTORE)
     message(SEND_ERROR "Please enable WITH_BLUESTORE for using SPDK")
@@ -311,14 +325,18 @@ option(WITH_LIBCEPHFS "libcephfs client library" ON)
 # key-value store
 option(WITH_KVS "Key value store is here" ON)
 
-# remote block storage
-option(WITH_RBD "Remote block storage is here" ON)
-
 # KERNEL remote block storage
 option(WITH_KRBD "Kernel Remote block storage is here" ON)
 
 if(WITH_KRBD AND WITHOUT_RBD)
   message(FATAL_ERROR "Cannot have WITH_KRBD with WITH_RBD.")
+endif()
+if(LINUX)
+  if(WITH_LIBCEPHFS OR WITH_KRBD)
+    # keyutils is only used when talking to the Linux Kernel key store 
+    find_package(keyutils REQUIRED)
+    set(HAVE_KEYUTILS ${KEYUTILS_FOUND})
+  endif()
 endif()
 
 option(WITH_LEVELDB "LevelDB is here" ON)
@@ -386,10 +404,6 @@ else()
   set(EXE_LINKER_USE_PIE ${ENABLE_SHARED})
 endif()
 
-if(WITH_LIBCEPHFS OR WITH_KRBD)
-  find_package(keyutils REQUIRED)
-endif()
-
 find_package(CURL REQUIRED)
 set(CMAKE_REQUIRED_INCLUDES ${CURL_INCLUDE_DIRS})
 set(CMAKE_REQUIRED_LIBRARIES ${CURL_LIBRARIES})
@@ -436,6 +450,7 @@ option(WITH_RADOSGW_FCGI_FRONTEND "Rados Gateway's FCGI frontend is enabled" OFF
 option(WITH_RADOSGW_BEAST_FRONTEND "Rados Gateway's Beast frontend is enabled" ON)
 option(WITH_RADOSGW_BEAST_OPENSSL "Rados Gateway's Beast frontend uses OpenSSL" ON)
 option(WITH_RADOSGW_AMQP_ENDPOINT "Rados Gateway's pubsub support for AMQP push endpoint" ON)
+option(WITH_RADOSGW_KAFKA_ENDPOINT "Rados Gateway's pubsub support for Kafka push endpoint" ON)
 
 if(WITH_RADOSGW)
   find_package(EXPAT REQUIRED)
@@ -681,6 +696,9 @@ if(WITH_SYSTEM_NPM)
     message(FATAL_ERROR "Can't find npm.")
   endif()
 endif()
+set(DASHBOARD_FRONTEND_LANGS "" CACHE STRING
+  "List of comma separated ceph-dashboard frontend languages to build. \
+  Use value `ALL` to build all languages")
 
 include_directories(SYSTEM ${PROJECT_BINARY_DIR}/include)
 

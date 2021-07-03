@@ -47,7 +47,8 @@ static const auto signed_subresources = {
   "versionId",
   "versioning",
   "versions",
-  "website"
+  "website",
+  "object-lock"
 };
 
 /*
@@ -55,7 +56,7 @@ static const auto signed_subresources = {
  */
 
 static std::string
-get_canon_amz_hdr(const std::map<std::string, std::string>& meta_map)
+get_canon_amz_hdr(const meta_map_t& meta_map)
 {
   std::string dest;
 
@@ -116,8 +117,8 @@ void rgw_create_s3_canonical_header(
   const char* const content_md5,
   const char* const content_type,
   const char* const date,
-  const std::map<std::string, std::string>& meta_map,
-  const std::map<std::string, std::string>& qs_map,
+  const meta_map_t& meta_map,
+  const meta_map_t& qs_map,
   const char* const request_uri,
   const std::map<std::string, std::string>& sub_resources,
   std::string& dest_str)
@@ -156,7 +157,7 @@ static inline bool is_base64_for_content_md5(unsigned char c) {
 }
 
 static inline void get_v2_qs_map(const req_info& info,
-				 std::map<std::string, std::string>& qs_map) {
+				 meta_map_t& qs_map) {
   const auto& params = const_cast<RGWHTTPArgs&>(info.args).get_params();
   for (const auto& elt : params) {
     std::string k = boost::algorithm::to_lower_copy(elt.first);
@@ -189,7 +190,7 @@ bool rgw_create_s3_canonical_header(const req_info& info,
   const char *content_type = info.env->get("CONTENT_TYPE");
 
   std::string date;
-  std::map<std::string, std::string> qs_map;
+  meta_map_t qs_map;
 
   if (qsr) {
     get_v2_qs_map(info, qs_map); // handle qs metadata
@@ -496,7 +497,7 @@ std::string get_v4_canonical_qs(const req_info& info, const bool using_qs)
   }
   if (params->find_first_of('+') != std::string::npos) {
     copy_params = *params;
-    boost::replace_all(copy_params, "+", " ");
+    boost::replace_all(copy_params, "+", "%20");
     params = &copy_params;
   }
 

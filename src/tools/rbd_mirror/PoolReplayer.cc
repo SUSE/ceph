@@ -272,6 +272,8 @@ bool PoolReplayer<I>::is_running() const {
 template <typename I>
 void PoolReplayer<I>::init()
 {
+  Mutex::Locker l(m_lock);
+
   ceph_assert(!m_pool_replayer_thread.is_started());
 
   // reset state
@@ -414,8 +416,6 @@ int PoolReplayer<I>::init_rados(const std::string &cluster_name,
 			        const std::string &description,
 			        RadosRef *rados_ref,
                                 bool strip_cluster_overrides) {
-  rados_ref->reset(new librados::Rados());
-
   // NOTE: manually bootstrap a CephContext here instead of via
   // the librados API to avoid mixing global singletons between
   // the librados shared library and the daemon
@@ -433,10 +433,9 @@ int PoolReplayer<I>::init_rados(const std::string &cluster_name,
   // librados::Rados::conf_read_file
   int r = cct->_conf.parse_config_files(nullptr, nullptr, 0);
   if (r < 0 && r != -ENOENT) {
+    // do not treat this as fatal, it might still be able to connect
     derr << "could not read ceph conf for " << description << ": "
 	 << cpp_strerror(r) << dendl;
-    cct->put();
-    return r;
   }
 
   // preserve cluster-specific config settings before applying environment/cli
@@ -519,6 +518,8 @@ int PoolReplayer<I>::init_rados(const std::string &cluster_name,
   cct->_conf.apply_changes(nullptr);
   cct->_conf.complain_about_parse_errors(cct);
 
+  rados_ref->reset(new librados::Rados());
+
   r = (*rados_ref)->init_with_context(cct);
   ceph_assert(r == 0);
   cct->put();
@@ -550,7 +551,9 @@ void PoolReplayer<I>::run()
     }
 
     Mutex::Locker locker(m_lock);
-    if ((m_local_pool_watcher && m_local_pool_watcher->is_blacklisted()) ||
+    if (m_leader_watcher->is_blacklisted() ||
+        m_instance_replayer->is_blacklisted() ||
+        (m_local_pool_watcher && m_local_pool_watcher->is_blacklisted()) ||
 	(m_remote_pool_watcher && m_remote_pool_watcher->is_blacklisted())) {
       m_blacklisted = true;
       m_stopping = true;
@@ -566,6 +569,19 @@ void PoolReplayer<I>::run()
 }
 
 template <typename I>
+void PoolReplayer<I>::reopen_logs()
+{
+  Mutex::Locker l(m_lock);
+
+  if (m_local_rados) {
+    reinterpret_cast<CephContext *>(m_local_rados->cct())->reopen_logs();
+  }
+  if (m_remote_rados) {
+    reinterpret_cast<CephContext *>(m_remote_rados->cct())->reopen_logs();
+  }
+}
+
+template <typename I>
 void PoolReplayer<I>::print_status(Formatter *f, stringstream *ss)
 {
   dout(20) << "enter" << dendl;
@@ -577,9 +593,11 @@ void PoolReplayer<I>::print_status(Formatter *f, stringstream *ss)
   Mutex::Locker l(m_lock);
 
   f->open_object_section("pool_replayer_status");
-  f->dump_string("pool", m_local_io_ctx.get_pool_name());
   f->dump_stream("peer") << m_peer;
-  f->dump_string("instance_id", m_instance_watcher->get_instance_id());
+  if (m_local_io_ctx.is_valid()) {
+    f->dump_string("pool", m_local_io_ctx.get_pool_name());
+    f->dump_stream("instance_id") << m_instance_watcher->get_instance_id();
+  }
 
   std::string state("running");
   if (m_manual_stop) {
@@ -640,7 +658,10 @@ void PoolReplayer<I>::start()
   }
 
   m_manual_stop = false;
-  m_instance_replayer->start();
+
+  if (m_instance_replayer) {
+    m_instance_replayer->start();
+  }
 }
 
 template <typename I>
@@ -658,7 +679,10 @@ void PoolReplayer<I>::stop(bool manual)
   }
 
   m_manual_stop = true;
-  m_instance_replayer->stop();
+
+  if (m_instance_replayer) {
+    m_instance_replayer->stop();
+  }
 }
 
 template <typename I>
@@ -672,7 +696,9 @@ void PoolReplayer<I>::restart()
     return;
   }
 
-  m_instance_replayer->restart();
+  if (m_instance_replayer) {
+    m_instance_replayer->restart();
+  }
 }
 
 template <typename I>
@@ -686,7 +712,9 @@ void PoolReplayer<I>::flush()
     return;
   }
 
-  m_instance_replayer->flush();
+  if (m_instance_replayer) {
+    m_instance_replayer->flush();
+  }
 }
 
 template <typename I>

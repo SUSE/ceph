@@ -1,7 +1,21 @@
 import mock
 
-from . import ControllerTestCase
-from ..controllers.rgw import RgwUser
+from .. import mgr
+from ..controllers.rgw import Rgw, RgwUser
+from . import ControllerTestCase  # pylint: disable=no-name-in-module
+
+
+class RgwControllerTestCase(ControllerTestCase):
+    @classmethod
+    def setup_server(cls):
+        Rgw._cp_config['tools.authenticate.on'] = False  # pylint: disable=protected-access
+        cls.setup_controllers([Rgw], '/test')
+
+    def test_status_no_service(self):
+        mgr.list_servers.return_value = []
+        self._get('/test/api/rgw/status')
+        self.assertStatus(200)
+        self.assertJsonBody({'available': False, 'message': 'No RGW service is running.'})
 
 
 class RgwUserControllerTestCase(ControllerTestCase):
@@ -83,3 +97,33 @@ class RgwUserControllerTestCase(ControllerTestCase):
         }]
         self._get('/test/api/rgw/user')
         self.assertStatus(500)
+
+    @mock.patch('dashboard.controllers.rgw.RgwRESTController.proxy')
+    @mock.patch.object(RgwUser, '_keys_allowed')
+    def test_user_get_with_keys(self, keys_allowed, mock_proxy):
+        keys_allowed.return_value = True
+        mock_proxy.return_value = {
+            'tenant': '',
+            'user_id': 'my_user_id',
+            'keys': [],
+            'swift_keys': []
+        }
+        self._get('/test/api/rgw/user/testuser')
+        self.assertStatus(200)
+        self.assertInJsonBody('keys')
+        self.assertInJsonBody('swift_keys')
+
+    @mock.patch('dashboard.controllers.rgw.RgwRESTController.proxy')
+    @mock.patch.object(RgwUser, '_keys_allowed')
+    def test_user_get_without_keys(self, keys_allowed, mock_proxy):
+        keys_allowed.return_value = False
+        mock_proxy.return_value = {
+            'tenant': '',
+            'user_id': 'my_user_id',
+            'keys': [],
+            'swift_keys': []
+        }
+        self._get('/test/api/rgw/user/testuser')
+        self.assertStatus(200)
+        self.assertNotIn('keys', self.jsonBody())
+        self.assertNotIn('swift_keys', self.jsonBody())

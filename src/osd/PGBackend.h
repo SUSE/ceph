@@ -108,7 +108,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      virtual void failed_push(const list<pg_shard_t> &from,
                               const hobject_t &soid,
                               const eversion_t &need = eversion_t()) = 0;
-     virtual void finish_degraded_object(const hobject_t& oid) = 0;
+     virtual void finish_degraded_object(const hobject_t oid) = 0;
      virtual void primary_failed(const hobject_t &soid) = 0;
      virtual bool primary_error(const hobject_t& soid, eversion_t v) = 0;
      virtual void cancel_pull(const hobject_t &soid) = 0;
@@ -273,6 +273,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      virtual spg_t primary_spg_t() const = 0;
      virtual pg_shard_t primary_shard() const = 0;
 
+     virtual uint64_t min_upacting_features() const = 0;
      virtual hobject_t get_temp_recovery_object(const hobject_t& target,
 						eversion_t version) = 0;
 
@@ -298,6 +299,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
      virtual bool pg_is_repair() = 0;
      virtual void inc_osd_stat_repaired() = 0;
+     virtual void set_osd_stat_repaired(int64_t) = 0;
      virtual bool pg_is_remote_backfilling() = 0;
      virtual void pg_add_local_num_bytes(int64_t num_bytes) = 0;
      virtual void pg_sub_local_num_bytes(int64_t num_bytes) = 0;

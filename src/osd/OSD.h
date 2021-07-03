@@ -403,7 +403,7 @@ public:
   void forget_peer_epoch(int p, epoch_t e);
 
   void send_map(class MOSDMap *m, Connection *con);
-  void send_incremental_map(epoch_t since, Connection *con, OSDMapRef& osdmap);
+  void send_incremental_map(epoch_t since, Connection *con, const OSDMapRef& osdmap);
   MOSDMap *build_incremental_map_msg(epoch_t from, epoch_t to,
                                        OSDSuperblock& superblock);
   bool should_share_map(entity_name_t name, Connection *con, epoch_t epoch,
@@ -433,8 +433,8 @@ public:
 private:
   // -- scrub scheduling --
   Mutex sched_scrub_lock;
-  int scrubs_pending;
-  int scrubs_active;
+  int scrubs_local;
+  int scrubs_remote;
 
 public:
   struct ScrubJob {
@@ -509,11 +509,12 @@ public:
     f->close_section();
   }
 
-  bool can_inc_scrubs_pending();
-  bool inc_scrubs_pending();
-  void inc_scrubs_active(bool reserved);
-  void dec_scrubs_pending();
-  void dec_scrubs_active();
+  bool can_inc_scrubs();
+  bool inc_scrubs_local();
+  void dec_scrubs_local();
+  bool inc_scrubs_remote();
+  void dec_scrubs_remote();
+  void dump_scrub_reservations(Formatter *f);
 
   void reply_op_error(OpRequestRef op, int err);
   void reply_op_error(OpRequestRef op, int err, eversion_t v, version_t uv);
@@ -729,7 +730,7 @@ public:
   void send_ready_to_merge();
   void _send_ready_to_merge();
   void clear_sent_ready_to_merge();
-  void prune_sent_ready_to_merge(OSDMapRef& osdmap);
+  void prune_sent_ready_to_merge(const OSDMapRef& osdmap);
 
   // -- pg_temp --
 private:
@@ -908,6 +909,7 @@ public:
     osd_alert_list_t& alerts);
   osd_stat_t set_osd_stat(vector<int>& hb_peers, int num_pgs);
   void inc_osd_stat_repaired(void);
+  void set_osd_stat_repaired(int64_t);
   float compute_adjusted_ratio(osd_stat_t new_stat, float *pratio, uint64_t adjust_used = 0);
   osd_stat_t get_osd_stat() {
     std::lock_guard l(stat_lock);
@@ -919,6 +921,12 @@ public:
   uint64_t get_osd_stat_seq() {
     std::lock_guard l(stat_lock);
     return osd_stat.seq;
+  }
+  void get_hb_pingtime(map<int, osd_stat_t::Interfaces> *pp)
+  {
+    std::lock_guard l(stat_lock);
+    *pp = osd_stat.hb_pingtime;
+    return;
   }
 
   // -- OSD Full Status --
@@ -1207,7 +1215,7 @@ struct OSDShard {
 
   /// push osdmap into shard
   void consume_map(
-    OSDMapRef& osdmap,
+    const OSDMapRef& osdmap,
     unsigned *pushes_to_free);
 
   void _wake_pg_slot(spg_t pgid, OSDShardPGSlot *slot);
@@ -1507,8 +1515,7 @@ private:
 	 i != sessions_to_check.end();
 	 sessions_to_check.erase(i++)) {
       std::lock_guard l{(*i)->session_dispatch_lock};
-      SessionRef session = *i;
-      dispatch_session_waiting(session, osdmap);
+      dispatch_session_waiting(*i, get_osdmap());
     }
   }
   void session_handle_reset(SessionRef session) {
@@ -1563,6 +1570,24 @@ private:
     /// send time -> deadline -> remaining replies
     map<utime_t, pair<utime_t, int>> ping_history;
 
+    utime_t hb_interval_start;
+    uint32_t hb_average_count = 0;
+    uint32_t hb_index = 0;
+
+    uint32_t hb_total_back = 0;
+    uint32_t hb_min_back = UINT_MAX;
+    uint32_t hb_max_back = 0;
+    vector<uint32_t> hb_back_pingtime;
+    vector<uint32_t> hb_back_min;
+    vector<uint32_t> hb_back_max;
+
+    uint32_t hb_total_front = 0;
+    uint32_t hb_min_front = UINT_MAX;
+    uint32_t hb_max_front = 0;
+    vector<uint32_t> hb_front_pingtime;
+    vector<uint32_t> hb_front_min;
+    vector<uint32_t> hb_front_max;
+
     bool is_stale(utime_t stale) {
       if (ping_history.empty()) {
         return false;
@@ -1609,7 +1634,11 @@ private:
   Messenger *hb_back_server_messenger;
   utime_t last_heartbeat_resample;   ///< last time we chose random peers in waiting-for-healthy state
   double daily_loadavg;
-  
+
+  // Track ping repsonse times using vector as a circular buffer
+  // MUST BE A POWER OF 2
+  const uint32_t hb_vector_size = 16;
+
   void _add_heartbeat_peer(int p);
   void _remove_heartbeat_peer(int p);
   bool heartbeat_reset(Connection *con);
@@ -1854,11 +1883,17 @@ protected:
  protected:
 
   // -- osd map --
-  OSDMapRef       osdmap;
-  OSDMapRef get_osdmap() {
-    return osdmap;
+  // TODO: switch to std::atomic<OSDMapRef> when C++20 will be available.
+  OSDMapRef       _osdmap;
+  void set_osdmap(OSDMapRef osdmap) {
+    std::atomic_store(&_osdmap, osdmap);
+  }
+  OSDMapRef get_osdmap() const {
+    return std::atomic_load(&_osdmap);
   }
   epoch_t get_osdmap_epoch() const {
+    // XXX: performance?
+    auto osdmap = get_osdmap();
     return osdmap ? osdmap->get_epoch() : 0;
   }
 
@@ -2067,7 +2102,7 @@ protected:
    * address as in the given map.
    * @pre op was sent by an OSD using the cluster messenger
    */
-  bool require_same_peer_instance(const Message *m, OSDMapRef& map,
+  bool require_same_peer_instance(const Message *m, const OSDMapRef& map,
 				  bool is_fast_dispatch);
 
   bool require_same_or_newer_map(OpRequestRef& op, epoch_t e,

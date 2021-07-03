@@ -1,13 +1,12 @@
 import time
 import signal
-import json
 import logging
 from unittest import case, SkipTest
 from random import randint
+from six.moves import range
 
-from cephfs_test_case import CephFSTestCase
+from tasks.cephfs.cephfs_test_case import CephFSTestCase
 from teuthology.exceptions import CommandFailedError
-from teuthology import misc as teuthology
 from tasks.cephfs.fuse_mount import FuseMount
 
 log = logging.getLogger(__name__)
@@ -25,7 +24,7 @@ class TestClusterResize(CephFSTestCase):
         log.info("status = {0}".format(status))
 
         original_ranks = set([info['gid'] for info in status.get_ranks(fscid)])
-        original_standbys = set([info['gid'] for info in status.get_standbys()])
+        _ = set([info['gid'] for info in status.get_standbys()])
 
         oldmax = self.fs.get_var('max_mds')
         self.assertTrue(n > oldmax)
@@ -45,7 +44,7 @@ class TestClusterResize(CephFSTestCase):
         log.info("status = {0}".format(status))
 
         original_ranks = set([info['gid'] for info in status.get_ranks(fscid)])
-        original_standbys = set([info['gid'] for info in status.get_standbys()])
+        _ = set([info['gid'] for info in status.get_standbys()])
 
         oldmax = self.fs.get_var('max_mds')
         self.assertTrue(n < oldmax)
@@ -361,11 +360,11 @@ class TestStandbyReplay(CephFSTestCase):
 
     def _confirm_no_replay(self):
         status = self.fs.status()
-        standby_count = len(list(status.get_standbys()))
+        _ = len(list(status.get_standbys()))
         self.assertEqual(0, len(list(self.fs.get_replays(status=status))))
         return status
 
-    def _confirm_single_replay(self, full=True, status=None):
+    def _confirm_single_replay(self, full=True, status=None, retries=3):
         status = self.fs.wait_for_daemons(status=status)
         ranks = sorted(self.fs.get_mds_map(status=status)['in'])
         replays = list(self.fs.get_replays(status=status))
@@ -378,7 +377,11 @@ class TestStandbyReplay(CephFSTestCase):
                     has_replay = True
                     checked_replays.add(replay['gid'])
             if full and not has_replay:
-                raise RuntimeError("rank "+str(rank)+" has no standby-replay follower")
+                if retries <= 0:
+                    raise RuntimeError("rank "+str(rank)+" has no standby-replay follower")
+                else:
+                    retries = retries-1
+                    time.sleep(2)
         self.assertEqual(checked_replays, set(info['gid'] for info in replays))
         return status
 

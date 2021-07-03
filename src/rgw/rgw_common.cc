@@ -16,6 +16,7 @@
 #include "rgw_string.h"
 #include "rgw_rados.h"
 #include "rgw_http_errors.h"
+#include "rgw_arn.h"
 
 #include "common/ceph_crypto.h"
 #include "common/armor.h"
@@ -25,7 +26,6 @@
 #include "common/convenience.h"
 #include "common/strtol.h"
 #include "include/str_list.h"
-#include "auth/Crypto.h"
 #include "rgw_crypt_sanitize.h"
 
 #include <sstream>
@@ -33,7 +33,7 @@
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
-using rgw::IAM::ARN;
+using rgw::ARN;
 using rgw::IAM::Effect;
 using rgw::IAM::op_to_perm;
 using rgw::IAM::Policy;
@@ -73,6 +73,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_INVALID_CORS_RULES_ERROR, {400, "InvalidRequest" }},
     { ERR_INVALID_WEBSITE_ROUTING_RULES_ERROR, {400, "InvalidRequest" }},
     { ERR_INVALID_ENCRYPTION_ALGORITHM, {400, "InvalidEncryptionAlgorithmError" }},
+    { ERR_INVALID_RETENTION_PERIOD,{400, "InvalidRetentionPeriod"}},
     { ERR_LENGTH_REQUIRED, {411, "MissingContentLength" }},
     { EACCES, {403, "AccessDenied" }},
     { EPERM, {403, "AccessDenied" }},
@@ -95,6 +96,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_NO_SUCH_SUBUSER, {404, "NoSuchSubUser"}},
     { ERR_NO_SUCH_ENTITY, {404, "NoSuchEntity"}},
     { ERR_NO_SUCH_CORS_CONFIGURATION, {404, "NoSuchCORSConfiguration"}},
+    { ERR_NO_SUCH_OBJECT_LOCK_CONFIGURATION, {404, "ObjectLockConfigurationNotFoundError"}},
     { ERR_METHOD_NOT_ALLOWED, {405, "MethodNotAllowed" }},
     { ETIMEDOUT, {408, "RequestTimeout" }},
     { EEXIST, {409, "BucketAlreadyExists" }},
@@ -102,8 +104,6 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_EMAIL_EXIST, {409, "EmailExists" }},
     { ERR_KEY_EXIST, {409, "KeyExists"}},
     { ERR_TAG_CONFLICT, {409, "OperationAborted"}},
-    { ERR_ROLE_EXISTS, {409, "EntityAlreadyExists"}},
-    { ERR_DELETE_CONFLICT, {409, "DeleteConflict"}},
     { ERR_POSITION_NOT_EQUAL_TO_LENGTH, {409, "PositionNotEqualToLength"}},
     { ERR_OBJECT_NOT_APPENDABLE, {409, "ObjectNotAppendable"}},
     { ERR_INVALID_BUCKET_STATE, {409, "InvalidBucketState"}},
@@ -144,6 +144,11 @@ rgw_http_errors rgw_http_swift_errors({
 rgw_http_errors rgw_http_sts_errors({
     { ERR_PACKED_POLICY_TOO_LARGE, {400, "PackedPolicyTooLarge" }},
     { ERR_INVALID_IDENTITY_TOKEN, {400, "InvalidIdentityToken" }},
+});
+
+rgw_http_errors rgw_http_iam_errors({
+    { ERR_ROLE_EXISTS, {409, "EntityAlreadyExists"}},
+    { ERR_DELETE_CONFLICT, {409, "DeleteConflict"}},
 });
 
 using namespace ceph::crypto;
@@ -297,6 +302,11 @@ void set_req_state_err(struct rgw_err& err,	/* out */
 
   if (prot_flags & RGW_REST_STS) {
     if (search_err(rgw_http_sts_errors, err_no, err.http_ret, err.err_code))
+      return;
+  }
+
+  if (prot_flags & RGW_REST_IAM) {
+    if (search_err(rgw_http_iam_errors, err_no, err.http_ret, err.err_code))
       return;
   }
 
@@ -472,24 +482,28 @@ static bool check_gmt_end(const char *s)
 
 static bool parse_rfc850(const char *s, struct tm *t)
 {
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(t, 0, sizeof(*t));
   return check_gmt_end(strptime(s, "%A, %d-%b-%y %H:%M:%S ", t));
 }
 
 static bool parse_asctime(const char *s, struct tm *t)
 {
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(t, 0, sizeof(*t));
   return check_str_end(strptime(s, "%a %b %d %H:%M:%S %Y", t));
 }
 
 static bool parse_rfc1123(const char *s, struct tm *t)
 {
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(t, 0, sizeof(*t));
   return check_gmt_end(strptime(s, "%a, %d %b %Y %H:%M:%S ", t));
 }
 
 static bool parse_rfc1123_alt(const char *s, struct tm *t)
 {
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(t, 0, sizeof(*t));
   return check_str_end(strptime(s, "%a, %d %b %Y %H:%M:%S %z", t));
 }
@@ -501,6 +515,7 @@ bool parse_rfc2616(const char *s, struct tm *t)
 
 bool parse_iso8601(const char *s, struct tm *t, uint32_t *pns, bool extended_format)
 {
+  // FIPS zeroization audit 20191115: this memset is not security related.
   memset(t, 0, sizeof(*t));
   const char *p;
 
@@ -728,105 +743,6 @@ std::string calc_hash_sha256_restart_stream(SHA256 **phash)
   *phash = calc_hash_sha256_open_stream();
 
   return hash;
-}
-
-int gen_rand_base64(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  char buf[size];
-  char tmp_dest[size + 4]; /* so that there's space for the extra '=' characters, and some */
-  int ret;
-
-  cct->random()->get_bytes(buf, sizeof(buf));
-
-  ret = ceph_armor(tmp_dest, &tmp_dest[sizeof(tmp_dest)],
-		   (const char *)buf, ((const char *)buf) + ((size - 1) * 3 + 4 - 1) / 4);
-  if (ret < 0) {
-    lderr(cct) << "ceph_armor failed" << dendl;
-    return ret;
-  }
-  tmp_dest[ret] = '\0';
-  memcpy(dest, tmp_dest, size);
-  dest[size-1] = '\0';
-
-  return 0;
-}
-
-static const char alphanum_upper_table[]="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-void gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  cct->random()->get_bytes(dest, size);
-
-  int i;
-  for (i=0; i<size - 1; i++) {
-    int pos = (unsigned)dest[i];
-    dest[i] = alphanum_upper_table[pos % (sizeof(alphanum_upper_table) - 1)];
-  }
-  dest[i] = '\0';
-}
-
-static const char alphanum_lower_table[]="0123456789abcdefghijklmnopqrstuvwxyz";
-
-void gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  cct->random()->get_bytes(dest, size);
-
-  int i;
-  for (i=0; i<size - 1; i++) {
-    int pos = (unsigned)dest[i];
-    dest[i] = alphanum_lower_table[pos % (sizeof(alphanum_lower_table) - 1)];
-  }
-  dest[i] = '\0';
-}
-
-void gen_rand_alphanumeric_lower(CephContext *cct, string *str, int length)
-{
-  char buf[length + 1];
-  gen_rand_alphanumeric_lower(cct, buf, sizeof(buf));
-  *str = buf;
-}
-
-// this is basically a modified base64 charset, url friendly
-static const char alphanum_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-void gen_rand_alphanumeric(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  cct->random()->get_bytes(dest, size);
-
-  int i;
-  for (i=0; i<size - 1; i++) {
-    int pos = (unsigned)dest[i];
-    dest[i] = alphanum_table[pos & 63];
-  }
-  dest[i] = '\0';
-}
-
-static const char alphanum_no_underscore_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.";
-
-void gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  cct->random()->get_bytes(dest, size);
-
-  int i;
-  for (i=0; i<size - 1; i++) {
-    int pos = (unsigned)dest[i];
-    dest[i] = alphanum_no_underscore_table[pos & 63];
-  }
-  dest[i] = '\0';
-}
-
-static const char alphanum_plain_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-void gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
-{
-  cct->random()->get_bytes(dest, size);
-
-  int i;
-  for (i=0; i<size - 1; i++) {
-    int pos = (unsigned)dest[i];
-    dest[i] = alphanum_plain_table[pos % (sizeof(alphanum_plain_table) - 1)];
-  }
-  dest[i] = '\0';
 }
 
 int NameVal::parse()
@@ -1089,7 +1005,7 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
                             RGWAccessControlPolicy * const user_acl,
                             const vector<rgw::IAM::Policy>& user_policies,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op)
 {
   auto usr_policy_res = eval_user_policies(user_policies, s->env, boost::none, op, res);
@@ -1129,7 +1045,7 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp, struct req_
 
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op)
 {
   return verify_user_permission(dpp, s, s->user_acl.get(), s->iam_user_policies, res, op);
@@ -1436,12 +1352,46 @@ bool verify_object_permission(const DoutPrefixProvider* dpp, struct req_state *s
                                   op);
 }
 
+int verify_object_lock(const DoutPrefixProvider* dpp, const map<string, buffer::list>& attrs, const bool bypass_perm, const bool bypass_governance_mode) {
+  auto aiter = attrs.find(RGW_ATTR_OBJECT_RETENTION);
+  if (aiter != attrs.end()) {
+    RGWObjectRetention obj_retention;
+    try {
+      decode(obj_retention, aiter->second);
+    } catch (buffer::error& err) {
+      ldpp_dout(dpp, 0) << "ERROR: failed to decode RGWObjectRetention" << dendl;
+      return -EIO;
+    }
+    if (ceph::real_clock::to_time_t(obj_retention.get_retain_until_date()) > ceph_clock_now()) {
+      if (obj_retention.get_mode().compare("GOVERNANCE") != 0 || !bypass_perm || !bypass_governance_mode) {
+        return -EACCES;
+      }
+    }
+  }
+  aiter = attrs.find(RGW_ATTR_OBJECT_LEGAL_HOLD);
+  if (aiter != attrs.end()) {
+    RGWObjectLegalHold obj_legal_hold;
+    try {
+      decode(obj_legal_hold, aiter->second);
+    } catch (buffer::error& err) {
+      ldpp_dout(dpp, 0) << "ERROR: failed to decode RGWObjectLegalHold" << dendl;
+      return -EIO;
+    }
+    if (obj_legal_hold.is_enabled()) {
+      return -EACCES;
+    }
+  }
+  
+  return 0;
+}
+
 class HexTable
 {
   char table[256];
 
 public:
   HexTable() {
+    // FIPS zeroization audit 20191115: this memset is not security related.
     memset(table, -1, sizeof(table));
     int i;
     for (i = '0'; i<='9'; i++)

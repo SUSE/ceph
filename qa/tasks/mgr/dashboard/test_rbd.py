@@ -114,8 +114,8 @@ class RbdTest(DashboardTestCase):
     @classmethod
     def setUpClass(cls):
         super(RbdTest, cls).setUpClass()
-        cls.create_pool('rbd', 10, 'replicated')
-        cls.create_pool('rbd_iscsi', 10, 'replicated')
+        cls.create_pool('rbd', 2**3, 'replicated')
+        cls.create_pool('rbd_iscsi', 2**3, 'replicated')
 
         cls.create_image('rbd', 'img1', 2**30)
         cls.create_image('rbd', 'img2', 2*2**30)
@@ -188,6 +188,8 @@ class RbdTest(DashboardTestCase):
             'block_name_prefix': JLeaf(str),
             'name': JLeaf(str),
             'id': JLeaf(str),
+            'unique_id': JLeaf(str),
+            'image_format': JLeaf(int),
             'pool_name': JLeaf(str),
             'features': JLeaf(int),
             'features_name': JList(JLeaf(str)),
@@ -324,7 +326,7 @@ class RbdTest(DashboardTestCase):
         if not self.bluestore_support:
             self.skipTest('requires bluestore cluster')
 
-        self.create_pool('data_pool', 12, 'erasure')
+        self.create_pool('data_pool', 2**4, 'erasure')
 
         rbd_name = 'test_rbd_in_data_pool'
         self.create_image('rbd', rbd_name, 10240, data_pool='data_pool')
@@ -784,7 +786,7 @@ class RbdTest(DashboardTestCase):
         time.sleep(1)
 
         self._task_post('/api/block/image/trash/purge?pool_name={}'.format('rbd'))
-        self.assertStatus(200)
+        self.assertStatus([200, 201])
 
         time.sleep(1)
 
@@ -792,4 +794,4 @@ class RbdTest(DashboardTestCase):
         self.assertIsNotNone(trash_not_expired)
 
         trash_expired = self.get_trash('rbd', id_expired)
-        self.assertIsNone(trash_expired)
+        self.wait_until_equal(lambda: self.get_trash('rbd', id_expired), None, 60)

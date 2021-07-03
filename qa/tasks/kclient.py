@@ -8,7 +8,7 @@ from teuthology.misc import deep_merge
 from teuthology.orchestra.run import CommandFailedError
 from teuthology import misc
 from teuthology.contextutil import MaxWhileTries
-from cephfs.kernel_mount import KernelMount
+from tasks.cephfs.kernel_mount import KernelMount
 
 log = logging.getLogger(__name__)
 
@@ -72,13 +72,6 @@ def task(ctx, config):
 
     test_dir = misc.get_testdir(ctx)
 
-    # Assemble mon addresses
-    remotes_and_roles = ctx.cluster.remotes.items()
-    roles = [roles for (remote_, roles) in remotes_and_roles]
-    ips = [remote_.ssh.get_transport().getpeername()[0]
-           for (remote_, _) in remotes_and_roles]
-    mons = misc.get_mons(roles, ips).values()
-
     mounts = {}
     for id_, remote in clients:
         client_config = config.get("client.%s" % id_)
@@ -90,7 +83,6 @@ def task(ctx, config):
 
         kernel_mount = KernelMount(
             ctx,
-            mons,
             test_dir,
             id_,
             remote,
@@ -117,7 +109,7 @@ def task(ctx, config):
                 try:
                     mount.umount()
                 except (CommandFailedError, MaxWhileTries):
-                    log.warn("Ordinary umount failed, forcing...")
+                    log.warning("Ordinary umount failed, forcing...")
                     forced = True
                     mount.umount_wait(force=True)
 

@@ -4,6 +4,7 @@
 #ifndef CEPH_RGW_HTTP_CLIENT_H
 #define CEPH_RGW_HTTP_CLIENT_H
 
+#include "common/async/yield_context.h"
 #include "common/RWLock.h"
 #include "common/Cond.h"
 #include "rgw_common.h"
@@ -99,6 +100,8 @@ protected:
 
   param_vec_t headers;
 
+  long  req_timeout{0L};
+
   RGWHTTPManager *get_manager();
 
   int init_request(rgw_http_req_data *req_data);
@@ -174,13 +177,23 @@ public:
     return http_status;
   }
 
+  void set_http_status(long _http_status) {
+    http_status = _http_status;
+  }
+
   void set_verify_ssl(bool flag) {
     verify_ssl = flag;
   }
 
-  int process();
+  // set request timeout in seconds
+  // zero (default) mean that request will never timeout
+  void set_req_timeout(long timeout) {
+    req_timeout = timeout;
+  }
 
-  int wait();
+  int process(optional_yield y=null_yield);
+
+  int wait(optional_yield y=null_yield);
   void cancel();
   bool is_done();
 
@@ -323,7 +336,7 @@ class RGWHTTPManager {
   bool unregister_request(rgw_http_req_data *req_data);
   void _unlink_request(rgw_http_req_data *req_data);
   void unlink_request(rgw_http_req_data *req_data);
-  void finish_request(rgw_http_req_data *req_data, int r);
+  void finish_request(rgw_http_req_data *req_data, int r, long http_status = -1);
   void _finish_request(rgw_http_req_data *req_data, int r);
   void _set_req_state(set_state& ss);
   int link_request(rgw_http_req_data *req_data);
@@ -360,6 +373,6 @@ class RGWHTTP
 {
 public:
   static int send(RGWHTTPClient *req);
-  static int process(RGWHTTPClient *req);
+  static int process(RGWHTTPClient *req, optional_yield y=null_yield);
 };
 #endif

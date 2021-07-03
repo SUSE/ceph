@@ -112,6 +112,9 @@ void Server::create_logger()
                       PerfCountersBuilder::PRIO_INTERESTING);
   plb.add_u64_counter(l_mdss_cap_revoke_eviction, "cap_revoke_eviction",
                       "Cap Revoke Client Eviction", "cre", PerfCountersBuilder::PRIO_INTERESTING);
+  plb.add_u64_counter(l_mdss_cap_acquisition_throttle,
+                      "cap_acquisition_throttle", "Cap acquisition throttle counter", "cat",
+                      PerfCountersBuilder::PRIO_INTERESTING);
 
   // fop latencies are useful
   plb.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
@@ -193,7 +196,13 @@ Server::Server(MDSRank *m) :
   terminating_sessions(false),
   recall_throttle(g_conf().get_val<double>("mds_recall_max_decay_rate"))
 {
+  max_snaps_per_dir = g_conf().get_val<uint64_t>("mds_max_snaps_per_dir");
+  replay_unsafe_with_closed_session = g_conf().get_val<bool>("mds_replay_unsafe_with_closed_session");
   cap_revoke_eviction_timeout = g_conf().get_val<double>("mds_cap_revoke_eviction_timeout");
+  max_caps_per_client = g_conf().get_val<uint64_t>("mds_max_caps_per_client");
+  cap_acquisition_throttle = g_conf().get_val<uint64_t>("mds_session_cap_acquisition_throttle");
+  max_caps_throttle_ratio = g_conf().get_val<double>("mds_session_max_caps_throttle_ratio");
+  caps_throttle_retry_request_timeout = g_conf().get_val<double>("mds_cap_acquisition_throttle_retry_request_timeout");
   supported_features = feature_bitset_t(CEPHFS_FEATURES_MDS_SUPPORTED);
 }
 
@@ -205,13 +214,23 @@ void Server::dispatch(const Message::const_ref &m)
     return;
   }
 
+/*
+ *In reconnect phase, client sent unsafe requests to mds before reconnect msg. Seting sessionclosed_isok will handle scenario like this:
+
+1. In reconnect phase, client sent unsafe requests to mds.
+2. It reached reconnect timeout. All sessions without sending reconnect msg in time, some of which may had sent unsafe requests, are marked as closed.
+(Another situation is #31668, which will deny all client reconnect msg to speed up reboot).
+3.So these unsafe request from session without sending reconnect msg in time or being denied could be handled in clientreplay phase.
+
+*/
+  bool sessionclosed_isok = replay_unsafe_with_closed_session;
   // active?
   // handle_slave_request()/handle_client_session() will wait if necessary
   if (m->get_type() == CEPH_MSG_CLIENT_REQUEST && !mds->is_active()) {
     const auto &req = MClientRequest::msgref_cast(m);
     if (mds->is_reconnect() || mds->get_want_state() == CEPH_MDS_STATE_RECONNECT) {
       Session *session = mds->get_session(req);
-      if (!session || session->is_closed()) {
+      if (!session || (!session->is_open() && !sessionclosed_isok)) {
 	dout(5) << "session is closed, dropping " << req->get_reqid() << dendl;
 	return;
       }
@@ -442,6 +461,9 @@ void Server::handle_client_session(const MClientSession::const_ref &m)
 
   if (!session) {
     dout(0) << " ignoring sessionless msg " << *m << dendl;
+    auto reply = MClientSession::create(CEPH_SESSION_REJECT);
+    reply->metadata["error_string"] = "sessionless";
+    mds->send_message(reply, m->get_connection());
     return;
   }
 
@@ -541,8 +563,9 @@ void Server::handle_client_session(const MClientSession::const_ref &m)
 	stringstream ss;
 	ss << "missing required features '" << missing_features << "'";
 	send_reject_message(ss.str());
-	mds->clog->warn() << "client session lacks required features '"
-			  << missing_features << "' denied (" << session->info.inst << ")";
+	mds->clog->warn() << "client session (" << session->info.inst
+                          << ") lacks required features " << missing_features
+                          << "; client supports " << client_metadata.features;
 	session->clear();
 	break;
       }
@@ -663,24 +686,24 @@ void Server::handle_client_session(const MClientSession::const_ref &m)
 }
 
 
-void Server::flush_session(Session *session, MDSGatherBuilder *gather) {
+void Server::flush_session(Session *session, MDSGatherBuilder& gather) {
   if (!session->is_open() ||
       !session->get_connection() ||
       !session->get_connection()->has_feature(CEPH_FEATURE_EXPORT_PEER)) {
     return;
   }
 
-  version_t seq = session->wait_for_flush(gather->new_sub());
+  version_t seq = session->wait_for_flush(gather.new_sub());
   mds->send_message_client(
     MClientSession::create(CEPH_SESSION_FLUSHMSG, seq), session);
 }
 
 void Server::flush_client_sessions(set<client_t>& client_set, MDSGatherBuilder& gather)
 {
-  for (set<client_t>::iterator p = client_set.begin(); p != client_set.end(); ++p) {
-    Session *session = mds->sessionmap.get_session(entity_name_t::CLIENT(p->v));
+  for (const auto& client : client_set) {
+    Session *session = mds->sessionmap.get_session(entity_name_t::CLIENT(client.v));
     ceph_assert(session);
-    flush_session(session, &gather);
+    flush_session(session, gather);
   }
 }
 
@@ -728,11 +751,12 @@ void Server::_session_logged(Session *session, uint64_t state_seq, bool open, ve
   } else if (session->is_closing() ||
 	     session->is_killing()) {
     // kill any lingering capabilities, leases, requests
+    bool killing = session->is_killing();
     while (!session->caps.empty()) {
       Capability *cap = session->caps.front();
       CInode *in = cap->get_inode();
       dout(20) << " killing capability " << ccap_string(cap->issued()) << " on " << *in << dendl;
-      mds->locker->remove_client_cap(in, cap, true);
+      mds->locker->remove_client_cap(in, cap, killing);
     }
     while (!session->leases.empty()) {
       ClientLease *r = session->leases.front();
@@ -776,8 +800,9 @@ void Server::_session_logged(Session *session, uint64_t state_seq, bool open, ve
     } else if (session->is_killing()) {
       // destroy session, close connection
       if (session->get_connection()) {
-	session->get_connection()->mark_down();
-	session->get_connection()->set_priv(NULL);
+        session->get_connection()->mark_down();
+        mds->sessionmap.set_state(session, Session::STATE_CLOSED);
+        session->set_connection(nullptr);
       }
       mds->sessionmap.remove_session(session);
     } else {
@@ -1082,8 +1107,10 @@ void Server::evict_cap_revoke_non_responders() {
   }
 }
 
-void Server::handle_conf_change(const ConfigProxy& conf,
-                                const std::set <std::string> &changed) {
+void Server::handle_conf_change(const std::set<std::string>& changed) {
+  if (changed.count("mds_replay_unsafe_with_closed_session")) {
+    replay_unsafe_with_closed_session = g_conf().get_val<bool>("mds_replay_unsafe_with_closed_session");
+  }
   if (changed.count("mds_cap_revoke_eviction_timeout")) {
     cap_revoke_eviction_timeout = g_conf().get_val<double>("mds_cap_revoke_eviction_timeout");
     dout(20) << __func__ << " cap revoke eviction timeout changed to "
@@ -1091,6 +1118,23 @@ void Server::handle_conf_change(const ConfigProxy& conf,
   }
   if (changed.count("mds_recall_max_decay_rate")) {
     recall_throttle = DecayCounter(g_conf().get_val<double>("mds_recall_max_decay_rate"));
+  }
+  if (changed.count("mds_max_snaps_per_dir")) {
+    max_snaps_per_dir = g_conf().get_val<uint64_t>("mds_max_snaps_per_dir");
+    dout(20) << __func__ << " max snapshots per directory changed to "
+            << max_snaps_per_dir << dendl;
+  }
+  if (changed.count("mds_max_caps_per_client")) {
+    max_caps_per_client = g_conf().get_val<uint64_t>("mds_max_caps_per_client");
+  }
+  if (changed.count("mds_session_cap_acquisition_throttle")) {
+    cap_acquisition_throttle = g_conf().get_val<uint64_t>("mds_session_cap_acquisition_throttle");
+  }
+  if (changed.count("mds_session_max_caps_throttle_ratio")) {
+    max_caps_throttle_ratio = g_conf().get_val<double>("mds_session_max_caps_throttle_ratio");
+  }
+  if (changed.count("mds_cap_acquisition_throttle_retry_request_timeout")) {
+    caps_throttle_retry_request_timeout = g_conf().get_val<double>("mds_cap_acquisition_throttle_retry_request_timeout");
   }
 }
 
@@ -1187,12 +1231,8 @@ void Server::journal_close_session(Session *session, int state, Context *on_safe
   mdlog->flush();
 
   // clean up requests, too
-  elist<MDRequestImpl*>::iterator p =
-    session->requests.begin(member_offset(MDRequestImpl,
-					  item_session_request));
-  while (!p.end()) {
-    MDRequestRef mdr = mdcache->request_get((*p)->reqid);
-    ++p;
+  while(!session->requests.empty()) {
+    auto mdr = MDRequestRef(*session->requests.begin());
     mdcache->request_kill(mdr);
   }
 
@@ -1209,6 +1249,7 @@ void Server::reconnect_clients(MDSContext *reconnect_done_)
   for (auto session : sessions) {
     if (session->is_open()) {
       client_reconnect_gather.insert(session->get_client());
+      session->set_reconnecting(true);
       session->last_cap_renew = now;
     }
   }
@@ -1232,8 +1273,20 @@ void Server::handle_client_reconnect(const MClientReconnect::const_ref &m)
 	  << (m->has_more() ? " (more)" : "") << dendl;
   client_t from = m->get_source().num();
   Session *session = mds->get_session(m);
-  if (!session)
+  if (!session) {
+    dout(0) << " ignoring sessionless msg " << *m << dendl;
+    auto reply = MClientSession::create(CEPH_SESSION_REJECT);
+    reply->metadata["error_string"] = "sessionless";
+    mds->send_message(reply, m->get_connection());
     return;
+  }
+
+  if (!session->is_open()) {
+    dout(0) << " ignoring msg from not-open session" << *m << dendl;
+    auto reply = MClientSession::create(CEPH_SESSION_CLOSE);
+    mds->send_message(reply, m->get_connection());
+    return;
+  }
 
   if (!mds->is_reconnect() && mds->get_want_state() == CEPH_MDS_STATE_RECONNECT) {
     dout(10) << " we're almost in reconnect state (mdsmap delivery race?); waiting" << dendl;
@@ -1358,6 +1411,7 @@ void Server::handle_client_reconnect(const MClientReconnect::const_ref &m)
 
     // remove from gather set
     client_reconnect_gather.erase(from);
+    session->set_reconnecting(false);
     if (client_reconnect_gather.empty())
       reconnect_gather_finish();
   }
@@ -1563,27 +1617,31 @@ void Server::recover_filelocks(CInode *in, bufferlist locks, int64_t client)
 std::pair<bool, uint64_t> Server::recall_client_state(MDSGatherBuilder* gather, RecallFlags flags)
 {
   const auto now = clock::now();
-  const bool steady = flags&RecallFlags::STEADY;
-  const bool enforce_max = flags&RecallFlags::ENFORCE_MAX;
+  const bool steady = !!(flags&RecallFlags::STEADY);
+  const bool enforce_max = !!(flags&RecallFlags::ENFORCE_MAX);
+  const bool enforce_liveness = !!(flags&RecallFlags::ENFORCE_LIVENESS);
+  const bool trim = !!(flags&RecallFlags::TRIM);
 
   const auto max_caps_per_client = g_conf().get_val<uint64_t>("mds_max_caps_per_client");
   const auto min_caps_per_client = g_conf().get_val<uint64_t>("mds_min_caps_per_client");
   const auto recall_global_max_decay_threshold = g_conf().get_val<Option::size_t>("mds_recall_global_max_decay_threshold");
   const auto recall_max_caps = g_conf().get_val<Option::size_t>("mds_recall_max_caps");
   const auto recall_max_decay_threshold = g_conf().get_val<Option::size_t>("mds_recall_max_decay_threshold");
+  const auto cache_liveness_magnitude = g_conf().get_val<Option::size_t>("mds_session_cache_liveness_magnitude");
 
   dout(7) << __func__ << ":"
            << " min=" << min_caps_per_client
            << " max=" << max_caps_per_client
            << " total=" << Capability::count()
-           << " flags=0x" << std::hex << flags
+           << " flags=" << flags
            << dendl;
 
   /* trim caps of sessions with the most caps first */
   std::multimap<uint64_t, Session*> caps_session;
-  auto f = [&caps_session, enforce_max, max_caps_per_client](auto& s) {
+  auto f = [&caps_session, enforce_max, enforce_liveness, trim, max_caps_per_client, cache_liveness_magnitude](auto& s) {
     auto num_caps = s->caps.size();
-    if (!enforce_max || num_caps > max_caps_per_client) {
+    auto cache_liveness = s->get_session_cache_liveness();
+    if (trim || (enforce_max && num_caps > max_caps_per_client) || (enforce_liveness && cache_liveness < (num_caps>>cache_liveness_magnitude))) {
       caps_session.emplace(std::piecewise_construct, std::forward_as_tuple(num_caps), std::forward_as_tuple(s));
     }
   };
@@ -1668,7 +1726,7 @@ std::pair<bool, uint64_t> Server::recall_client_state(MDSGatherBuilder* gather, 
       m->head.max_caps = newlim;
       mds->send_message_client(m, session);
       if (gather) {
-        flush_session(session, gather);
+        flush_session(session, *gather);
       }
       caps_recalled += session->notify_recall_sent(newlim);
       recall_throttle.hit(recall);
@@ -2091,7 +2149,7 @@ void Server::set_trace_dist(Session *session, const MClientReply::ref &reply,
     DirStat ds;
     ds.frag = dir->get_frag();
     ds.auth = dir->get_dir_auth().first;
-    if (dir->is_auth())
+    if (dir->is_auth() && !mdcache->forward_all_reqs_to_auth())
       dir->get_dist_spec(ds.dist, whoami);
 
     dir->encode_dirstat(bl, session->info, ds);
@@ -2135,13 +2193,14 @@ void Server::handle_client_request(const MClientRequest::const_ref &req)
     return;
   }
 
+  bool sessionclosed_isok = replay_unsafe_with_closed_session;
   // active session?
   Session *session = 0;
   if (req->get_source().is_client()) {
     session = mds->get_session(req);
     if (!session) {
       dout(5) << "no session for " << req->get_source() << ", dropping" << dendl;
-    } else if (session->is_closed() ||
+    } else if ((session->is_closed() && (!mds->is_clientreplay() || !sessionclosed_isok)) ||
 	       session->is_closing() ||
 	       session->is_killing()) {
       dout(5) << "session closed|closing|killing, dropping" << dendl;
@@ -2167,6 +2226,8 @@ void Server::handle_client_request(const MClientRequest::const_ref &req)
     inodeno_t created;
     if (session->have_completed_request(req->get_reqid().tid, &created)) {
       has_completed = true;
+      if (!session->is_open())
+        return;
       // Don't send traceless reply if the completed request has created
       // new inode. Treat the request as lookup request instead.
       if (req->is_replay() ||
@@ -3090,7 +3151,7 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
   // state. In that corner case, session's prealloc_inos are being freed.
   // To simplify the code, we disallow using/refilling session's prealloc_ino
   // while session is opening.
-  bool allow_prealloc_inos = !mdr->session->is_opening();
+  bool allow_prealloc_inos = mdr->session->is_open();
 
   // assign ino
   if (allow_prealloc_inos &&
@@ -3105,7 +3166,7 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
 	     << dendl;
   } else {
     mdr->alloc_ino = 
-      in->inode.ino = mds->inotable->project_alloc_id();
+      in->inode.ino = mds->inotable->project_alloc_id(useino);
     dout(10) << "prepare_new_inode alloc " << mdr->alloc_ino << dendl;
   }
 
@@ -3133,6 +3194,7 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
 
   in->inode.mode = mode;
 
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(&in->inode.dir_layout, 0, sizeof(in->inode.dir_layout));
   if (in->inode.is_dir()) {
     in->inode.dir_layout.dl_dir_hash = g_conf()->mds_default_dir_hash;
@@ -3172,7 +3234,7 @@ CInode* Server::prepare_new_inode(MDRequestRef& mdr, CDir *dir, inodeno_t useino
 
     // xattrs on new inode?
     CInode::mempool_xattr_map xattrs;
-    decode(xattrs, p);
+    decode_noshare(xattrs, p);
     for (const auto &p : xattrs) {
       dout(10) << "prepare_new_inode setting xattr " << p.first << dendl;
       auto em = in->xattrs.emplace(std::piecewise_construct, std::forward_as_tuple(p.first), std::forward_as_tuple(p.second));
@@ -4217,6 +4279,7 @@ void Server::handle_client_openc(MDRequestRef& mdr)
 void Server::handle_client_readdir(MDRequestRef& mdr)
 {
   const MClientRequest::const_ref &req = mdr->client_request;
+  Session *session = mds->get_session(req);
   client_t client = req->get_source().num();
   MutationImpl::LockOpVec lov;
   CInode *diri = rdlock_path_pin_ref(mdr, 0, lov, false, true);
@@ -4228,6 +4291,19 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
     dout(10) << "reply to " << *req << " readdir -ENOTDIR" << dendl;
     respond_to_request(mdr, -ENOTDIR);
     return;
+  }
+
+  auto num_caps = session->get_num_caps();
+  auto session_cap_acquisition = session->get_cap_acquisition();
+
+  if (num_caps > static_cast<uint64_t>(max_caps_per_client * max_caps_throttle_ratio) && session_cap_acquisition >= cap_acquisition_throttle) {
+      dout(20) << "readdir throttled. max_caps_per_client: " << max_caps_per_client << " num_caps: " << num_caps
+	       << " session_cap_acquistion: " << session_cap_acquisition << " cap_acquisition_throttle: " << cap_acquisition_throttle << dendl;
+      if (logger)
+          logger->inc(l_mdss_cap_acquisition_throttle);
+
+      mds->timer.add_event_after(caps_throttle_retry_request_timeout, new C_MDS_RetryRequest(mdcache, mdr));
+      return;
   }
 
   lov.add_rdlock(&diri->filelock);
@@ -4317,7 +4393,7 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
   DirStat ds;
   ds.frag = dir->get_frag();
   ds.auth = dir->get_dir_auth().first;
-  if (dir->is_auth())
+  if (dir->is_auth() && !mdcache->forward_all_reqs_to_auth())
     dir->get_dist_spec(ds.dist, mds->get_nodeid());
 
   dir->encode_dirstat(dirbl, mdr->session->info, ds);
@@ -4427,6 +4503,8 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
     mdcache->lru.lru_touch(dn);
   }
   
+  session->touch_readdir_cap(numfiles);
+
   __u16 flags = 0;
   if (end) {
     flags = CEPH_READDIR_FRAG_END;
@@ -4470,14 +4548,16 @@ void Server::handle_client_readdir(MDRequestRef& mdr)
  */
 class C_MDS_inode_update_finish : public ServerLogContext {
   CInode *in;
-  bool truncating_smaller, changed_ranges, new_realm;
+  bool truncating_smaller, changed_ranges, adjust_realm;
 public:
   C_MDS_inode_update_finish(Server *s, MDRequestRef& r, CInode *i,
-			    bool sm=false, bool cr=false, bool nr=false) :
+			    bool sm=false, bool cr=false, bool ar=false) :
     ServerLogContext(s, r), in(i),
-    truncating_smaller(sm), changed_ranges(cr), new_realm(nr) { }
+    truncating_smaller(sm), changed_ranges(cr), adjust_realm(ar) { }
   void finish(int r) override {
     ceph_assert(r == 0);
+
+    int snap_op = (in->snaprealm ? CEPH_SNAP_OP_UPDATE : CEPH_SNAP_OP_SPLIT);
 
     // apply
     in->pop_and_dirty_projected_inode(mdr->ls);
@@ -4491,10 +4571,9 @@ public:
       mds->mdcache->truncate_inode(in, mdr->ls);
     }
 
-    if (new_realm) {
-      int op = CEPH_SNAP_OP_SPLIT;
-      mds->mdcache->send_snap_update(in, 0, op);
-      mds->mdcache->do_realm_invalidate_and_update_notify(in, op);
+    if (adjust_realm) {
+      mds->mdcache->send_snap_update(in, 0, snap_op);
+      mds->mdcache->do_realm_invalidate_and_update_notify(in, snap_op);
     }
 
     get_mds()->balancer->hit_inode(in, META_POP_IWR);
@@ -5256,7 +5335,7 @@ void Server::handle_set_vxattr(MDRequestRef& mdr, CInode *cur,
     return;
   }
 
-  bool new_realm = false;
+  bool adjust_realm = false;
   if (name.compare(0, 15, "ceph.dir.layout") == 0) {
     if (!cur->is_dir()) {
       respond_to_request(mdr, -EINVAL);
@@ -5325,28 +5404,76 @@ void Server::handle_set_vxattr(MDRequestRef& mdr, CInode *cur,
     lov.add_xlock(&cur->policylock);
     if (quota.is_enable() && !cur->get_projected_srnode()) {
       lov.add_xlock(&cur->snaplock);
-      new_realm = true;
+      adjust_realm = true;
     }
 
     if (!mds->locker->acquire_locks(mdr, lov))
       return;
 
-    auto &pi = cur->project_inode(false, new_realm);
+    if (cur->get_projected_inode()->quota == quota) {
+      respond_to_request(mdr, 0);
+      return;
+    }
+
+    auto &pi = cur->project_inode(false, adjust_realm);
     pi.inode.quota = quota;
 
-    if (new_realm) {
-      SnapRealm *realm = cur->find_snaprealm();
-      auto seq = realm->get_newest_seq();
-      auto &newsnap = *pi.snapnode;
-      newsnap.created = seq;
-      newsnap.seq = seq;
-    }
+    if (adjust_realm)
+      pi.snapnode->created = pi.snapnode->seq = cur->find_snaprealm()->get_newest_seq();
+
     mdr->no_early_reply = true;
     pip = &pi.inode;
 
     client_t exclude_ct = mdr->get_client();
     mdcache->broadcast_quota_to_client(cur, exclude_ct, true);
-  } else if (name.find("ceph.dir.pin") == 0) {
+  } else if (name == "ceph.dir.subvolume"sv) {
+    if (!cur->is_dir()) {
+      respond_to_request(mdr, -EINVAL);
+      return;
+    }
+
+    bool val;
+    try {
+      val = boost::lexical_cast<bool>(value);
+    } catch (boost::bad_lexical_cast const&) {
+      dout(10) << "bad vxattr value, unable to parse bool for " << name << dendl;
+      respond_to_request(mdr, -EINVAL);
+      return;
+    }
+
+    lov.add_xlock(&cur->policylock);
+    lov.add_xlock(&cur->snaplock);
+    if (!mds->locker->acquire_locks(mdr, lov))
+      return;
+
+    SnapRealm *realm = cur->find_snaprealm();
+    if (val) {
+      inodeno_t subvol_ino = realm->get_subvolume_ino();
+      // can't create subvolume inside another subvolume
+      if (subvol_ino && subvol_ino != cur->ino()) {
+	respond_to_request(mdr, -EINVAL);
+	return;
+      }
+    }
+
+    const auto srnode = cur->get_projected_srnode();
+    if (val == (srnode && srnode->is_subvolume())) {
+      respond_to_request(mdr, 0);
+      return;
+    }
+
+    auto& pi = cur->project_inode(false, true);
+    if (!srnode)
+      pi.snapnode->created = pi.snapnode->seq = realm->get_newest_seq();
+    if (val)
+      pi.snapnode->mark_subvolume();
+    else
+      pi.snapnode->clear_subvolume();
+
+    mdr->no_early_reply = true;
+    pip = &pi.inode;
+    adjust_realm = true;
+  } else if (name == "ceph.dir.pin"sv) {
     if (!cur->is_dir() || cur->is_root()) {
       respond_to_request(mdr, -EINVAL);
       return;
@@ -5392,7 +5519,7 @@ void Server::handle_set_vxattr(MDRequestRef& mdr, CInode *cur,
   mdcache->journal_dirty_inode(mdr.get(), &le->metablob, cur);
 
   journal_and_reply(mdr, cur, 0, le, new C_MDS_inode_update_finish(this, mdr, cur,
-								   false, false, new_realm));
+								   false, false, adjust_realm));
   return;
 }
 
@@ -5776,6 +5903,7 @@ void Server::handle_client_mknod(MDRequestRef& mdr)
   le->metablob.add_primary_dentry(dn, newi, true, true, true);
 
   journal_and_reply(mdr, newi, dn, le, new C_MDS_mknod_finish(this, mdr, dn, newi));
+  mds->balancer->maybe_fragment(dn->get_dir(), false);
 }
 
 
@@ -5922,6 +6050,7 @@ void Server::handle_client_symlink(MDRequestRef& mdr)
   le->metablob.add_primary_dentry(dn, newi, true, true);
 
   journal_and_reply(mdr, newi, dn, le, new C_MDS_mknod_finish(this, mdr, dn, newi));
+  mds->balancer->maybe_fragment(dir, false);
 }
 
 
@@ -5982,14 +6111,25 @@ void Server::handle_client_link(MDRequestRef& mdr)
       return;
   }
 
+  CInode* target_pin = targeti->get_projected_parent_dir()->inode;
+  SnapRealm *target_realm = target_pin->find_snaprealm();
+  if (target_pin != dir->inode &&
+      target_realm->get_subvolume_ino() !=
+      dir->inode->find_snaprealm()->get_subvolume_ino()) {
+    dout(7) << "target is in different subvolume, failing..." << dendl;
+    respond_to_request(mdr, -EXDEV);
+    return;
+  }
+
   // go!
   ceph_assert(g_conf()->mds_kill_link_at != 1);
 
   // local or remote?
   if (targeti->is_auth()) 
-    _link_local(mdr, dn, targeti);
+    _link_local(mdr, dn, targeti, target_realm);
   else 
     _link_remote(mdr, true, dn, targeti);
+  mds->balancer->maybe_fragment(dir, false);  
 }
 
 
@@ -6011,7 +6151,7 @@ public:
 };
 
 
-void Server::_link_local(MDRequestRef& mdr, CDentry *dn, CInode *targeti)
+void Server::_link_local(MDRequestRef& mdr, CDentry *dn, CInode *targeti, SnapRealm *target_realm)
 {
   dout(10) << "_link_local " << *dn << " to " << *targeti << dendl;
 
@@ -6031,10 +6171,10 @@ void Server::_link_local(MDRequestRef& mdr, CDentry *dn, CInode *targeti)
   pi.inode.version = tipv;
 
   bool adjust_realm = false;
-  if (!targeti->is_projected_snaprealm_global()) {
+  if (!target_realm->get_subvolume_ino() && !targeti->is_projected_snaprealm_global()) {
     sr_t *newsnap = targeti->project_snaprealm();
     targeti->mark_snaprealm_global(newsnap);
-    targeti->record_snaprealm_parent_dentry(newsnap, NULL, targeti->get_projected_parent_dn(), true);
+    targeti->record_snaprealm_parent_dentry(newsnap, target_realm, targeti->get_projected_parent_dn(), true);
     adjust_realm = true;
   }
 
@@ -6287,10 +6427,13 @@ void Server::handle_slave_link_prep(MDRequestRef& mdr)
   if (mdr->slave_request->get_op() == MMDSSlaveRequest::OP_LINKPREP) {
     inc = true;
     pi.inode.nlink++;
-    if (!targeti->is_projected_snaprealm_global()) {
+
+    CDentry *target_pdn = targeti->get_projected_parent_dn();
+    SnapRealm *target_realm = target_pdn->get_dir()->inode->find_snaprealm();
+    if (!target_realm->get_subvolume_ino() && !targeti->is_projected_snaprealm_global()) {
       sr_t *newsnap = targeti->project_snaprealm();
       targeti->mark_snaprealm_global(newsnap);
-      targeti->record_snaprealm_parent_dentry(newsnap, NULL, targeti->get_projected_parent_dn(), true);
+      targeti->record_snaprealm_parent_dentry(newsnap, target_realm, target_pdn, true);
       adjust_realm = true;
       realm_projected = true;
     }
@@ -6340,6 +6483,7 @@ void Server::handle_slave_link_prep(MDRequestRef& mdr)
   // commit case
   mdcache->predirty_journal_parents(mdr, &le->commit, dnl->get_inode(), 0, PREDIRTY_SHALLOW|PREDIRTY_PRIMARY);
   mdcache->journal_dirty_inode(mdr.get(), &le->commit, targeti);
+  mdcache->add_uncommitted_slave(mdr->reqid, mdr->ls, mdr->slave_to_mds);
 
   // set up commit waiter
   mdr->more()->slave_commit = new C_MDS_SlaveLinkCommit(this, mdr, targeti);
@@ -6420,6 +6564,8 @@ void Server::_committed_slave(MDRequestRef& mdr)
 
   ceph_assert(g_conf()->mds_kill_link_at != 8);
 
+  bool assert_exist = mdr->more()->slave_update_journaled;
+  mdcache->finish_uncommitted_slave(mdr->reqid, assert_exist);
   auto req = MMDSSlaveRequest::create(mdr->reqid, mdr->attempt, MMDSSlaveRequest::OP_COMMITTED);
   mds->send_message_mds(req, mdr->slave_to_mds);
   mdcache->request_finish(mdr);
@@ -6534,7 +6680,7 @@ void Server::_link_rollback_finish(MutationRef& mut, MDRequestRef& mdr,
   if (mdr)
     mdcache->request_finish(mdr);
 
-  mdcache->finish_rollback(mut->reqid);
+  mdcache->finish_rollback(mut->reqid, mdr);
 
   mut->cleanup();
 }
@@ -6704,7 +6850,7 @@ void Server::handle_client_unlink(MDRequestRef& mdr)
   if (!mdr->more()->desti_srnode) {
     if (in->is_projected_snaprealm_global()) {
       sr_t *new_srnode = in->prepare_new_srnode(0);
-      in->record_snaprealm_parent_dentry(new_srnode, NULL, dn, dnl->is_primary());
+      in->record_snaprealm_parent_dentry(new_srnode, nullptr, dn, dnl->is_primary());
       // dropping the last linkage or dropping the last remote linkage,
       // detch the inode from global snaprealm
       auto nlink = in->get_projected_inode()->nlink;
@@ -7034,6 +7180,7 @@ void Server::handle_slave_rmdir_prep(MDRequestRef& mdr)
     return;
   }
 
+  mdr->ls = mdlog->get_current_segment();
   ESlaveUpdate *le =  new ESlaveUpdate(mdlog, "slave_rmdir", mdr->reqid, mdr->slave_to_mds,
 				       ESlaveUpdate::OP_PREPARE, ESlaveUpdate::RMDIR);
   mdlog->start_entry(le);
@@ -7047,6 +7194,7 @@ void Server::handle_slave_rmdir_prep(MDRequestRef& mdr)
   le->commit.renamed_dirino = in->ino();
 
   mdcache->project_subtree_rename(in, dn->get_dir(), straydn->get_dir());
+  mdcache->add_uncommitted_slave(mdr->reqid, mdr->ls, mdr->slave_to_mds);
 
   mdr->more()->slave_update_journaled = true;
   submit_mdlog_entry(le, new C_MDS_SlaveRmdirPrep(this, mdr, dn, straydn),
@@ -7120,7 +7268,7 @@ void Server::handle_slave_rmdir_prep_ack(MDRequestRef& mdr, const MMDSSlaveReque
 void Server::_commit_slave_rmdir(MDRequestRef& mdr, int r, CDentry *straydn)
 {
   dout(10) << "_commit_slave_rmdir " << *mdr << " r=" << r << dendl;
-  
+
   if (r == 0) {
     if (mdr->more()->slave_update_journaled) {
       CInode *strayin = straydn->get_projected_linkage()->get_inode();
@@ -7249,7 +7397,7 @@ void Server::_rmdir_rollback_finish(MDRequestRef& mdr, metareqid_t reqid, CDentr
   if (mdr)
     mdcache->request_finish(mdr);
 
-  mdcache->finish_rollback(reqid);
+  mdcache->finish_rollback(reqid, mdr);
 }
 
 
@@ -7644,6 +7792,21 @@ void Server::handle_client_rename(MDRequestRef& mdr)
   }
   */
 
+  SnapRealm *dest_realm = nullptr;
+  SnapRealm *src_realm = nullptr;
+  if (!linkmerge) {
+    dest_realm = destdir->inode->find_snaprealm();
+    if (srcdir->inode == destdir->inode)
+      src_realm = dest_realm;
+    else
+      src_realm = srcdir->inode->find_snaprealm();
+    if (src_realm != dest_realm &&
+	src_realm->get_subvolume_ino() != dest_realm->get_subvolume_ino()) {
+      respond_to_request(mdr, -EXDEV);
+      return;
+    }
+  }
+
   ceph_assert(g_conf()->mds_kill_rename_at != 1);
 
   // -- open all srcdn inode frags, if any --
@@ -7674,7 +7837,7 @@ void Server::handle_client_rename(MDRequestRef& mdr)
 	srci->get_projected_inode()->nlink == 1 &&
 	srci->is_projected_snaprealm_global()) {
       sr_t *new_srnode = srci->prepare_new_srnode(0);
-      srci->record_snaprealm_parent_dentry(new_srnode, NULL, destdn, false);
+      srci->record_snaprealm_parent_dentry(new_srnode, nullptr, destdn, false);
 
       srci->clear_snaprealm_global(new_srnode);
       mdr->more()->srci_srnode = new_srnode;
@@ -7683,7 +7846,7 @@ void Server::handle_client_rename(MDRequestRef& mdr)
     if (oldin && !mdr->more()->desti_srnode) {
       if (oldin->is_projected_snaprealm_global()) {
 	sr_t *new_srnode = oldin->prepare_new_srnode(0);
-	oldin->record_snaprealm_parent_dentry(new_srnode, NULL, destdn, destdnl->is_primary());
+	oldin->record_snaprealm_parent_dentry(new_srnode, dest_realm, destdn, destdnl->is_primary());
 	// dropping the last linkage or dropping the last remote linkage,
 	// detch the inode from global snaprealm
 	auto nlink = oldin->get_projected_inode()->nlink;
@@ -7693,7 +7856,6 @@ void Server::handle_client_rename(MDRequestRef& mdr)
 	  oldin->clear_snaprealm_global(new_srnode);
 	mdr->more()->desti_srnode = new_srnode;
       } else if (destdnl->is_primary()) {
-	SnapRealm *dest_realm = destdir->inode->find_snaprealm();
 	snapid_t follows = dest_realm->get_newest_seq();
 	if (oldin->snaprealm || follows + 1 > oldin->get_oldest_snap()) {
 	  sr_t *new_srnode = oldin->prepare_new_srnode(follows);
@@ -7703,13 +7865,11 @@ void Server::handle_client_rename(MDRequestRef& mdr)
       }
     }
     if (!mdr->more()->srci_srnode) {
-      SnapRealm *dest_realm = destdir->inode->find_snaprealm();
       if (srci->is_projected_snaprealm_global()) {
 	sr_t *new_srnode = srci->prepare_new_srnode(0);
-	srci->record_snaprealm_parent_dentry(new_srnode, dest_realm, srcdn, srcdnl->is_primary());
+	srci->record_snaprealm_parent_dentry(new_srnode, src_realm, srcdn, srcdnl->is_primary());
 	mdr->more()->srci_srnode = new_srnode;
       } else if (srcdnl->is_primary()) {
-	SnapRealm *src_realm = srcdir->inode->find_snaprealm();
 	snapid_t follows = src_realm->get_newest_seq();
 	if (src_realm != dest_realm &&
 	    (srci->snaprealm || follows + 1 > srci->get_oldest_snap())) {
@@ -8755,6 +8915,7 @@ void Server::handle_slave_rename_prep(MDRequestRef& mdr)
     mdr->ls = NULL;
     _logged_slave_rename(mdr, srcdn, destdn, straydn);
   } else {
+    mdcache->add_uncommitted_slave(mdr->reqid, mdr->ls, mdr->slave_to_mds);
     mdr->more()->slave_update_journaled = true;
     submit_mdlog_entry(le, new C_MDS_SlaveRenamePrep(this, mdr, srcdn, destdn, straydn),
 		       mdr, __func__);
@@ -9377,7 +9538,7 @@ void Server::_rename_rollback_finish(MutationRef& mut, MDRequestRef& mdr, CDentr
       mdr->more()->slave_rolling_back = false;
   }
 
-  mdcache->finish_rollback(mut->reqid);
+  mdcache->finish_rollback(mut->reqid, mdr);
 
   mut->cleanup();
 }
@@ -9638,6 +9799,20 @@ void Server::handle_client_mksnap(MDRequestRef& mdr)
 
   if (!check_access(mdr, diri, MAY_WRITE|MAY_SNAPSHOT))
     return;
+
+  if (inodeno_t subvol_ino = diri->find_snaprealm()->get_subvolume_ino();
+      (subvol_ino && subvol_ino != diri->ino())) {
+    respond_to_request(mdr, -EPERM);
+    return;
+  }
+
+  // check if we can create any more snapshots
+  // we don't allow any more if we are already at or beyond the limit
+  if (diri->snaprealm &&
+      diri->snaprealm->get_snaps().size() >= max_snaps_per_dir) {
+    respond_to_request(mdr, -EMLINK);
+    return;
+  }
 
   // make sure name is unique
   if (diri->snaprealm &&

@@ -6,7 +6,11 @@ import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
 
 import { By } from '@angular/platform-browser';
-import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
+import {
+  configureTestBed,
+  expectItemTasks,
+  i18nProviders
+} from '../../../../testing/unit-test-helper';
 import { RbdService } from '../../../shared/api/rbd.service';
 import { CdTableSelection } from '../../../shared/models/cd-table-selection';
 import { ExecutingTask } from '../../../shared/models/executing-task';
@@ -74,10 +78,6 @@ describe('RbdTrashListComponent', () => {
       summaryService.addRunningTask(task);
     };
 
-    const expectImageTasks = (image: any, executing: string) => {
-      expect(image.cdExecuting).toEqual(executing);
-    };
-
     beforeEach(() => {
       images = [];
       addImage('1');
@@ -85,7 +85,7 @@ describe('RbdTrashListComponent', () => {
       component.images = images;
       summaryService['summaryDataSource'].next({ executingTasks: [] });
       spyOn(rbdService, 'listTrash').and.callFake(() =>
-        of([{ poool_name: 'rbd', status: 1, value: images }])
+        of([{ pool_name: 'rbd', status: 1, value: images }])
       );
       fixture.detectChanges();
     });
@@ -99,13 +99,40 @@ describe('RbdTrashListComponent', () => {
       addTask('rbd/trash/remove', '1');
       addTask('rbd/trash/restore', '2');
       expect(component.images.length).toBe(2);
-      expectImageTasks(component.images[0], 'Deleting');
-      expectImageTasks(component.images[1], 'Restoring');
+      expectItemTasks(component.images[0], 'Deleting');
+      expectItemTasks(component.images[1], 'Restoring');
     });
   });
 
   describe('display purge button', () => {
-    beforeEach(() => {});
+    let images: any[];
+    const addImage = (id: string) => {
+      images.push({
+        id: id,
+        pool_name: 'pl',
+        deferment_end_time: 'abc'
+      });
+    };
+
+    beforeEach(() => {
+      summaryService['summaryDataSource'].next({ executingTasks: [] });
+      spyOn(rbdService, 'listTrash').and.callFake(() => {
+        of([{ pool_name: 'rbd', status: 1, value: images }]);
+      });
+      fixture.detectChanges();
+    });
+
+    it('should show button disabled when no image is in trash', () => {
+      expect(component.disablePurgeBtn).toBeTruthy();
+    });
+
+    it('should show button enabled when an existing image is in trash', () => {
+      images = [];
+      addImage('1');
+      const payload = [{ pool_name: 'rbd', status: 1, value: images }];
+      component.prepareResponse(payload);
+      expect(component.disablePurgeBtn).toBeFalsy();
+    });
 
     it('should show button with delete permission', () => {
       component.permission = {

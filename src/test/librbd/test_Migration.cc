@@ -292,7 +292,6 @@ struct TestMigration : public TestFixture {
     int order = m_ref_ictx->order;
     uint64_t features;
     ASSERT_EQ(0, librbd::get_features(m_ref_ictx, &features));
-    features &= ~RBD_FEATURES_IMPLICIT_ENABLE;
 
     std::string ref_clone_name = get_temp_image_name();
     std::string clone_name = get_temp_image_name();
@@ -405,7 +404,6 @@ struct TestMigration : public TestFixture {
     int order = m_ictx->order;
     uint64_t features;
     ASSERT_EQ(0, librbd::get_features(m_ictx, &features));
-    features &= ~RBD_FEATURES_IMPLICIT_ENABLE;
 
     std::string clone_name = get_temp_image_name();
     ASSERT_EQ(0, librbd::clone(m_ictx->md_ctx, m_ictx->name.c_str(), "snap1",
@@ -1100,6 +1098,37 @@ TEST_F(TestMigration, SnapTrimBeforePrepare)
 
   migration_execute(m_ioctx, m_image_name);
   migration_commit(m_ioctx, m_image_name);
+}
+
+TEST_F(TestMigration, AbortInUseImage) {
+  migration_prepare(m_ioctx, m_image_name);
+  migration_status(RBD_IMAGE_MIGRATION_STATE_PREPARED);
+
+  librbd::NoOpProgressContext no_op;
+  EXPECT_EQ(-EBUSY, librbd::api::Migration<>::abort(m_ioctx, m_ictx->name,
+                                                    no_op));
+}
+
+TEST_F(TestMigration, AbortWithoutSnapshots) {
+  test_no_snaps();
+  migration_prepare(m_ioctx, m_image_name);
+  migration_status(RBD_IMAGE_MIGRATION_STATE_PREPARED);
+  test_no_snaps();
+  migration_abort(m_ioctx, m_image_name);
+}
+
+TEST_F(TestMigration, AbortWithSnapshots) {
+  test_snaps();
+  migration_prepare(m_ioctx, m_image_name);
+  migration_status(RBD_IMAGE_MIGRATION_STATE_PREPARED);
+
+  test_no_snaps();
+  flush();
+  ASSERT_EQ(0, TestFixture::snap_create(*m_ictx, "dst-only-snap"));
+
+  test_no_snaps();
+
+  migration_abort(m_ioctx, m_image_name);
 }
 
 TEST_F(TestMigration, CloneV1Parent)

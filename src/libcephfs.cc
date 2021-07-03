@@ -79,8 +79,7 @@ public:
   {
     int ret;
 
-    if (cct->_conf->log_early &&
-	!cct->_log->is_started()) {
+    if (!cct->_log->is_started()) {
       cct->_log->start();
     }
 
@@ -117,7 +116,7 @@ public:
       goto fail;
 
     {
-      client_callback_args args = {};
+      ceph_client_callback_args args = {};
       args.handle = this;
       args.umask_cb = umask_cb;
       client->ll_register_callbacks(&args);
@@ -884,6 +883,12 @@ extern "C" int ceph_chmod(struct ceph_mount_info *cmount, const char *path, mode
     return -ENOTCONN;
   return cmount->get_client()->chmod(path, mode, cmount->default_perms);
 }
+extern "C" int ceph_lchmod(struct ceph_mount_info *cmount, const char *path, mode_t mode)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return cmount->get_client()->lchmod(path, mode, cmount->default_perms);
+}
 extern "C" int ceph_fchmod(struct ceph_mount_info *cmount, int fd, mode_t mode)
 {
   if (!cmount->is_mounted())
@@ -1078,6 +1083,23 @@ extern "C" int ceph_lazyio(class ceph_mount_info *cmount,
 {
   return (cmount->get_client()->lazyio(fd, enable));
 }
+
+extern "C" int ceph_lazyio_propagate(class ceph_mount_info *cmount,
+                           int fd, int64_t offset, size_t count)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return (cmount->get_client()->lazyio_propagate(fd, offset, count));
+}
+
+extern "C" int ceph_lazyio_synchronize(class ceph_mount_info *cmount,
+                           int fd, int64_t offset, size_t count)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return (cmount->get_client()->lazyio_synchronize(fd, offset, count));
+}
+
 
 extern "C" int ceph_sync_fs(struct ceph_mount_info *cmount)
 {
@@ -1550,6 +1572,14 @@ extern "C" struct Inode *ceph_ll_get_inode(class ceph_mount_info *cmount,
 }
 
 
+extern "C" int ceph_ll_lookup_vino(
+    struct ceph_mount_info *cmount,
+    vinodeno_t vino,
+    Inode **inode)
+{
+  return (cmount->get_client())->ll_lookup_vino(vino, cmount->default_perms, inode);
+}
+
 /**
  * Populates the client cache with the requested inode, and its
  * parent dentry.
@@ -1975,4 +2005,10 @@ extern "C" int ceph_start_reclaim(class ceph_mount_info *cmount,
 extern "C" void ceph_finish_reclaim(class ceph_mount_info *cmount)
 {
   cmount->get_client()->finish_reclaim();
+}
+
+extern "C" void ceph_ll_register_callbacks(class ceph_mount_info *cmount,
+					   struct ceph_client_callback_args *args)
+{
+  cmount->get_client()->ll_register_callbacks(args);
 }

@@ -1377,7 +1377,7 @@ int FileStore::write_superblock()
   bufferlist bl;
   encode(superblock, bl);
   return safe_write_file(basedir.c_str(), "superblock",
-      bl.c_str(), bl.length());
+			 bl.c_str(), bl.length(), 0600);
 }
 
 int FileStore::read_superblock()
@@ -1462,7 +1462,7 @@ int FileStore::write_version_stamp()
   encode(target_version, bl);
 
   return safe_write_file(basedir.c_str(), "store_version",
-      bl.c_str(), bl.length());
+			 bl.c_str(), bl.length(), 0600);
 }
 
 int FileStore::upgrade()
@@ -4973,7 +4973,17 @@ int FileStore::list_collections(vector<coll_t>& ls, bool include_temp)
   }
 
   struct dirent *de = nullptr;
-  while ((de = ::readdir(dir))) {
+  while (true) {
+    errno = 0;
+    de = ::readdir(dir);
+    if (de == nullptr) {
+      if (errno != 0) {
+        r = -errno;
+        derr << "readdir failed " << fn << ": " << cpp_strerror(-r) << dendl;
+        if (r == -EIO && m_filestore_fail_eio) handle_eio();
+      }
+      break;
+    }
     if (de->d_type == DT_UNKNOWN) {
       // d_type not supported (non-ext[234], btrfs), must stat
       struct stat sb;

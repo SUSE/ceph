@@ -755,22 +755,24 @@ void librados::NObjectIteratorImpl::set_filter(const bufferlist &bl)
 void librados::NObjectIteratorImpl::get_next()
 {
   const char *entry, *key, *nspace;
+  size_t entry_size, key_size, nspace_size;
   if (ctx->nlc->at_end())
     return;
-  int ret = rados_nobjects_list_next(ctx.get(), &entry, &key, &nspace);
+  int ret = rados_nobjects_list_next2(ctx.get(), &entry, &key, &nspace,
+                                      &entry_size, &key_size, &nspace_size);
   if (ret == -ENOENT) {
     return;
   }
   else if (ret) {
     throw std::system_error(-ret, std::system_category(),
-                            "rados_nobjects_list_next");
+                            "rados_nobjects_list_next2");
   }
 
   if (cur_obj.impl == NULL)
     cur_obj.impl = new ListObjectImpl();
-  cur_obj.impl->nspace = nspace;
-  cur_obj.impl->oid = entry;
-  cur_obj.impl->locator = key ? key : string();
+  cur_obj.impl->nspace = string{nspace, nspace_size};
+  cur_obj.impl->oid = string{entry, entry_size};
+  cur_obj.impl->locator = key ? string(key, key_size) : string();
 }
 
 uint32_t librados::NObjectIteratorImpl::get_pg_hash_position() const
@@ -1054,6 +1056,10 @@ librados::IoCtx& librados::IoCtx::operator=(IoCtx&& rhs) noexcept
 librados::IoCtx::~IoCtx()
 {
   close();
+}
+
+bool librados::IoCtx::is_valid() const {
+  return io_ctx_impl != nullptr;
 }
 
 void librados::IoCtx::close()
@@ -2170,6 +2176,16 @@ librados::Rados::Rados(IoCtx &ioctx)
 librados::Rados::~Rados()
 {
   shutdown();
+}
+
+void librados::Rados::from_rados_t(rados_t cluster, Rados &rados) {
+  if (rados.client) {
+    rados.client->put();
+  }
+  rados.client = static_cast<RadosClient*>(cluster);
+  if (rados.client) {
+    rados.client->get();
+  }
 }
 
 int librados::Rados::init(const char * const id)

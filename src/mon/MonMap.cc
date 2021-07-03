@@ -36,7 +36,16 @@ void mon_info_t::encode(bufferlist& bl, uint64_t features) const
   ENCODE_START(v, 1, bl);
   encode(name, bl);
   if (v < 3) {
-    encode(public_addrs.legacy_addr(), bl, features);
+    auto a = public_addrs.legacy_addr();
+    if (a != entity_addr_t()) {
+      encode(a, bl, features);
+    } else {
+      // note: we don't have a legacy addr here, so lie so that it looks
+      // like one, just so that old clients get a valid-looking map.
+      // they won't be able to talk to the v2 mons, but that's better
+      // than nothing.
+      encode(public_addrs.as_legacy_addr(), bl, features);
+    }
   } else {
     encode(public_addrs, bl, features);
   }
@@ -351,6 +360,14 @@ void MonMap::dump(Formatter *f) const
   f->close_section();
 }
 
+void MonMap::dump_summary(Formatter *f) const
+{
+  f->dump_unsigned("epoch", epoch);
+  f->dump_string("min_mon_release_name", std::to_string(min_mon_release));
+  f->dump_unsigned("num_mons", ranks.size());
+}
+
+
 // an ambiguous mon addr may be legacy or may be msgr2--we aren' sure.
 // when that happens we need to try them both (unless we can
 // reasonably infer from the port number which it is).
@@ -440,9 +457,27 @@ void MonMap::_add_ambiguous_addr(const string& name,
   }
 }
 
+void MonMap::init_with_addrs(const std::vector<entity_addrvec_t>& addrs,
+                             bool for_mkfs,
+                             std::string_view prefix)
+{
+  char id = 'a';
+  for (auto& addr : addrs) {
+    string name{prefix};
+    name += id++;
+    if (addr.v.size() == 1) {
+      _add_ambiguous_addr(name, addr.front(), 0, for_mkfs);
+    } else {
+      // they specified an addrvec, so let's assume they also specified
+      // the addr *type* and *port*.  (we could possibly improve this?)
+      add(name, addr, 0);
+    }
+  }
+}
+
 int MonMap::init_with_ips(const std::string& ips,
 			  bool for_mkfs,
-			  const std::string &prefix)
+			  std::string_view prefix)
 {
   vector<entity_addrvec_t> addrs;
   if (!parse_ip_port_vec(
@@ -452,27 +487,13 @@ int MonMap::init_with_ips(const std::string& ips,
   }
   if (addrs.empty())
     return -ENOENT;
-  for (unsigned i=0; i<addrs.size(); i++) {
-    char n[2];
-    n[0] = 'a' + i;
-    n[1] = 0;
-    string name;
-    name = prefix;
-    name += n;
-    if (addrs[i].v.size() == 1) {
-      _add_ambiguous_addr(name, addrs[i].front(), 0, for_mkfs);
-    } else {
-      // they specified an addrvec, so let's assume they also specified
-      // the addr *type* and *port*.  (we could possibly improve this?)
-      add(name, addrs[i], 0);
-    }
-  }
+  init_with_addrs(addrs, for_mkfs, prefix);
   return 0;
 }
 
 int MonMap::init_with_hosts(const std::string& hostlist,
 			    bool for_mkfs,
-			    const std::string& prefix)
+			    std::string_view prefix)
 {
   // maybe they passed us a DNS-resolvable name
   char *hosts = resolve_addrs(hostlist.c_str());
@@ -482,24 +503,13 @@ int MonMap::init_with_hosts(const std::string& hostlist,
   vector<entity_addrvec_t> addrs;
   bool success = parse_ip_port_vec(
     hosts, addrs,
-    for_mkfs ? entity_addr_t::TYPE_MSGR2 : entity_addr_t::TYPE_ANY);
+    entity_addr_t::TYPE_ANY);
   free(hosts);
   if (!success)
     return -EINVAL;
   if (addrs.empty())
     return -ENOENT;
-  for (unsigned i=0; i<addrs.size(); i++) {
-    char n[2];
-    n[0] = 'a' + i;
-    n[1] = 0;
-    string name = prefix;
-    name += n;
-    if (addrs[i].v.size() == 1) {
-      _add_ambiguous_addr(name, addrs[i].front(), 0);
-    } else {
-      add(name, addrs[i], 0);
-    }
-  }
+  init_with_addrs(addrs, for_mkfs, prefix);
   calc_legacy_ranks();
   return 0;
 }
@@ -784,6 +794,29 @@ int MonMap::init_with_dns_srv(CephContext* cct,
 int MonMap::build_initial(CephContext *cct, bool for_mkfs, ostream& errout)
 {
   const auto& conf = cct->_conf;
+
+  // mon_host_override?
+  auto mon_host_override = conf.get_val<std::string>("mon_host_override");
+  if (!mon_host_override.empty()) {
+    lgeneric_dout(cct, 1) << "Using mon_host_override " << mon_host_override << dendl;
+    auto ret = init_with_ips(mon_host_override, for_mkfs, "noname-");
+    if (ret == -EINVAL) {
+      ret = init_with_hosts(mon_host_override, for_mkfs, "noname-");
+    }
+    if (ret < 0) {
+      errout << "unable to parse addrs in '" << mon_host_override << "'"
+	     << std::endl;
+    }
+    return ret;
+  }
+
+  // cct?
+  auto addrs = cct->get_mon_addrs();
+  if (addrs != nullptr && (addrs->size() > 0)) {
+    init_with_addrs(*addrs, for_mkfs, "noname-");
+    return 0;
+  }
+
   // file?
   if (const auto monmap = conf.get_val<std::string>("monmap");
       !monmap.empty()) {

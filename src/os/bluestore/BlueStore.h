@@ -29,6 +29,8 @@
 #include <boost/functional/hash.hpp>
 #include <boost/dynamic_bitset.hpp>
 
+#include "include/cpp-btree/btree_set.h"
+
 #include "include/ceph_assert.h"
 #include "include/unordered_map.h"
 #include "include/mempool.h"
@@ -127,7 +129,10 @@ enum {
   l_bluestore_omap_upper_bound_lat,
   l_bluestore_omap_lower_bound_lat,
   l_bluestore_omap_next_lat,
+  l_bluestore_omap_get_keys_lat,
+  l_bluestore_omap_get_values_lat,
   l_bluestore_clist_lat,
+  l_bluestore_remove_lat,
   l_bluestore_last
 };
 
@@ -155,6 +160,7 @@ public:
   class TransContext;
 
   typedef map<uint64_t, bufferlist> ready_regions_t;
+
 
   struct BufferSpace;
   struct Collection;
@@ -267,7 +273,7 @@ public:
 	boost::intrusive::list_member_hook<>,
 	&Buffer::state_item> > state_list_t;
 
-    mempool::bluestore_cache_other::map<uint32_t, std::unique_ptr<Buffer>>
+    mempool::bluestore_cache_meta::map<uint32_t, std::unique_ptr<Buffer>>
       buffer_map;
 
     // we use a bare intrusive list here instead of std::map because
@@ -451,7 +457,7 @@ public:
 
     // we use a bare pointer because we don't want to affect the ref
     // count
-    mempool::bluestore_cache_other::unordered_map<uint64_t,SharedBlob*> sb_map;
+    mempool::bluestore_cache_meta::unordered_map<uint64_t,SharedBlob*> sb_map;
 
     SharedBlobRef lookup(uint64_t sbid) {
       std::lock_guard l(lock);
@@ -665,7 +671,7 @@ public:
 #endif
   };
   typedef boost::intrusive_ptr<Blob> BlobRef;
-  typedef mempool::bluestore_cache_other::map<int,BlobRef> blob_map_t;
+  typedef mempool::bluestore_cache_meta::map<int,BlobRef> blob_map_t;
 
   /// a logical extent, pointing to (some portion of) a blob
   typedef boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true> > ExtentBase; //making an alias to avoid build warnings
@@ -771,7 +777,7 @@ public:
       bool loaded = false;   ///< true if shard is loaded
       bool dirty = false;    ///< true if shard is dirty and needs reencoding
     };
-    mempool::bluestore_cache_other::vector<Shard> shards;    ///< shards
+    mempool::bluestore_cache_meta::vector<Shard> shards;    ///< shards
 
     bufferlist inline_bl;    ///< cached encoded map, if unsharded; empty=>dirty
 
@@ -963,7 +969,7 @@ public:
       uint64_t min_alloc_size);
 
     /// return a collection of extents to perform GC on
-    const vector<bluestore_pextent_t>& get_extents_to_collect() const {
+    const interval_set<uint64_t>& get_extents_to_collect() const {
       return extents_to_collect;
     }
     GarbageCollector(CephContext* _cct) : cct(_cct) {}
@@ -994,7 +1000,7 @@ public:
                                          ///< specific write
 
     ///< protrusive extents that should be collected if GC takes place
-    vector<bluestore_pextent_t> extents_to_collect;
+    interval_set<uint64_t> extents_to_collect;
 
     boost::optional<uint64_t > used_alloc_unit; ///< last processed allocation
                                                 ///<  unit when traversing 
@@ -1016,8 +1022,6 @@ public:
     int64_t expected_for_release = 0;      ///< alloc units currently used by
                                            ///< compressed blobs that might
                                            ///< gone after GC
-    uint64_t gc_start_offset = 0;              ///starting offset for GC
-    uint64_t gc_end_offset = 0;                ///ending offset for GC
 
   protected:
     void process_protrusive_extents(const BlueStore::ExtentMap& extent_map, 
@@ -1040,7 +1044,7 @@ public:
     ghobject_t oid;
 
     /// key under PREFIX_OBJ where we are stored
-    mempool::bluestore_cache_other::string key;
+    mempool::bluestore_cache_meta::string key;
 
     boost::intrusive::list_member_hook<> lru_item;
 
@@ -1057,7 +1061,7 @@ public:
     ceph::condition_variable flush_cond;   ///< wait here for uncommitted txns
 
     Onode(Collection *c, const ghobject_t& o,
-	  const mempool::bluestore_cache_other::string& k)
+	  const mempool::bluestore_cache_meta::string& k)
       : nref(0),
 	c(c),
 	oid(o),
@@ -1065,6 +1069,30 @@ public:
 	exists(false),
 	extent_map(this) {
     }
+    Onode(Collection* c, const ghobject_t& o,
+      const string& k)
+      : nref(0),
+      c(c),
+      oid(o),
+      key(k),
+      exists(false),
+      extent_map(this) {
+    }
+    Onode(Collection* c, const ghobject_t& o,
+      const char* k)
+      : nref(0),
+      c(c),
+      oid(o),
+      key(k),
+      exists(false),
+      extent_map(this) {
+    }
+
+    static Onode* decode(
+      CollectionRef c,
+      const ghobject_t& oid,
+      const string& key,
+      const bufferlist& v);
 
     void flush();
     void get() {
@@ -1089,6 +1117,8 @@ public:
 
     std::atomic<uint64_t> num_extents = {0};
     std::atomic<uint64_t> num_blobs = {0};
+
+    std::array<std::pair<ghobject_t, mono_clock::time_point>, 64> dumped_onodes;
 
     static Cache *create(CephContext* cct, string type, PerfCounters *logger);
 
@@ -1162,12 +1192,20 @@ public:
 	&Buffer::lru_item> > buffer_lru_list_t;
 
     onode_lru_list_t onode_lru;
+    onode_lru_list_t::iterator last_pinned;
 
     buffer_lru_list_t buffer_lru;
     uint64_t buffer_size = 0;
 
+    void _onode_lru_erase(onode_lru_list_t::iterator it) {
+      if (it == last_pinned) {
+        last_pinned = onode_lru.end();
+      }
+      onode_lru.erase(it);
+    }
+
   public:
-    LRUCache(CephContext* cct) : Cache(cct) {}
+    LRUCache(CephContext* cct) : Cache(cct), last_pinned(onode_lru.end()){}
     uint64_t _get_num_onodes() override {
       return onode_lru.size();
     }
@@ -1179,7 +1217,7 @@ public:
     }
     void _rm_onode(OnodeRef& o) override {
       auto q = onode_lru.iterator_to(*o);
-      onode_lru.erase(q);
+      _onode_lru_erase(q);
     }
     void _touch_onode(OnodeRef& o) override;
 
@@ -1255,6 +1293,7 @@ public:
 	&Buffer::lru_item> > buffer_list_t;
 
     onode_lru_list_t onode_lru;
+    onode_lru_list_t::iterator last_pinned;
 
     buffer_list_t buffer_hot;      ///< "Am" hot buffers
     buffer_list_t buffer_warm_in;  ///< "A1in" newly warm buffers
@@ -1271,8 +1310,14 @@ public:
 
     uint64_t buffer_list_bytes[BUFFER_TYPE_MAX] = {0}; ///< bytes per type
 
+    void _onode_lru_erase(onode_lru_list_t::iterator it) {
+      if (it == last_pinned) {
+        last_pinned = onode_lru.end();
+      }
+      onode_lru.erase(it);
+    }
   public:
-    TwoQCache(CephContext* cct) : Cache(cct) {}
+    TwoQCache(CephContext* cct) : Cache(cct), last_pinned(onode_lru.end()){}
     uint64_t _get_num_onodes() override {
       return onode_lru.size();
     }
@@ -1284,7 +1329,7 @@ public:
     }
     void _rm_onode(OnodeRef& o) override {
       auto q = onode_lru.iterator_to(*o);
-      onode_lru.erase(q);
+      _onode_lru_erase(q);
     }
     void _touch_onode(OnodeRef& o) override;
 
@@ -1337,7 +1382,7 @@ public:
     Cache *cache;
 
     /// forward lookups
-    mempool::bluestore_cache_other::unordered_map<ghobject_t,OnodeRef> onode_map;
+    mempool::bluestore_cache_meta::unordered_map<ghobject_t,OnodeRef> onode_map;
 
     friend class Collection; // for split_cache()
 
@@ -1354,7 +1399,7 @@ public:
     }
     void rename(OnodeRef& o, const ghobject_t& old_oid,
 		const ghobject_t& new_oid,
-		const mempool::bluestore_cache_other::string& new_okey);
+		const mempool::bluestore_cache_meta::string& new_okey);
     void clear();
     bool empty();
 
@@ -1815,6 +1860,7 @@ public:
 	  auto it = q.rbegin();
 	  it++;
 	  if (it->state >= TransContext::STATE_KV_SUBMITTED) {
+	    --kv_submitted_waiters;
 	    return;
           }
 	}
@@ -1905,6 +1951,7 @@ private:
 
   RWLock coll_lock = {"BlueStore::coll_lock"};  ///< rwlock to protect coll_map
   mempool::bluestore_cache_other::unordered_map<coll_t, CollectionRef> coll_map;
+  bool collections_had_errors = false;
   map<coll_t,CollectionRef> new_coll_map;
 
   vector<Cache*> cache_shards;
@@ -2006,6 +2053,7 @@ private:
   double osd_memory_expected_fragmentation = 0; ///< expected memory fragmentation
   uint64_t osd_memory_cache_min = 0; ///< Min memory to assign when autotuning cache
   double osd_memory_cache_resize_interval = 0; ///< Time to wait between cache resizing 
+  std::atomic<uint32_t> config_changed = {0}; ///< Counter to determine if there is a configuration change.
 
   typedef map<uint64_t, volatile_statfs> osd_pools_map;
 
@@ -2024,6 +2072,7 @@ private:
     bool stop = false;
     uint64_t autotune_cache_size = 0;
     std::shared_ptr<PriorityCache::PriCache> binned_kv_cache = nullptr;
+    std::shared_ptr<PriorityCache::Manager> pcm = nullptr;
 
     struct MempoolCache : public PriorityCache::PriCache {
       BlueStore *store;
@@ -2040,8 +2089,8 @@ private:
         int64_t assigned = get_cache_bytes(pri);
 
         switch (pri) {
-        // All cache items are currently shoved into the LAST priority 
-        case PriorityCache::Priority::LAST:
+        // All cache items are currently shoved into the PRI1 priority 
+        case PriorityCache::Priority::PRI1:
           {
             int64_t request = _get_used_bytes();
             return(request > assigned) ? request - assigned : 0;
@@ -2091,8 +2140,14 @@ private:
       MetaCache(BlueStore *s) : MempoolCache(s) {};
 
       virtual uint64_t _get_used_bytes() const {
-        return mempool::bluestore_cache_other::allocated_bytes() +
-            mempool::bluestore_cache_onode::allocated_bytes();
+        return mempool::bluestore_Buffer::allocated_bytes() +
+          mempool::bluestore_Blob::allocated_bytes() +
+          mempool::bluestore_Extent::allocated_bytes() +
+          mempool::bluestore_cache_meta::allocated_bytes() +
+          mempool::bluestore_cache_other::allocated_bytes() +
+	   mempool::bluestore_cache_onode::allocated_bytes() +
+          mempool::bluestore_SharedBlob::allocated_bytes() +
+          mempool::bluestore_inline_bl::allocated_bytes();
       }
 
       virtual string get_cache_name() const {
@@ -2156,6 +2211,7 @@ private:
         int64_t *mem_avail, 
         const std::list<std::shared_ptr<PriorityCache::PriCache>>& caches, 
         PriorityCache::Priority pri);
+    void _update_cache_settings();
   } mempool_thread;
 
   // --------------------------------------------------------
@@ -2175,6 +2231,7 @@ private:
   void _set_alloc_sizes();
   void _set_blob_size();
   void _set_finisher_num();
+  void _update_osd_memory_options();
 
   int _open_bdev(bool create);
   // Verifies if disk space is enough for reserved + min bluefs
@@ -2187,7 +2244,7 @@ private:
   int _minimal_open_bluefs(bool create);
   void _minimal_close_bluefs();
   int _open_bluefs(bool create);
-  void _close_bluefs();
+  void _close_bluefs(bool cold_close);
 
   // Limited (u)mount intended for BlueFS operations only
   int _mount_for_bluefs();
@@ -2200,7 +2257,7 @@ private:
   * in the proper order
   */
   int _open_db_and_around(bool read_only);
-  void _close_db_and_around();
+  void _close_db_and_around(bool read_only);
 
   // updates legacy bluefs related recs in DB to a state valid for
   // downgrades from nautilus.
@@ -2213,12 +2270,13 @@ private:
   int _open_db(bool create,
 	       bool to_repair_db=false,
 	       bool read_only = false);
-  void _close_db();
+  void _close_db(bool read_only);
   int _open_fm(KeyValueDB::Transaction t);
   void _close_fm();
   int _open_alloc();
   void _close_alloc();
-  int _open_collections(int *errors=0);
+  int _open_collections();
+  void _fsck_collections(int64_t* errors);
   void _close_collections();
 
   int _setup_block_symlink_or_file(string name, string path, uint64_t size,
@@ -2302,6 +2360,14 @@ public:
   using mempool_dynamic_bitset =
     boost::dynamic_bitset<uint64_t,
 			  mempool::bluestore_fsck::pool_allocator<uint64_t>>;
+  using  per_pool_statfs =
+    mempool::bluestore_fsck::map<uint64_t, store_statfs_t>;
+
+  enum FSCKDepth {
+    FSCK_REGULAR,
+    FSCK_DEEP,
+    FSCK_SHALLOW
+  };
 
 private:
   int _fsck_check_extents(
@@ -2312,15 +2378,17 @@ private:
     mempool_dynamic_bitset &used_blocks,
     uint64_t granularity,
     BlueStoreRepairer* repairer,
-    store_statfs_t& expected_statfs);
+    store_statfs_t& expected_statfs,
+    FSCKDepth depth);
 
-  using  per_pool_statfs =
-    mempool::bluestore_fsck::map<uint64_t, store_statfs_t>;
   void _fsck_check_pool_statfs(
     per_pool_statfs& expected_pool_statfs,
-    bool need_per_pool_stats,
-    int& errors,
+    int64_t& errors,
+    int64_t &warnings,
     BlueStoreRepairer* repairer);
+
+  int _fsck(FSCKDepth depth, bool repair);
+  int _fsck_on_open(BlueStore::FSCKDepth depth, bool repair);
 
   void _buffer_cache_write(
     TransContext *txc,
@@ -2335,7 +2403,7 @@ private:
 
   int _collection_list(
     Collection *c, const ghobject_t& start, const ghobject_t& end,
-    int max, vector<ghobject_t> *ls, ghobject_t *next);
+    int max, bool legacy, vector<ghobject_t> *ls, ghobject_t *next);
 
   template <typename T, typename F>
   T select_option(const std::string& opt_name, T val1, F f) {
@@ -2425,14 +2493,18 @@ public:
   int write_meta(const std::string& key, const std::string& value) override;
   int read_meta(const std::string& key, std::string *value) override;
 
+  int cold_open();
+  int cold_close();
 
   int fsck(bool deep) override {
-    return _fsck(deep, false);
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, false);
   }
   int repair(bool deep) override {
-    return _fsck(deep, true);
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, true);
   }
-  int _fsck(bool deep, bool repair);
+  int quick_fix() override {
+    return _fsck(FSCK_SHALLOW, true);
+  }
 
   void set_cache_shards(unsigned num) override;
   void dump_cache_stats(Formatter *f) override {
@@ -2484,6 +2556,8 @@ public:
     const string& path);
   int expand_devices(ostream& out);
   string get_device_path(unsigned id);
+
+  int dump_bluefs_sizes(ostream& out);
 
 public:
   int statfs(struct store_statfs_t *buf,
@@ -2549,6 +2623,13 @@ public:
 		      const ghobject_t& end,
 		      int max,
 		      vector<ghobject_t> *ls, ghobject_t *next) override;
+
+  int collection_list_legacy(CollectionHandle &c,
+                             const ghobject_t& start,
+                             const ghobject_t& end,
+                             int max,
+                             vector<ghobject_t> *ls,
+                             ghobject_t *next) override;
 
   int omap_get(
     CollectionHandle &c,     ///< [in] Collection containing oid
@@ -2625,6 +2706,9 @@ public:
   const PerfCounters* get_perf_counters() const override {
     return logger;
   }
+  const PerfCounters* get_bluefs_perf_counters() const {
+    return bluefs->get_perf_counters();
+  }
 
   int queue_transactions(
     CollectionHandle& ch,
@@ -2648,9 +2732,12 @@ public:
   void inject_leaked(uint64_t len);
   void inject_false_free(coll_t cid, ghobject_t oid);
   void inject_statfs(const string& key, const store_statfs_t& new_statfs);
+  void inject_global_statfs(const store_statfs_t& new_statfs);
   void inject_misreference(coll_t cid1, ghobject_t oid1,
 			   coll_t cid2, ghobject_t oid2,
 			   uint64_t offset);
+  void inject_zombie_spanning_blob(coll_t cid, ghobject_t oid, int16_t blob_id);
+  // resets global per_pool_omap in DB
 
   void compact() override {
     ceph_assert(db);
@@ -2766,6 +2853,7 @@ private:
     unsigned csum_order = 0;        ///< target checksum chunk order
 
     old_extent_map_t old_extents;   ///< must deref these blobs
+    interval_set<uint64_t> extents_to_gc; ///< extents for garbage collection
 
     struct write_item {
       uint64_t logical_offset;      ///< write logical offset
@@ -2884,7 +2972,6 @@ private:
   int _do_gc(TransContext *txc,
              CollectionRef& c,
              OnodeRef o,
-             const GarbageCollector& gc,
              const WriteContext& wctx,
              uint64_t *dirty_start,
              uint64_t *dirty_end);
@@ -3020,6 +3107,94 @@ private:
     PExtentVector& extents) override {
     return allocate_bluefs_freespace(min_size, size, &extents);
   };
+  size_t available_freespace(uint64_t alloc_size) override;
+
+public:
+  struct sb_info_t {
+    coll_t cid;
+    int64_t pool_id = INT64_MIN;
+    list<ghobject_t> oids;
+    BlueStore::SharedBlobRef sb;
+    bluestore_extent_ref_map_t ref_map;
+    bool compressed = false;
+    bool passed = false;
+    bool updated = false;
+  };
+  typedef btree::btree_set<
+    uint64_t, std::less<uint64_t>,
+    mempool::bluestore_fsck::pool_allocator<uint64_t>> uint64_t_btree_t;
+
+  typedef mempool::bluestore_fsck::map<uint64_t, sb_info_t> sb_info_map_t;
+  struct FSCK_ObjectCtx {
+    int64_t& errors;
+    int64_t& warnings;
+    uint64_t& num_objects;
+    uint64_t& num_extents;
+    uint64_t& num_blobs;
+    uint64_t& num_sharded_objects;
+    uint64_t& num_spanning_blobs;
+
+    mempool_dynamic_bitset* used_blocks;
+    uint64_t_btree_t* used_omap_head;
+    uint64_t_btree_t* used_per_pool_omap_head;
+    uint64_t_btree_t* used_pgmeta_omap_head;
+
+    ceph::mutex* sb_info_lock;
+    sb_info_map_t& sb_info;
+
+    store_statfs_t& expected_store_statfs;
+    per_pool_statfs& expected_pool_statfs;
+    BlueStoreRepairer* repairer;
+
+    FSCK_ObjectCtx(int64_t& e,
+                   int64_t& w,
+                   uint64_t& _num_objects,
+                   uint64_t& _num_extents,
+                   uint64_t& _num_blobs,
+                   uint64_t& _num_sharded_objects,
+                   uint64_t& _num_spanning_blobs,
+                   mempool_dynamic_bitset* _ub,
+                   uint64_t_btree_t* _used_omap_head,
+                   uint64_t_btree_t* _used_per_pool_omap_head,
+                   uint64_t_btree_t* _used_pgmeta_omap_head,
+                   ceph::mutex* _sb_info_lock,
+                   sb_info_map_t& _sb_info,
+                   store_statfs_t& _store_statfs,
+                   per_pool_statfs& _pool_statfs,
+                   BlueStoreRepairer* _repairer) :
+      errors(e),
+      warnings(w),
+      num_objects(_num_objects),
+      num_extents(_num_extents),
+      num_blobs(_num_blobs),
+      num_sharded_objects(_num_sharded_objects),
+      num_spanning_blobs(_num_spanning_blobs),
+      used_blocks(_ub),
+      used_omap_head(_used_omap_head),
+      used_per_pool_omap_head(_used_per_pool_omap_head),
+      used_pgmeta_omap_head(_used_pgmeta_omap_head),
+      sb_info_lock(_sb_info_lock),
+      sb_info(_sb_info),
+      expected_store_statfs(_store_statfs),
+      expected_pool_statfs(_pool_statfs),
+      repairer(_repairer) {
+    }
+  };
+
+  OnodeRef fsck_check_objects_shallow(
+    FSCKDepth depth,
+    int64_t pool_id,
+    CollectionRef c,
+    const ghobject_t& oid,
+    const string& key,
+    const bufferlist& value,
+    mempool::bluestore_fsck::list<string>& expecting_shards,
+    map<BlobRef, bluestore_blob_t::unused_t>* referenced,
+    const BlueStore::FSCK_ObjectCtx& ctx);
+
+private:
+  void _fsck_check_objects(FSCKDepth depth,
+    FSCK_ObjectCtx& ctx);
 };
 
 inline ostream& operator<<(ostream& out, const BlueStore::volatile_statfs& s) {
@@ -3052,6 +3227,8 @@ static inline void intrusive_ptr_release(BlueStore::OpSequencer *o) {
 
 class BlueStoreRepairer
 {
+  ceph::mutex lock = ceph::make_mutex("BlueStore::BlueStoreRepairer::lock");
+
 public:
   // to simplify future potential migration to mempools
   using fsck_interval = interval_set<uint64_t>;
@@ -3194,6 +3371,9 @@ public:
 		      FreelistManager* fm,
 		      uint64_t offset, uint64_t len);
   bool fix_bluefs_extents(std::atomic<uint64_t>& out_of_sync_flag);
+  bool fix_spanning_blobs(
+    KeyValueDB* db,
+    std::function<void(KeyValueDB::Transaction)> f);
 
   void init(uint64_t total_space, uint64_t lres_tracking_unit_size);
 
@@ -3202,19 +3382,42 @@ public:
   unsigned apply(KeyValueDB* db);
 
   void note_misreference(uint64_t offs, uint64_t len, bool inc_error) {
+    std::lock_guard l(lock);
     misreferenced_extents.union_insert(offs, len);
     if (inc_error) {
       ++to_repair_cnt;
     }
   }
+  void inc_repaired() {
+    ++to_repair_cnt;
+  }  
 
-  StoreSpaceTracker& get_space_usage_tracker() {
-    return space_usage_tracker;
+  void init_space_usage_tracker(
+    uint64_t total_space, uint64_t lres_tracking_unit_size)
+  {
+    //NB: not for use in multithreading mode!!!
+    space_usage_tracker.init(total_space, lres_tracking_unit_size);
   }
+  void set_space_used(uint64_t offset, uint64_t len,
+    const coll_t& cid, const ghobject_t& oid) {
+    std::lock_guard l(lock);
+    space_usage_tracker.set_used(offset, len, cid, oid);
+  }
+  inline bool is_used(const coll_t& cid) const {
+    //NB: not for use in multithreading mode!!!
+    return space_usage_tracker.is_used(cid);
+  }
+  inline bool is_used(const ghobject_t& oid) const {
+    //NB: not for use in multithreading mode!!!
+    return space_usage_tracker.is_used(oid);
+  }
+
   const fsck_interval& get_misreferences() const {
+    //NB: not for use in multithreading mode!!!
     return misreferenced_extents;
   }
   KeyValueDB::Transaction get_fix_misreferences_txn() {
+    //NB: not for use in multithreading mode!!!
     return fix_misreferences_txn;
   }
 
@@ -3227,6 +3430,7 @@ private:
   KeyValueDB::Transaction fix_shared_blob_txn;
 
   KeyValueDB::Transaction fix_misreferences_txn;
+  KeyValueDB::Transaction fix_onode_txn;
 
   StoreSpaceTracker space_usage_tracker;
 
@@ -3234,4 +3438,189 @@ private:
   fsck_interval misreferenced_extents;
 
 };
+
+class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
+{
+  template <class T, size_t MaxX, size_t MaxY>
+  class matrix_2d {
+    T values[MaxX][MaxY];
+  public:
+    matrix_2d() {
+      clear();
+    }
+    T& at(size_t x, size_t y) {
+      ceph_assert(x < MaxX);
+      ceph_assert(y < MaxY);
+
+      return values[x][y];
+    }
+    size_t get_max_x() const {
+      return MaxX;
+    }
+    size_t get_max_y() const {
+      return MaxY;
+    }
+    void clear() {
+      memset(values, 0, sizeof(values));
+    }
+  };
+
+  enum {
+    // use 0/nullptr as unset indication
+    LEVEL_FIRST = 1,
+    LEVEL_WAL = LEVEL_FIRST,
+    LEVEL_DB,
+    LEVEL_SLOW,
+    LEVEL_MAX
+  };
+  // add +1 row for corresponding per-device totals
+  // add +1 column for per-level actual (taken from file size) total
+  typedef matrix_2d<uint64_t, BlueFS::MAX_BDEV + 1, LEVEL_MAX - LEVEL_FIRST + 1> per_level_per_dev_usage_t;
+
+  per_level_per_dev_usage_t per_level_per_dev_usage;
+
+  // Note: maximum per-device totals below might be smaller than corresponding
+  // perf counters by up to a single alloc unit (1M) due to superblock extent.
+  // The later is not accounted here.
+  per_level_per_dev_usage_t per_level_per_dev_max;
+
+  uint64_t l_totals[LEVEL_MAX - LEVEL_FIRST];
+  uint64_t db_avail4slow = 0;
+  enum {
+    OLD_POLICY,
+    USE_SOME_EXTRA
+  };
+
+public:
+  RocksDBBlueFSVolumeSelector(
+    uint64_t _wal_total,
+    uint64_t _db_total,
+    uint64_t _slow_total,
+    uint64_t _level0_size,
+    uint64_t _level_base,
+    uint64_t _level_multiplier,
+    double reserved_factor,
+    uint64_t reserved,
+    bool new_pol)
+  {
+    l_totals[LEVEL_WAL - LEVEL_FIRST] = _wal_total;
+    l_totals[LEVEL_DB - LEVEL_FIRST] = _db_total;
+    l_totals[LEVEL_SLOW - LEVEL_FIRST] = _slow_total;
+
+    if (!new_pol) {
+      return;
+    }
+
+    // Calculating how much extra space is available at DB volume.
+    // Depending on the presence of explicit reserved size specification it might be either
+    // * DB volume size - reserved
+    // or
+    // * DB volume size - sum_max_level_size(0, L-1) - max_level_size(L) * reserved_factor
+    if (!reserved) {
+      uint64_t prev_levels = _level0_size;
+      uint64_t cur_level = _level_base;
+      uint64_t cur_threshold = 0;
+      do {
+        uint64_t next_level = cur_level * _level_multiplier;
+        uint64_t next_threshold = prev_levels + cur_level + next_level * reserved_factor;
+        if (_db_total <= next_threshold) {
+          db_avail4slow = cur_threshold ? _db_total - cur_threshold : 0;
+          break;
+        } else {
+          prev_levels += cur_level;
+          cur_level = next_level;
+          cur_threshold = next_threshold;
+        }
+      } while (true);
+    } else {
+      db_avail4slow = _db_total - reserved;
+    }
+  }
+
+  void* get_hint_by_device(uint8_t dev) const override {
+    ceph_assert(dev == BlueFS::BDEV_WAL); // others aren't used atm
+    return  reinterpret_cast<void*>(LEVEL_WAL);
+  }
+  void* get_hint_by_dir(const string& dirname) const override;
+
+  void add_usage(void* hint, const bluefs_fnode_t& fnode) override {
+    if (hint == nullptr)
+      return;
+    size_t pos = (size_t)hint - LEVEL_FIRST;
+    for (auto& p : fnode.extents) {
+      auto& cur = per_level_per_dev_usage.at(p.bdev, pos);
+      auto& max = per_level_per_dev_max.at(p.bdev, pos);
+      cur += p.length;
+      if (cur > max) {
+        max = cur;
+      }
+      {
+        //update per-device totals
+        auto& cur = per_level_per_dev_usage.at(p.bdev, LEVEL_MAX - LEVEL_FIRST);
+        auto& max = per_level_per_dev_max.at(p.bdev, LEVEL_MAX - LEVEL_FIRST);
+        cur += p.length;
+        if (cur > max) {
+          max = cur;
+        }
+      }
+    }
+    {
+      //update per-level actual totals
+      auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
+      auto& max = per_level_per_dev_max.at(BlueFS::MAX_BDEV, pos);
+      cur += fnode.size;
+      if (cur > max) {
+        max = cur;
+      }
+    }
+  }
+  void sub_usage(void* hint, const bluefs_fnode_t& fnode) override {
+    if (hint == nullptr)
+      return;
+    size_t pos = (size_t)hint - LEVEL_FIRST;
+    for (auto& p : fnode.extents) {
+      auto& cur = per_level_per_dev_usage.at(p.bdev, pos);
+      ceph_assert(cur >= p.length);
+      cur -= p.length;
+
+      //update per-device totals
+      auto& cur2 = per_level_per_dev_usage.at(p.bdev, LEVEL_MAX - LEVEL_FIRST);
+      ceph_assert(cur2 >= p.length);
+      cur2 -= p.length;
+    }
+    //update per-level actual totals
+    auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
+    ceph_assert(cur >= fnode.size);
+    cur -= fnode.size;
+  }
+  void add_usage(void* hint, uint64_t fsize) override {
+    if (hint == nullptr)
+      return;
+    size_t pos = (size_t)hint - LEVEL_FIRST;
+    //update per-level actual totals
+    auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
+    auto& max = per_level_per_dev_max.at(BlueFS::MAX_BDEV, pos);
+    cur += fsize;
+    if (cur > max) {
+      max = cur;
+    }
+  }
+  void sub_usage(void* hint, uint64_t fsize) override {
+    if (hint == nullptr)
+      return;
+    size_t pos = (size_t)hint - LEVEL_FIRST;
+    //update per-level actual totals
+    auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
+    ceph_assert(cur >= fsize);
+    per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos) -= fsize;
+  }
+
+  uint8_t select_prefer_bdev(void* h) override;
+  void get_paths(
+    const std::string& base,
+    BlueFSVolumeSelector::paths& res) const override;
+
+  void dump(ostream& sout) override;
+};
+
 #endif

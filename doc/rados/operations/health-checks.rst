@@ -70,6 +70,62 @@ listen for v2 connections on the new default 3300 port.
 
 If a monitor is configured to listen for v1 connections on a non-standard port (not 6789), then the monmap will need to be modified manually.
 
+AUTH_INSECURE_GLOBAL_ID_RECLAIM
+_______________________________
+
+One or more clients or daemons are connected to the cluster that are
+not securely reclaiming their global_id (a unique number identifying
+each entity in the cluster) when reconnecting to a monitor.  The
+client is being permitted to connect anyway because the
+``auth_allow_insecure_global_id_reclaim`` option is set to true (which may
+be necessary until all ceph clients have been upgraded), and the
+``auth_expose_insecure_global_id_reclaim`` option set to ``true`` (which
+allows monitors to detect clients with insecure reclaim early by forcing them to
+reconnect right after they first authenticate).
+
+You can identify which client(s) are using unpatched ceph client code with::
+
+  ceph health detail
+
+Clients global_id reclaim rehavior can also seen in the
+``global_id_status`` field in the dump of clients connected to an
+individual monitor (``reclaim_insecure`` means the client is
+unpatched and is contributing to this health alert)::
+
+  ceph tell mon.\* sessions
+
+We strongly recommend that all clients in the system are upgraded to a
+newer version of Ceph that correctly reclaims global_id values.  Once
+all clients have been updated, you can stop allowing insecure reconnections
+with::
+
+  ceph config set mon auth_allow_insecure_global_id_reclaim false
+
+Although we do NOT recommend doing so, you can disable this warning indefinitely
+with::
+
+  ceph config set mon mon_warn_on_insecure_global_id_reclaim false
+
+AUTH_INSECURE_GLOBAL_ID_RECLAIM_ALLOWED
+_______________________________________
+
+Ceph is currently configured to allow clients to reconnect to monitors using
+an insecure process to reclaim their previous global_id because the setting
+``auth_allow_insecure_global_id_reclaim`` is set to ``true``.  It may be necessary to
+leave this setting enabled while existing Ceph clients are upgraded to newer
+versions of Ceph that correctly and securely reclaim their global_id.
+
+If the ``AUTH_INSECURE_GLOBAL_ID_RECLAIM`` health alert has not also been raised and
+the ``auth_expose_insecure_global_id_reclaim`` setting has not been disabled (it is
+on by default), then there are currently no clients connected that need to be
+upgraded, and it is safe to disallow insecure global_id reclaim with::
+
+  ceph config set mon auth_allow_insecure_global_id_reclaim false
+
+Although we do NOT recommend doing so, you can disable this warning indefinitely
+with::
+
+  ceph config set mon mon_warn_on_insecure_global_id_reclaim_allowed false
 
 
 Manager
@@ -335,6 +391,59 @@ needs to be stopped and BlueFS informed of the device size change with::
 
   ceph-bluestore-tool bluefs-bdev-expand --path /var/lib/ceph/osd/ceph-$ID
 
+BLUEFS_AVAILABLE_SPACE
+______________________
+
+To check how much space is free for BlueFS do::
+
+  ceph daemon osd.123 bluestore bluefs available
+
+This will output up to 3 values: `BDEV_DB free`, `BDEV_SLOW free` and
+`available_from_bluestore`. `BDEV_DB` and `BDEV_SLOW` report amount of space that
+has been acquired by BlueFS and is considered free. Value `available_from_bluestore`
+denotes ability of BlueStore to relinquish more space to BlueFS.
+It is normal that this value is different from amount of BlueStore free space, as
+BlueFS allocation unit is typically larger than BlueStore allocation unit.
+This means that only part of BlueStore free space will be acceptable for BlueFS.
+
+BLUEFS_LOW_SPACE
+_________________
+
+If BlueFS is running low on available free space and there is little
+`available_from_bluestore` one can consider reducing BlueFS allocation unit size.
+To simulate available space when allocation unit is different do::
+
+  ceph daemon osd.123 bluestore bluefs available <alloc-unit-size>
+
+BLUESTORE_FRAGMENTATION
+_______________________
+
+As BlueStore works free space on underlying storage will get fragmented.
+This is normal and unavoidable but excessive fragmentation will cause slowdown.
+To inspect BlueStore fragmentation one can do::
+
+  ceph daemon osd.123 bluestore allocator score block
+
+Score is given in [0-1] range.
+[0.0 .. 0.4] tiny fragmentation
+[0.4 .. 0.7] small, acceptable fragmentation
+[0.7 .. 0.9] considerable, but safe fragmentation
+[0.9 .. 1.0] severe fragmentation, may impact BlueFS ability to get space from BlueStore
+
+If detailed report of free fragments is required do::
+
+  ceph daemon osd.123 bluestore allocator dump block
+
+In case when handling OSD process that is not running fragmentation can be
+inspected with `ceph-bluestore-tool`.
+Get fragmentation score::
+
+  ceph-bluestore-tool --path /var/lib/ceph/osd/ceph-123 --allocator block free-score
+
+And dump detailed free chunks::
+
+  ceph-bluestore-tool --path /var/lib/ceph/osd/ceph-123 --allocator block free-dump
+
 BLUESTORE_LEGACY_STATFS
 _______________________
 
@@ -489,16 +598,27 @@ The state of specific problematic PGs can be queried with::
   ceph tell <pgid> query
 
 
-PG_DEGRADED_FULL
+PG_RECOVERY_FULL
 ________________
 
 Data redundancy may be reduced or at risk for some data due to a lack
 of free space in the cluster.  Specifically, one or more PGs has the
-*backfill_toofull* or *recovery_toofull* flag set, meaning that the
+*recovery_toofull* flag set, meaning that the
+cluster is unable to migrate or recover data because one or more OSDs
+is above the *full* threshold.
+
+See the discussion for *OSD_FULL* above for steps to resolve this condition.
+
+PG_BACKFILL_FULL
+________________
+
+Data redundancy may be reduced or at risk for some data due to a lack
+of free space in the cluster.  Specifically, one or more PGs has the
+*backfill_toofull* flag set, meaning that the
 cluster is unable to migrate or recover data because one or more OSDs
 is above the *backfillfull* threshold.
 
-See the discussion for *OSD_BACKFILLFULL* or *OSD_FULL* above for
+See the discussion for *OSD_BACKFILLFULL* above for
 steps to resolve this condition.
 
 PG_DAMAGED
@@ -519,6 +639,23 @@ Recent OSD scrubs have uncovered inconsistencies. This error is generally
 paired with *PG_DAMAGED* (see above).
 
 See :doc:`pg-repair` for more information.
+
+OSD_TOO_MANY_REPAIRS
+____________________
+
+When a read error occurs and another replica is available it is used to repair
+the error immediately, so that the client can get the object data.  Scrub
+handles errors for data at rest.  In order to identify possible failing disks
+that aren't seeing scrub errors, a count of read repairs is maintained.  If
+it exceeds a config value threshold *mon_osd_warn_num_repaired* default 10,
+this health warning is generated.
+
+In order to allow clearing of the warning, a new command
+``ceph tell osd.# clear_shards_repaired [count]`` has been added.
+By default it will set the repair count to 0.  If the administrator wanted
+to re-enable the warning if any additional repairs are performed you can provide
+a value to the command and specify the value of ``mon_osd_warn_num_repaired``.
+This command will be replaced in future releases by the health mute/unmute feature.
 
 LARGE_OMAP_OBJECTS
 __________________
@@ -571,6 +708,23 @@ created.
 The PG count for existing pools can be increased or new pools can be created.
 Please refer to :ref:`choosing-number-of-placement-groups` for more
 information.
+
+POOL_PG_NUM_NOT_POWER_OF_TWO
+____________________________
+
+One or more pools has a ``pg_num`` value that is not a power of two.
+Although this is not strictly incorrect, it does lead to a less
+balanced distribution of data because some PGs have roughly twice as
+much data as others.
+
+This is easily corrected by setting the ``pg_num`` value for the
+affected pool(s) to a nearby power of two::
+
+  ceph osd pool set <pool-name> pg_num <value>
+
+This health warning can be disabled with::
+
+  ceph config set global mon_warn_on_pool_pg_num_not_power_of_two false
 
 POOL_TOO_FEW_PGS
 ________________
@@ -648,21 +802,6 @@ recommended amount with::
 Please refer to :ref:`choosing-number-of-placement-groups` and
 :ref:`pg-autoscaler` for more information.
 
-POOL_TARGET_SIZE_RATIO_OVERCOMMITTED
-____________________________________
-
-One or more pools have a ``target_size_ratio`` property set to
-estimate the expected size of the pool as a fraction of total storage,
-but the value(s) exceed the total available storage (either by
-themselves or in combination with other pools' actual usage).
-
-This is usually an indication that the ``target_size_ratio`` value for
-the pool is too large and should be reduced or set to zero with::
-
-  ceph osd pool set <pool-name> target_size_ratio 0
-
-For more information, see :ref:`specifying_pool_target_size`.
-
 POOL_TARGET_SIZE_BYTES_OVERCOMMITTED
 ____________________________________
 
@@ -677,6 +816,27 @@ the pool is too large and should be reduced or set to zero with::
   ceph osd pool set <pool-name> target_size_bytes 0
 
 For more information, see :ref:`specifying_pool_target_size`.
+
+POOL_HAS_TARGET_SIZE_BYTES_AND_RATIO
+____________________________________
+
+One or more pools have both ``target_size_bytes`` and
+``target_size_ratio`` set to estimate the expected size of the pool.
+Only one of these properties should be non-zero. If both are set,
+``target_size_ratio`` takes precedence and ``target_size_bytes`` is
+ignored.
+
+To reset ``target_size_bytes`` to zero::
+
+  ceph osd pool set <pool-name> target_size_bytes 0
+
+For more information, see :ref:`specifying_pool_target_size`.
+
+TOO_FEW_OSDS
+____________
+
+The number of OSDs in the cluster is below the configurable
+threshold of ``osd_pool_default_size``.
 
 SMALLER_PGP_NUM
 _______________
@@ -840,3 +1000,85 @@ happen if they are misplaced or degraded (see *PG_AVAILABILITY* and
 You can manually initiate a scrub of a clean PG with::
 
   ceph pg deep-scrub <pgid>
+
+
+Miscellaneous
+-------------
+
+RECENT_CRASH
+____________
+
+One or more Ceph daemons has crashed recently, and the crash has not
+yet been archived (acknowledged) by the administrator.  This may
+indicate a software bug, a hardware problem (e.g., a failing disk), or
+some other problem.
+
+New crashes can be listed with::
+
+  ceph crash ls-new
+
+Information about a specific crash can be examined with::
+
+  ceph crash info <crash-id>
+
+This warning can be silenced by "archiving" the crash (perhaps after
+being examined by an administrator) so that it does not generate this
+warning::
+
+  ceph crash archive <crash-id>
+
+Similarly, all new crashes can be archived with::
+
+  ceph crash archive-all
+
+Archived crashes will still be visible via ``ceph crash ls`` but not
+``ceph crash ls-new``.
+
+The time period for what "recent" means is controlled by the option
+``mgr/crash/warn_recent_interval`` (default: two weeks).
+
+These warnings can be disabled entirely with::
+
+  ceph config set mgr/crash/warn_recent_interval 0
+
+TELEMETRY_CHANGED
+_________________
+
+Telemetry has been enabled, but the contents of the telemetry report
+have changed since that time, so telemetry reports will not be sent.
+
+The Ceph developers periodically revise the telemetry feature to
+include new and useful information, or to remove information found to
+be useless or sensitive.  If any new information is included in the
+report, Ceph will require the administrator to re-enable telemetry to
+ensure they have an opportunity to (re)review what information will be
+shared.
+
+To review the contents of the telemetry report,::
+
+  ceph telemetry show
+
+Note that the telemetry report consists of several optional channels
+that may be independently enabled or disabled.  For more information, see
+:ref:`telemetry`.
+
+To re-enable telemetry (and make this warning go away),::
+
+  ceph telemetry on
+
+To disable telemetry (and make this warning go away),::
+
+  ceph telemetry off
+
+DASHBOARD_DEBUG
+_______________
+
+The Dashboard debug mode is enabled. This means, if there is an error
+while processing a REST API request, the HTTP error response contains
+a Python traceback. This behaviour should be disabled in production
+environments because such a traceback might contain and expose sensible
+information.
+
+The debug mode can be disabled with::
+
+  ceph dashboard debug disable

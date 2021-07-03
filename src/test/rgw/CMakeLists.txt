@@ -6,6 +6,13 @@ if(WITH_RADOSGW_AMQP_ENDPOINT)
   add_library(amqp_mock STATIC ${amqp_mock_src})
 endif()
 
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  # kafka stub library
+  set(kafka_stub_src
+    kafka_stub.cc)
+  add_library(kafka_stub STATIC ${kafka_stub_src})
+endif()
+
 #unittest_rgw_bencode
 add_executable(unittest_rgw_bencode test_rgw_bencode.cc)
 add_ceph_unittest(unittest_rgw_bencode)
@@ -33,9 +40,9 @@ add_executable(unittest_rgw_reshard_wait test_rgw_reshard_wait.cc)
 add_ceph_unittest(unittest_rgw_reshard_wait)
 target_link_libraries(unittest_rgw_reshard_wait ${rgw_libs})
 
-set(test_rgw_a_src
-  test_rgw_common.cc)
+set(test_rgw_a_src test_rgw_common.cc)
 add_library(test_rgw_a STATIC ${test_rgw_a_src})
+target_link_libraries(test_rgw_a ${rgw_libs})
 
 # ceph_test_rgw_manifest
 set(test_rgw_manifest_srcs test_rgw_manifest.cc)
@@ -43,7 +50,6 @@ add_executable(ceph_test_rgw_manifest
   ${test_rgw_manifest_srcs}
   )
 target_link_libraries(ceph_test_rgw_manifest
-  ${rgw_libs}
   test_rgw_a
   cls_rgw_client
   cls_lock_client
@@ -66,7 +72,6 @@ add_executable(ceph_test_rgw_obj
   ${test_rgw_obj_srcs}
   )
 target_link_libraries(ceph_test_rgw_obj
-  ${rgw_libs}
   test_rgw_a
   cls_rgw_client
   cls_lock_client
@@ -145,6 +150,8 @@ target_link_libraries(unittest_rgw_dmclock_scheduler radosgw_a dmclock)
 if(WITH_BOOST_CONTEXT)
   target_compile_definitions(unittest_rgw_dmclock_scheduler PRIVATE BOOST_COROUTINES_NO_DEPRECATION_WARNING)
   target_link_libraries(unittest_rgw_dmclock_scheduler Boost::coroutine Boost::context)
+  target_include_directories(unittest_rgw_dmclock_scheduler PRIVATE
+    $<TARGET_PROPERTY:spawn,INTERFACE_INCLUDE_DIRECTORIES>)
 endif()
 
 if(WITH_RADOSGW_AMQP_ENDPOINT)
@@ -157,5 +164,18 @@ endif()
 add_executable(unittest_rgw_xml test_rgw_xml.cc)
 add_ceph_unittest(unittest_rgw_xml)
 
-target_link_libraries(unittest_rgw_xml rgw_a ${EXPAT_LIBRARIES})
+target_link_libraries(unittest_rgw_xml ${rgw_libs} ${EXPAT_LIBRARIES})
 
+# unittest_rgw_arn
+add_executable(unittest_rgw_arn test_rgw_arn.cc)
+add_ceph_unittest(unittest_rgw_arn)
+
+target_link_libraries(unittest_rgw_arn ${rgw_libs})
+
+# unittest_rgw_url
+add_executable(unittest_rgw_url test_rgw_url.cc)
+add_ceph_unittest(unittest_rgw_url)
+
+target_link_libraries(unittest_rgw_url ${rgw_libs})
+add_ceph_test(test-ceph-diff-sorted.sh
+  ${CMAKE_CURRENT_SOURCE_DIR}/test-ceph-diff-sorted.sh)

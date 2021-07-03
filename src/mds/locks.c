@@ -1,15 +1,19 @@
-// there must be a better way?
-typedef char bool;
-#define false 0
-#define true  1
-
 #include "include/int_types.h"
 
 #include <string.h>
 #include <fcntl.h>
 
-#include "include/ceph_fs.h"
 #include "locks.h"
+
+/* Duplicated from ceph_fs.h, which we cannot include into a C file.  */
+#define CEPH_CAP_GSHARED     1  /* client can reads */
+#define CEPH_CAP_GEXCL       2  /* client can read and update */
+#define CEPH_CAP_GCACHE      4  /* (file) client can cache reads */
+#define CEPH_CAP_GRD         8  /* (file) client can read */
+#define CEPH_CAP_GWR        16  /* (file) client can write */
+#define CEPH_CAP_GBUFFER    32  /* (file) client can buffer writes */
+#define CEPH_CAP_GWREXTEND  64  /* (file) client can extend EOF */
+#define CEPH_CAP_GLAZYIO   128  /* (file) client can perform lazy io */
 
 static const struct sm_state_t simplelock[LOCK_MAX] = {
                       // stable     loner  rep state  r     rp   rd   wr   fwr  l    x    caps,other

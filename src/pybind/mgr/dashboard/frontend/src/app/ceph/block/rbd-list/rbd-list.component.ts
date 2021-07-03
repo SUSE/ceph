@@ -9,7 +9,7 @@ import { ConfirmationModalComponent } from '../../../shared/components/confirmat
 import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
 import { TableComponent } from '../../../shared/datatable/table/table.component';
-import { CellTemplate } from '../../../shared/enum/cell-template.enum';
+import { Icons } from '../../../shared/enum/icons.enum';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
 import { CdTableAction } from '../../../shared/models/cd-table-action';
 import { CdTableColumn } from '../../../shared/models/cd-table-column';
@@ -24,7 +24,7 @@ import { TaskWrapperService } from '../../../shared/services/task-wrapper.servic
 import { URLBuilderService } from '../../../shared/services/url-builder.service';
 import { RbdParentModel } from '../rbd-form/rbd-parent.model';
 import { RbdTrashMoveModalComponent } from '../rbd-trash-move-modal/rbd-trash-move-modal.component';
-import { RbdModel } from './rbd-model';
+import { RBDImageFormat, RbdModel } from './rbd-model';
 
 const BASE_URL = 'block/rbd';
 
@@ -48,6 +48,8 @@ export class RbdListComponent implements OnInit {
   nameTpl: TemplateRef<any>;
   @ViewChild('flattenTpl')
   flattenTpl: TemplateRef<any>;
+  @ViewChild('removingStatTpl')
+  removingStatTpl: TemplateRef<any>;
 
   permission: Permission;
   tableActions: CdTableAction[];
@@ -56,6 +58,7 @@ export class RbdListComponent implements OnInit {
   retries: number;
   viewCacheStatusList: any[];
   selection = new CdTableSelection();
+  icons = Icons;
 
   modalRef: BsModalRef;
 
@@ -71,8 +74,10 @@ export class RbdListComponent implements OnInit {
   private createRbdFromTask(pool: string, name: string): RbdModel {
     const model = new RbdModel();
     model.id = '-1';
+    model.unique_id = '-1';
     model.name = name;
     model.pool_name = pool;
+    model.image_format = RBDImageFormat.V2;
     return model;
   }
 
@@ -105,7 +110,9 @@ export class RbdListComponent implements OnInit {
       permission: 'update',
       icon: 'fa-pencil',
       routerLink: () => this.urlBuilder.getEdit(getImageUri()),
-      name: this.actionLabels.EDIT
+      name: this.actionLabels.EDIT,
+      disable: () => !this.selection.first() || !_.isUndefined(this.getRemovingStatusDesc()),
+      disableDesc: () => this.getRemovingStatusDesc()
     };
     const deleteAction: CdTableAction = {
       permission: 'delete',
@@ -117,24 +124,37 @@ export class RbdListComponent implements OnInit {
       permission: 'create',
       canBePrimary: (selection: CdTableSelection) => selection.hasSingleSelection,
       disable: (selection: CdTableSelection) =>
-        !selection.hasSingleSelection || selection.first().cdExecuting,
+        !selection.hasSingleSelection ||
+        selection.first().cdExecuting ||
+        !_.isUndefined(this.getRemovingStatusDesc()),
       icon: 'fa-copy',
       routerLink: () => `/block/rbd/copy/${getImageUri()}`,
-      name: this.i18n('Copy')
+      name: this.actionLabels.COPY,
+      disableDesc: () => this.getRemovingStatusDesc()
     };
     const flattenAction: CdTableAction = {
       permission: 'update',
       disable: (selection: CdTableSelection) =>
-        !selection.hasSingleSelection || selection.first().cdExecuting || !selection.first().parent,
+        !selection.hasSingleSelection ||
+        selection.first().cdExecuting ||
+        !selection.first().parent ||
+        !_.isUndefined(this.getRemovingStatusDesc()),
       icon: 'fa-chain-broken',
       click: () => this.flattenRbdModal(),
-      name: this.i18n('Flatten')
+      name: this.actionLabels.FLATTEN,
+      disableDesc: () => this.getRemovingStatusDesc()
     };
     const moveAction: CdTableAction = {
       permission: 'delete',
       icon: 'fa-trash-o',
       click: () => this.trashRbdModal(),
-      name: this.i18n('Move to Trash')
+      name: this.actionLabels.TRASH,
+      disable: (selection: CdTableSelection) =>
+        !selection.first() ||
+        !selection.hasSingleSelection ||
+        selection.first().image_format === RBDImageFormat.V1 ||
+        !_.isUndefined(this.getRemovingStatusDesc()),
+      disableDesc: () => this.getRemovingStatusDesc()
     };
     this.tableActions = [
       addAction,
@@ -152,7 +172,7 @@ export class RbdListComponent implements OnInit {
         name: this.i18n('Name'),
         prop: 'name',
         flexGrow: 2,
-        cellTransformation: CellTemplate.executing
+        cellTemplate: this.removingStatTpl
       },
       {
         name: this.i18n('Pool'),
@@ -288,6 +308,7 @@ export class RbdListComponent implements OnInit {
     this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
       initialState: {
         itemDescription: 'RBD',
+        itemNames: [`${poolName}/${imageName}`],
         submitActionObservable: () =>
           this.taskWrapper.wrapTaskAroundCall({
             task: new FinishedTask('rbd/delete', {
@@ -342,5 +363,12 @@ export class RbdListComponent implements OnInit {
     };
 
     this.modalRef = this.modalService.show(ConfirmationModalComponent, { initialState });
+  }
+
+  getRemovingStatusDesc(): string | undefined {
+    const first = this.selection.first();
+    if (first && first.source && first.source === 'REMOVING') {
+      return this.i18n(`Action not possible for an RBD in status 'Removing'`);
+    }
   }
 }

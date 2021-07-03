@@ -90,6 +90,9 @@ void global_pre_init(
   std::string conf_file_list;
   std::string cluster = "";
 
+  // ensure environment arguments are included in early processing
+  env_to_vec(args);
+
   CephInitParameters iparams = ceph_argparse_early_args(
     args, module_type,
     &cluster, &conf_file_list);
@@ -142,23 +145,6 @@ void global_pre_init(
   // command line (as passed by caller)
   conf.parse_argv(args);
 
-  if (conf->log_early &&
-      !cct->_log->is_started()) {
-    cct->_log->start();
-  }
-
-  if (!conf->no_mon_config) {
-    // make sure our mini-session gets legacy values
-    conf.apply_changes(nullptr);
-
-    MonClient mc_bootstrap(g_ceph_context);
-    if (mc_bootstrap.get_monmap_and_config() < 0) {
-      cct->_log->flush();
-      cerr << "failed to fetch mon config (--no-mon-config to skip)"
-	   << std::endl;
-      _exit(1);
-    }
-  }
   if (!cct->_log->is_started()) {
     cct->_log->start();
   }
@@ -226,21 +212,30 @@ global_init(const std::map<std::string,std::string> *defaults,
     gid_t gid = 0;
     std::string uid_string;
     std::string gid_string;
+    std::string home_directory;
     if (g_conf()->setuser.length()) {
+      char buf[4096];
+      struct passwd pa;
+      struct passwd *p = 0;
+
       uid = atoi(g_conf()->setuser.c_str());
-      if (!uid) {
-	char buf[4096];
-	struct passwd pa;
-	struct passwd *p = 0;
+      if (uid) {
+        getpwuid_r(uid, &pa, buf, sizeof(buf), &p);
+      } else {
 	getpwnam_r(g_conf()->setuser.c_str(), &pa, buf, sizeof(buf), &p);
-	if (!p) {
+        if (!p) {
 	  cerr << "unable to look up user '" << g_conf()->setuser << "'"
 	       << std::endl;
 	  exit(1);
-	}
-	uid = p->pw_uid;
-	gid = p->pw_gid;
-	uid_string = g_conf()->setuser;
+        }
+
+        uid = p->pw_uid;
+        gid = p->pw_gid;
+        uid_string = g_conf()->setuser;
+      }
+
+      if (p && p->pw_dir != nullptr) {
+        home_directory = std::string(p->pw_dir);
       }
     }
     if (g_conf()->setgroup.length() > 0) {
@@ -301,6 +296,10 @@ global_init(const std::map<std::string,std::string> *defaults,
 	     << std::endl;
 	exit(1);
       }
+      if (setenv("HOME", home_directory.c_str(), 1) != 0) {
+	cerr << "warning: unable to set HOME to " << home_directory << ": "
+             << cpp_strerror(errno) << std::endl;
+      }
       priv_ss << "set uid:gid to " << uid << ":" << gid << " (" << uid_string << ":" << gid_string << ")";
     } else {
       priv_ss << "deferred set uid:gid to " << uid << ":" << gid << " (" << uid_string << ":" << gid_string << ")";
@@ -311,7 +310,34 @@ global_init(const std::map<std::string,std::string> *defaults,
   if (prctl(PR_SET_DUMPABLE, 1) == -1) {
     cerr << "warning: unable to set dumpable flag: " << cpp_strerror(errno) << std::endl;
   }
+#  if defined(PR_SET_THP_DISABLE)
+  if (!g_conf().get_val<bool>("thp") && prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0) == -1) {
+    cerr << "warning: unable to disable THP: " << cpp_strerror(errno) << std::endl;
+  }
+#  endif
 #endif
+
+  //
+  // Utterly important to run first network connection after setuid().
+  // In case of rdma transport uverbs kernel module starts returning
+  // -EACCESS on each operation if credentials has been changed, see
+  // callers of ib_safe_file_access() for details.
+  //
+  // fork() syscall also matters, so daemonization won't work in case
+  // of rdma.
+  //
+  if (!g_conf()->no_mon_config) {
+    // make sure our mini-session gets legacy values
+    g_conf().apply_changes(nullptr);
+
+    MonClient mc_bootstrap(g_ceph_context);
+    if (mc_bootstrap.get_monmap_and_config() < 0) {
+      g_ceph_context->_log->flush();
+      cerr << "failed to fetch mon config (--no-mon-config to skip)"
+	   << std::endl;
+      _exit(1);
+    }
+  }
 
   // Expand metavariables. Invoke configuration observers. Open log file.
   g_conf().apply_changes(nullptr);
@@ -459,6 +485,9 @@ int reopen_as_null(CephContext *cct, int fd)
 
 void global_init_postfork_start(CephContext *cct)
 {
+  // reexpand the meta in child process
+  cct->_conf.finalize_reexpand_meta();
+
   // restart log thread
   cct->_log->start();
   cct->notify_post_fork();

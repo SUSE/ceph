@@ -401,7 +401,7 @@ target_link_libraries(ceph-common ${ceph_common_deps})
 # appease dpkg-shlibdeps
 set_target_properties(ceph-common PROPERTIES
   SOVERSION 0
-  INSTALL_RPATH "")
+  SKIP_RPATH TRUE)
 if(NOT APPLE AND NOT FREEBSD)
   # Apple uses Mach-O, not ELF. so this option does not apply to APPLE.
   #
@@ -509,7 +509,7 @@ add_dependencies(ceph-osd erasure_code_plugins)
 target_link_libraries(ceph-osd osd os global-static common
   ${BLKID_LIBRARIES})
 if(WITH_FUSE)
-  target_link_libraries(ceph-osd ${FUSE_LIBRARIES})
+  target_link_libraries(ceph-osd FUSE::FUSE)
 endif()
 set_target_properties(ceph-osd PROPERTIES
   POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE}
@@ -625,6 +625,8 @@ add_subdirectory(bash_completion)
 add_subdirectory(client)
 
 if(WITH_LIBCEPHFS)
+  find_package(PkgConfig QUIET REQUIRED)
+  pkg_check_modules(CAPNG REQUIRED libcap-ng)
   set(libcephfs_srcs libcephfs.cc)
   add_library(cephfs ${CEPH_SHARED} ${libcephfs_srcs})
   target_link_libraries(cephfs PRIVATE client ceph-common
@@ -651,7 +653,9 @@ if(WITH_LIBCEPHFS)
   add_executable(ceph-syn ${ceph_syn_srcs})
   target_link_libraries(ceph-syn client global-static ceph-common)
   install(TARGETS ceph-syn DESTINATION bin)
-  add_subdirectory(mount)
+  if(LINUX)
+    add_subdirectory(mount)
+  endif()
 endif(WITH_LIBCEPHFS)
 
 if(WITH_FUSE)
@@ -659,10 +663,9 @@ if(WITH_FUSE)
     ceph_fuse.cc
     client/fuse_ll.cc)
   add_executable(ceph-fuse ${ceph_fuse_srcs})
-  target_link_libraries(ceph-fuse ${FUSE_LIBRARIES}
+  target_link_libraries(ceph-fuse FUSE::FUSE
     ${GSSAPI_LIBRARIES} client ceph-common global-static)
   set_target_properties(ceph-fuse PROPERTIES
-    COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}"
     POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
   install(TARGETS ceph-fuse DESTINATION bin)
   install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
@@ -688,6 +691,12 @@ if(WITH_RBD)
     DESTINATION ${CMAKE_INSTALL_BINDIR})
   add_subdirectory(rbd_replay)
 endif(WITH_RBD)
+
+if(WITH_BOOST_CONTEXT)
+  set(SPAWN_BUILD_TESTS OFF CACHE INTERNAL "disable building of spawn unit tests")
+  set(SPAWN_INSTALL OFF CACHE INTERNAL "disable installation of spawn headers")
+  add_subdirectory(spawn)
+endif()
 
 # RadosGW
 if(WITH_KVS)

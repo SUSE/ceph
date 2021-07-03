@@ -77,6 +77,9 @@ enum {
   l_mds_openino_dir_fetch,
   l_mds_openino_backtrace_fetch,
   l_mds_openino_peer_discover,
+  l_mds_root_rfiles,
+  l_mds_root_rbytes,
+  l_mds_root_rsnaps,
   l_mds_last,
 };
 
@@ -116,6 +119,7 @@ class MDSTableClient;
 class Messenger;
 class Objecter;
 class MonClient;
+class MgrClient;
 class Finisher;
 class ScrubStack;
 class C_MDS_Send_Command_Reply;
@@ -229,16 +233,11 @@ class MDSRank {
     bool is_cluster_degraded() const { return cluster_degraded; }
     bool allows_multimds_snaps() const { return mdsmap->allows_multimds_snaps(); }
 
-    void handle_write_error(int err);
-
-    void handle_conf_change(const ConfigProxy& conf,
-                            const std::set <std::string> &changed)
-    {
-      sessionmap.handle_conf_change(conf, changed);
-      server->handle_conf_change(conf, changed);
-      mdcache->handle_conf_change(conf, changed, *mdsmap);
-      purge_queue.handle_conf_change(conf, changed, *mdsmap);
+    bool is_cache_trimmable() const {
+      return is_standby_replay() || is_clientreplay() || is_active() || is_stopping();
     }
+
+    void handle_write_error(int err);
 
     void update_mlogger();
   protected:
@@ -267,7 +266,8 @@ class MDSRank {
     void inc_dispatch_depth() { ++dispatch_depth; }
     void dec_dispatch_depth() { --dispatch_depth; }
     void retry_dispatch(const Message::const_ref &m);
-    bool handle_deferrable_message(const Message::const_ref &m);
+    bool is_valid_message(const Message::const_ref &m);
+    void handle_message(const Message::const_ref &m);
     void _advance_queues();
     bool _dispatch(const Message::const_ref &m, bool new_msg);
 
@@ -311,7 +311,6 @@ class MDSRank {
 
     void create_logger();
   public:
-
     void queue_waiter(MDSContext *c) {
       finished_queue.push_back(c);
       progress_thread.signal();
@@ -342,6 +341,7 @@ class MDSRank {
         std::unique_ptr<MDSMap> & mdsmap_,
         Messenger *msgr,
         MonClient *monc_,
+        MgrClient *mgrc,
         Context *respawn_hook_,
         Context *suicide_hook_);
 
@@ -462,6 +462,9 @@ class MDSRank {
 
     bool evict_client(int64_t session_id, bool wait, bool blacklist,
                       std::ostream& ss, Context *on_killed=nullptr);
+    int config_client(int64_t session_id, bool remove,
+		      const std::string& option, const std::string& value,
+		      std::ostream& ss);
 
     void mark_base_recursively_scrubbed(inodeno_t ino);
 
@@ -505,6 +508,7 @@ class MDSRank {
   protected:
     Messenger    *messenger;
     MonClient    *monc;
+    MgrClient    *mgrc;
 
     Context *respawn_hook;
     Context *suicide_hook;
@@ -576,6 +580,14 @@ class MDSRank {
     void set_mdsmap_multimds_snaps_allowed();
 private:
     mono_time starttime = mono_clock::zero();
+    bool send_status = true;
+
+    // "task" string that gets displayed in ceph status
+    inline static const std::string SCRUB_STATUS_KEY = "scrub status";
+
+    void get_task_status(std::map<std::string, std::string> *status);
+    void schedule_update_timer_task();
+    void send_task_status();
 
 protected:
   Context *create_async_exec_context(C_ExecAndReply *ctx);
@@ -614,7 +626,7 @@ private:
  * the service/dispatcher stuff like init/shutdown that subsystems should
  * never touch.
  */
-class MDSRankDispatcher : public MDSRank
+class MDSRankDispatcher : public MDSRank, public md_config_obs_t
 {
 public:
   void init();
@@ -625,6 +637,9 @@ public:
   void handle_mds_map(const MMDSMap::const_ref &m, const MDSMap &oldmap);
   void handle_osd_map();
   void update_log_config();
+
+  const char** get_tracked_conf_keys() const override final;
+  void handle_conf_change(const ConfigProxy& conf, const std::set<std::string>& changed) override;
 
   bool handle_command(
     const cmdmap_t &cmdmap,
@@ -650,19 +665,10 @@ public:
       std::unique_ptr<MDSMap> &mdsmap_,
       Messenger *msgr,
       MonClient *monc_,
+      MgrClient *mgrc,
       Context *respawn_hook_,
       Context *suicide_hook_);
 };
-
-// This utility for MDS and MDSRank dispatchers.
-#define ALLOW_MESSAGES_FROM(peers) \
-do { \
-  if (m->get_connection() && (m->get_connection()->get_peer_type() & (peers)) == 0) { \
-    dout(0) << __FILE__ << "." << __LINE__ << ": filtered out request, peer=" << m->get_connection()->get_peer_type() \
-           << " allowing=" << #peers << " message=" << *m << dendl; \
-    return true; \
-  } \
-} while (0)
 
 #endif // MDS_RANK_H_
 

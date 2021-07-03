@@ -4,9 +4,12 @@ import { AutofocusDirective } from './autofocus.directive';
 import { Copy2ClipboardButtonDirective } from './copy2clipboard-button.directive';
 import { DimlessBinaryPerSecondDirective } from './dimless-binary-per-second.directive';
 import { DimlessBinaryDirective } from './dimless-binary.directive';
+import { FormInputDisableDirective } from './form-input-disable.directive';
+import { FormScopeDirective } from './form-scope.directive';
 import { IopsDirective } from './iops.directive';
 import { MillisecondsDirective } from './milliseconds.directive';
 import { PasswordButtonDirective } from './password-button.directive';
+import { TrimDirective } from './trim.directive';
 
 @NgModule({
   imports: [],
@@ -16,8 +19,11 @@ import { PasswordButtonDirective } from './password-button.directive';
     DimlessBinaryDirective,
     DimlessBinaryPerSecondDirective,
     PasswordButtonDirective,
+    TrimDirective,
     MillisecondsDirective,
-    IopsDirective
+    IopsDirective,
+    FormInputDisableDirective,
+    FormScopeDirective
   ],
   exports: [
     AutofocusDirective,
@@ -25,9 +31,11 @@ import { PasswordButtonDirective } from './password-button.directive';
     DimlessBinaryDirective,
     DimlessBinaryPerSecondDirective,
     PasswordButtonDirective,
+    TrimDirective,
     MillisecondsDirective,
-    IopsDirective
-  ],
-  providers: []
+    IopsDirective,
+    FormInputDisableDirective,
+    FormScopeDirective
+  ]
 })
 export class DirectivesModule {}

@@ -229,9 +229,10 @@ bool CDir::check_rstats(bool scrub)
 
   dout(25) << "check_rstats on " << this << dendl;
   if (!is_complete() || !is_auth() || is_frozen()) {
-    ceph_assert(!scrub);
-    dout(10) << "check_rstats bailing out -- incomplete or non-auth or frozen dir!" << dendl;
-    return true;
+    dout(3) << "check_rstats " << (scrub ? "(scrub) " : "")
+            << "bailing out -- incomplete or non-auth or frozen dir on " 
+            << *this << dendl;
+    return !scrub;
   }
 
   frag_info_t frag_info;
@@ -1569,14 +1570,21 @@ void CDir::fetch(MDSContext *c, const std::set<dentry_key_t>& keys)
 class C_IO_Dir_OMAP_FetchedMore : public CDirIOContext {
   MDSContext *fin;
 public:
+  const version_t omap_version;
   bufferlist hdrbl;
   bool more = false;
   map<string, bufferlist> omap;      ///< carry-over from before
   map<string, bufferlist> omap_more; ///< new batch
   int ret;
-  C_IO_Dir_OMAP_FetchedMore(CDir *d, MDSContext *f) :
-    CDirIOContext(d), fin(f), ret(0) { }
+  C_IO_Dir_OMAP_FetchedMore(CDir *d, version_t v, MDSContext *f) :
+    CDirIOContext(d), fin(f), omap_version(v), ret(0) { }
   void finish(int r) {
+    if (omap_version < dir->get_committed_version()) {
+      omap.clear();
+      dir->_omap_fetch(fin, {});
+      return;
+    }
+
     // merge results
     if (omap.empty()) {
       omap.swap(omap_more);
@@ -1584,7 +1592,7 @@ public:
       omap.insert(omap_more.begin(), omap_more.end());
     }
     if (more) {
-      dir->_omap_fetch_more(hdrbl, omap, fin);
+      dir->_omap_fetch_more(omap_version, hdrbl, omap, fin);
     } else {
       dir->_omap_fetched(hdrbl, omap, !fin, r);
       if (fin)
@@ -1599,6 +1607,7 @@ public:
 class C_IO_Dir_OMAP_Fetched : public CDirIOContext {
   MDSContext *fin;
 public:
+  const version_t omap_version;
   bufferlist hdrbl;
   bool more = false;
   map<string, bufferlist> omap;
@@ -1606,20 +1615,30 @@ public:
   int ret1, ret2, ret3;
 
   C_IO_Dir_OMAP_Fetched(CDir *d, MDSContext *f) :
-    CDirIOContext(d), fin(f), ret1(0), ret2(0), ret3(0) { }
+    CDirIOContext(d), fin(f),
+    omap_version(d->get_committing_version()),
+    ret1(0), ret2(0), ret3(0) { }
   void finish(int r) override {
     // check the correctness of backtrace
     if (r >= 0 && ret3 != -ECANCELED)
       dir->inode->verify_diri_backtrace(btbl, ret3);
     if (r >= 0) r = ret1;
     if (r >= 0) r = ret2;
+
     if (more) {
-      dir->_omap_fetch_more(hdrbl, omap, fin);
-    } else {
-      dir->_omap_fetched(hdrbl, omap, !fin, r);
-      if (fin)
-	fin->complete(r);
+      if (omap_version < dir->get_committed_version()) {
+        omap.clear();
+        dir->_omap_fetch(fin, {});
+      } else {
+        dir->_omap_fetch_more(omap_version, hdrbl, omap, fin);
+      }
+      return;
     }
+
+    dir->_omap_fetched(hdrbl, omap, !fin, r);
+    if (fin)
+      fin->complete(r);
+
   }
   void print(ostream& out) const override {
     out << "dirfrag_fetch(" << dir->dirfrag() << ")";
@@ -1659,15 +1678,13 @@ void CDir::_omap_fetch(MDSContext *c, const std::set<dentry_key_t>& keys)
 			     new C_OnFinisher(fin, cache->mds->finisher));
 }
 
-void CDir::_omap_fetch_more(
-  bufferlist& hdrbl,
-  map<string, bufferlist>& omap,
-  MDSContext *c)
+void CDir::_omap_fetch_more(version_t omap_version, bufferlist& hdrbl,
+			    map<string, bufferlist>& omap, MDSContext *c)
 {
   // we have more omap keys to fetch!
   object_t oid = get_ondisk_object();
   object_locator_t oloc(cache->mds->mdsmap->get_metadata_pool());
-  C_IO_Dir_OMAP_FetchedMore *fin = new C_IO_Dir_OMAP_FetchedMore(this, c);
+  auto fin = new C_IO_Dir_OMAP_FetchedMore(this, omap_version, c);
   fin->hdrbl.claim(hdrbl);
   fin->omap.swap(omap);
   ObjectOperation rd;
@@ -2038,20 +2055,6 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
   }
 }
 
-void CDir::_go_bad()
-{
-  if (get_version() == 0)
-    set_version(1);
-  state_set(STATE_BADFRAG);
-  // mark complete, !fetching
-  mark_complete();
-  state_clear(STATE_FETCHING);
-  auth_unpin(this);
-
-  // kick waiters
-  finish_waiting(WAIT_COMPLETE, -EIO);
-}
-
 void CDir::go_bad_dentry(snapid_t last, std::string_view dname)
 {
   dout(10) << __func__ << " " << dname << dendl;
@@ -2076,10 +2079,17 @@ void CDir::go_bad(bool complete)
     ceph_abort();  // unreachable, damaged() respawns us
   }
 
-  if (complete)
-    _go_bad();
-  else
-    auth_unpin(this);
+  if (complete) {
+    if (get_version() == 0)
+      set_version(1);
+    
+    state_set(STATE_BADFRAG);
+    mark_complete();
+  }
+
+  state_clear(STATE_FETCHING);
+  auth_unpin(this);
+  finish_waiting(WAIT_COMPLETE, -EIO);
 }
 
 // -----------------------
@@ -2204,7 +2214,7 @@ void CDir::_omap_commit(int op_prio)
       op.priority = op_prio;
 
       // don't create new dirfrag blindly
-      if (!is_new() && !state_test(CDir::STATE_FRAGMENTING))
+      if (!is_new())
 	op.stat(NULL, (ceph::real_time*) NULL, NULL);
 
       if (!to_set.empty())
@@ -2222,11 +2232,12 @@ void CDir::_omap_commit(int op_prio)
     }
   };
 
-  if (state_test(CDir::STATE_FRAGMENTING)) {
+  if (state_test(CDir::STATE_FRAGMENTING) && is_new()) {
+    assert(committed_version == 0);
     for (auto p = items.begin(); p != items.end(); ) {
       CDentry *dn = p->second;
       ++p;
-      if (!dn->is_dirty() && dn->get_linkage()->is_null())
+      if (dn->get_linkage()->is_null())
 	continue;
       write_one(dn);
     }
@@ -2242,7 +2253,7 @@ void CDir::_omap_commit(int op_prio)
   op.priority = op_prio;
 
   // don't create new dirfrag blindly
-  if (!is_new() && !state_test(CDir::STATE_FRAGMENTING))
+  if (!is_new())
     op.stat(NULL, (ceph::real_time*)NULL, NULL);
 
   /*

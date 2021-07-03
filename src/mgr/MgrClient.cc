@@ -44,6 +44,7 @@ void MgrClient::init()
   ceph_assert(msgr != nullptr);
 
   timer.init();
+  initialized = true;
 }
 
 void MgrClient::shutdown()
@@ -160,10 +161,11 @@ void MgrClient::reconnect()
   if (service_daemon) {
     daemon_dirty_status = true;
   }
+  task_dirty_status = true;
 
   // Don't send an open if we're just a client (i.e. doing
   // command-sending, not stats etc)
-  if (!cct->_conf->name.is_client() || service_daemon) {
+  if (msgr->get_mytype() != CEPH_ENTITY_TYPE_CLIENT || service_daemon) {
     _send_open();
   }
 
@@ -345,6 +347,11 @@ void MgrClient::_send_report()
     daemon_dirty_status = false;
   }
 
+  if (task_dirty_status) {
+    report->task_status = task_status;
+    task_dirty_status = false;
+  }
+
   report->daemon_health_metrics = std::move(daemon_health_metrics);
 
   cct->_conf.get_config_bl(last_config_bl_version, &report->config_bl,
@@ -480,14 +487,6 @@ int MgrClient::service_daemon_register(
   const std::map<std::string,std::string>& metadata)
 {
   std::lock_guard l(lock);
-  if (service == "osd" ||
-      service == "mds" ||
-      service == "client" ||
-      service == "mon" ||
-      service == "mgr") {
-    // normal ceph entity types are not allowed!
-    return -EINVAL;
-  }
   if (service_daemon) {
     return -EEXIST;
   }
@@ -499,7 +498,7 @@ int MgrClient::service_daemon_register(
   daemon_dirty_status = true;
 
   // late register?
-  if (cct->_conf->name.is_client() && session && session->con) {
+  if (msgr->get_mytype() == CEPH_ENTITY_TYPE_CLIENT && session && session->con) {
     _send_open();
   }
 
@@ -513,6 +512,15 @@ int MgrClient::service_daemon_update_status(
   ldout(cct,10) << status << dendl;
   daemon_status = std::move(status);
   daemon_dirty_status = true;
+  return 0;
+}
+
+int MgrClient::service_daemon_update_task_status(
+  std::map<std::string,std::string> &&status) {
+  std::lock_guard l(lock);
+  ldout(cct,10) << status << dendl;
+  task_status = std::move(status);
+  task_dirty_status = true;
   return 0;
 }
 

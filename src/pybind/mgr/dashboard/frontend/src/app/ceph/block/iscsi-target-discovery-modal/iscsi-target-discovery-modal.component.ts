@@ -22,8 +22,8 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
   permission: Permission;
   hasPermission: boolean;
 
-  USER_REGEX = /[\w\.:@_-]{8,64}/;
-  PASSWORD_REGEX = /[\w@\-_\/]{12,16}/;
+  USER_REGEX = /^[\w\.:@_-]{8,64}$/;
+  PASSWORD_REGEX = /^[\w@\-_\/]{12,16}$/;
 
   constructor(
     private authStorageService: AuthStorageService,
@@ -116,7 +116,7 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
         this.bsModalRef.hide();
       },
       () => {
-        this.bsModalRef.hide();
+        this.discoveryForm.setErrors({ cdSubmitButton: true });
       }
     );
   }

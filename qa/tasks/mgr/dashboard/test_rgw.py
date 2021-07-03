@@ -2,8 +2,8 @@
 from __future__ import absolute_import
 
 import logging
-import urllib
 import six
+from six.moves.urllib import parse
 
 from .helper import DashboardTestCase, JObj, JList, JLeaf
 
@@ -26,8 +26,8 @@ class RgwTestCase(DashboardTestCase):
             '--system', '--access-key', 'admin', '--secret', 'admin'
         ])
         # Update the dashboard configuration.
-        cls._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', 'admin'])
-        cls._ceph_cmd(['dashboard', 'set-rgw-api-access-key', 'admin'])
+        cls._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-secret-key'], 'admin')
+        cls._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-access-key'], 'admin')
         # Create a test user?
         if cls.create_test_user:
             cls._radosgw_admin_cmd([
@@ -67,6 +67,7 @@ class RgwApiCredentialsTest(RgwTestCase):
     AUTH_ROLES = ['rgw-manager']
 
     def setUp(self):
+        super(RgwApiCredentialsTest, self).setUp()
         # Restart the Dashboard module to ensure that the connection to the
         # RGW Admin Ops API is re-established with the new credentials.
         self.logout()
@@ -74,13 +75,13 @@ class RgwApiCredentialsTest(RgwTestCase):
         self._ceph_cmd(['mgr', 'module', 'enable', 'dashboard', '--force'])
         # Set the default credentials.
         self._ceph_cmd(['dashboard', 'set-rgw-api-user-id', ''])
-        self._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', 'admin'])
-        self._ceph_cmd(['dashboard', 'set-rgw-api-access-key', 'admin'])
+        self._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-secret-key'], 'admin')
+        self._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-access-key'], 'admin')
         super(RgwApiCredentialsTest, self).setUp()
 
     def test_no_access_secret_key(self):
-        self._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', ''])
-        self._ceph_cmd(['dashboard', 'set-rgw-api-access-key', ''])
+        self._ceph_cmd(['dashboard', 'reset-rgw-api-secret-key'])
+        self._ceph_cmd(['dashboard', 'reset-rgw-api-access-key'])
         resp = self._get('/api/rgw/user')
         self.assertStatus(500)
         self.assertIn('detail', resp)
@@ -106,6 +107,16 @@ class RgwApiCredentialsTest(RgwTestCase):
                       data['message'])
 
 
+class RgwSiteTest(RgwTestCase):
+
+    AUTH_ROLES = ['rgw-manager']
+
+    def test_get_realms(self):
+        data = self._get('/api/rgw/site?query=realms')
+        self.assertStatus(200)
+        self.assertSchema(data, JList(str))
+
+
 class RgwBucketTest(RgwTestCase):
 
     AUTH_ROLES = ['rgw-manager']
@@ -114,16 +125,22 @@ class RgwBucketTest(RgwTestCase):
     def setUpClass(cls):
         cls.create_test_user = True
         super(RgwBucketTest, cls).setUpClass()
-        # Create a tenanted user.
+        # Create tenanted users.
         cls._radosgw_admin_cmd([
             'user', 'create', '--tenant', 'testx', '--uid', 'teuth-test-user',
             '--display-name', 'tenanted teuth-test-user'
+        ])
+        cls._radosgw_admin_cmd([
+            'user', 'create', '--tenant', 'testx', '--uid', 'teuth-test-user2',
+            '--display-name', 'tenanted teuth-test-user 2'
         ])
 
     @classmethod
     def tearDownClass(cls):
         cls._radosgw_admin_cmd(
             ['user', 'rm', '--tenant', 'testx', '--uid=teuth-test-user'])
+        cls._radosgw_admin_cmd(
+            ['user', 'rm', '--tenant', 'testx', '--uid=teuth-test-user2'])
         super(RgwBucketTest, cls).tearDownClass()
 
     def test_all(self):
@@ -157,6 +174,20 @@ class RgwBucketTest(RgwTestCase):
         self.assertEqual(len(data), 1)
         self.assertIn('teuth-test-bucket', data)
 
+        # List all buckets with stats.
+        data = self._get('/api/rgw/bucket?stats=true')
+        self.assertStatus(200)
+        self.assertEqual(len(data), 1)
+        self.assertSchema(data[0], JObj(sub_elems={
+            'bid': JLeaf(str),
+            'bucket': JLeaf(str),
+            'bucket_quota': JObj(sub_elems={}, allow_unknown=True),
+            'id': JLeaf(str),
+            'owner': JLeaf(str),
+            'usage': JObj(sub_elems={}, allow_unknown=True),
+            'tenant': JLeaf(str),
+        }, allow_unknown=True))
+
         # Get the bucket.
         data = self._get('/api/rgw/bucket/teuth-test-bucket')
         self.assertStatus(200)
@@ -166,7 +197,8 @@ class RgwBucketTest(RgwTestCase):
             'tenant': JLeaf(str),
             'bucket': JLeaf(str),
             'bucket_quota': JObj(sub_elems={}, allow_unknown=True),
-            'owner': JLeaf(str)
+            'owner': JLeaf(str),
+            'usage': JObj(sub_elems={}, allow_unknown=True),
         }, allow_unknown=True))
         self.assertEqual(data['bucket'], 'teuth-test-bucket')
         self.assertEqual(data['owner'], 'admin')
@@ -219,7 +251,7 @@ class RgwBucketTest(RgwTestCase):
 
         # Get the bucket.
         data = self._get('/api/rgw/bucket/{}'.format(
-            urllib.quote_plus('testx/teuth-test-bucket')))
+            parse.quote_plus('testx/teuth-test-bucket')))
         self.assertStatus(200)
         self.assertSchema(data, JObj(sub_elems={
             'owner': JLeaf(str),
@@ -232,24 +264,39 @@ class RgwBucketTest(RgwTestCase):
         self.assertEqual(data['tenant'], 'testx')
         self.assertEqual(data['bid'], 'testx/teuth-test-bucket')
 
-        # Update the bucket.
+        # Update bucket: different user from same tenant.
         self._put(
             '/api/rgw/bucket/{}'.format(
-                urllib.quote_plus('testx/teuth-test-bucket')),
+                parse.quote_plus('testx/teuth-test-bucket')),
+            params={
+                'bucket_id': data['id'],
+                'uid': 'testx$teuth-test-user2'
+            })
+        self.assertStatus(200)
+        data = self._get('/api/rgw/bucket/{}'.format(
+            parse.quote_plus('testx/teuth-test-bucket')))
+        self.assertStatus(200)
+        self.assertIn('owner', data)
+        self.assertEqual(data['owner'], 'testx$teuth-test-user2')
+
+        # Update bucket: different user from empty tenant.
+        self._put(
+            '/api/rgw/bucket/{}'.format(
+                parse.quote_plus('testx/teuth-test-bucket')),
             params={
                 'bucket_id': data['id'],
                 'uid': 'admin'
             })
         self.assertStatus(200)
         data = self._get('/api/rgw/bucket/{}'.format(
-            urllib.quote_plus('testx/teuth-test-bucket')))
+            parse.quote_plus('testx/teuth-test-bucket')))
         self.assertStatus(200)
         self.assertIn('owner', data)
         self.assertEqual(data['owner'], 'admin')
 
         # Delete the bucket.
         self._delete('/api/rgw/bucket/{}'.format(
-            urllib.quote_plus('testx/teuth-test-bucket')))
+            parse.quote_plus('testx/teuth-test-bucket')))
         self.assertStatus(204)
         data = self._get('/api/rgw/bucket')
         self.assertStatus(200)
@@ -295,8 +342,8 @@ class RgwDaemonTest(DashboardTestCase):
             '--system', '--access-key=admin', '--secret=admin'
         ])
         self._ceph_cmd(['dashboard', 'set-rgw-api-user-id', 'admin'])
-        self._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', 'admin'])
-        self._ceph_cmd(['dashboard', 'set-rgw-api-access-key', 'admin'])
+        self._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-secret-key'], 'admin')
+        self._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-access-key'], 'admin')
 
         data = self._get('/api/rgw/status')
         self.assertStatus(200)

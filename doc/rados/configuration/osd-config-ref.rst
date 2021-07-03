@@ -258,7 +258,7 @@ scrubbing operations.
               Already running scrubs will be continued. This might be useful to reduce
               load on busy clusters.
 :Type: Boolean
-:Default: ``true``
+:Default: ``false``
 
 
 ``osd scrub thread timeout``
@@ -400,7 +400,7 @@ Operations
 
 :Type: String
 :Valid Choices: prio, wpq, mclock_opclass, mclock_client
-:Default: ``prio``
+:Default: ``wpq``
 
 
 ``osd op queue cut off``
@@ -1069,6 +1069,42 @@ Miscellaneous
 :Description: The maximum time in seconds before timing out a command thread.
 :Type: 32-bit Integer
 :Default: ``10*60``
+
+
+``osd delete sleep``
+
+:Description: Time in seconds to sleep before next removal transaction. This
+              helps to throttle the pg deletion process.
+
+:Type: Float
+:Default: ``0``
+
+
+``osd delete sleep hdd``
+
+:Description: Time in seconds to sleep before next removal transaction
+              for HDDs.
+
+:Type: Float
+:Default: ``5``
+
+
+``osd delete sleep ssd``
+
+:Description: Time in seconds to sleep before next removal transaction
+              for SSDs.
+
+:Type: Float
+:Default: ``0``
+
+
+``osd delete sleep hybrid``
+
+:Description: Time in seconds to sleep before next removal transaction
+              when osd data is on HDD and osd journal is on SSD.
+
+:Type: Float
+:Default: ``1``
 
 
 ``osd command max records``

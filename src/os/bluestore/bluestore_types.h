@@ -33,7 +33,7 @@ namespace ceph {
 /// label for block device
 struct bluestore_bdev_label_t {
   uuid_d osd_uuid;     ///< osd uuid
-  uint64_t size;       ///< device size
+  uint64_t size = 0;   ///< device size
   utime_t btime;       ///< birth time
   string description;  ///< device description
 
@@ -264,6 +264,9 @@ struct bluestore_blob_use_tracker_t {
   void clear() {
     if (num_au != 0) {
       delete[] bytes_per_au;
+      mempool::get_pool(
+        mempool::pool_index_t(mempool::mempool_bluestore_cache_other)).
+          adjust_count(-1, -sizeof(uint32_t) * num_au);
     }
     bytes_per_au = 0;
     au_size = 0;
@@ -631,6 +634,7 @@ public:
     if (!has_unused()) {
       return false;
     }
+    ceph_assert(!is_compressed());
     uint64_t blob_len = get_logical_length();
     ceph_assert((blob_len % (sizeof(unused)*8)) == 0);
     ceph_assert(offset + length <= blob_len);
@@ -646,6 +650,7 @@ public:
 
   /// mark a range that has never been used
   void add_unused(uint64_t offset, uint64_t length) {
+    ceph_assert(!is_compressed());
     uint64_t blob_len = get_logical_length();
     ceph_assert((blob_len % (sizeof(unused)*8)) == 0);
     ceph_assert(offset + length <= blob_len);
@@ -663,6 +668,7 @@ public:
   /// indicate that a range has (now) been used.
   void mark_used(uint64_t offset, uint64_t length) {
     if (has_unused()) {
+      ceph_assert(!is_compressed());
       uint64_t blob_len = get_logical_length();
       ceph_assert((blob_len % (sizeof(unused)*8)) == 0);
       ceph_assert(offset + length <= blob_len);
@@ -756,11 +762,11 @@ public:
     case 1:
       return reinterpret_cast<const uint8_t*>(p)[i];
     case 2:
-      return reinterpret_cast<const __le16*>(p)[i];
+      return reinterpret_cast<const ceph_le16*>(p)[i];
     case 4:
-      return reinterpret_cast<const __le32*>(p)[i];
+      return reinterpret_cast<const ceph_le32*>(p)[i];
     case 8:
-      return reinterpret_cast<const __le64*>(p)[i];
+      return reinterpret_cast<const ceph_le64*>(p)[i];
     default:
       ceph_abort_msg("unrecognized csum word size");
     }
@@ -861,6 +867,7 @@ ostream& operator<<(ostream& out, const bluestore_blob_t& o);
 
 /// shared blob state
 struct bluestore_shared_blob_t {
+  MEMPOOL_CLASS_HELPERS();
   uint64_t sbid;                       ///> shared blob id
   bluestore_extent_ref_map_t ref_map;  ///< shared blob extents
 
@@ -891,7 +898,8 @@ ostream& operator<<(ostream& out, const bluestore_shared_blob_t& o);
 struct bluestore_onode_t {
   uint64_t nid = 0;                    ///< numeric id (locally unique)
   uint64_t size = 0;                   ///< object size
-  map<mempool::bluestore_cache_other::string, bufferptr> attrs;        ///< attrs
+  // mempool to be assigned to buffer::ptr manually
+  std::map<mempool::bluestore_cache_meta::string, ceph::buffer::ptr> attrs;
 
   struct shard_info {
     uint32_t offset = 0;  ///< logical offset for start of shard

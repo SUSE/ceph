@@ -23,25 +23,30 @@ using librbd::util::unique_lock_name;
 
 template <typename I>
 ImageCopyRequest<I>::ImageCopyRequest(I *src_image_ctx, I *dst_image_ctx,
-                                      librados::snap_t snap_id_start,
-                                      librados::snap_t snap_id_end,
+                                      librados::snap_t src_snap_id_start,
+                                      librados::snap_t src_snap_id_end,
+                                      librados::snap_t dst_snap_id_start,
                                       bool flatten,
                                       const ObjectNumber &object_number,
                                       const SnapSeqs &snap_seqs,
                                       ProgressContext *prog_ctx,
                                       Context *on_finish)
   : RefCountedObject(dst_image_ctx->cct, 1), m_src_image_ctx(src_image_ctx),
-    m_dst_image_ctx(dst_image_ctx), m_snap_id_start(snap_id_start),
-    m_snap_id_end(snap_id_end), m_flatten(flatten),
-    m_object_number(object_number), m_snap_seqs(snap_seqs),
+    m_dst_image_ctx(dst_image_ctx), m_src_snap_id_start(src_snap_id_start),
+    m_src_snap_id_end(src_snap_id_end), m_dst_snap_id_start(dst_snap_id_start),
+    m_flatten(flatten), m_object_number(object_number), m_snap_seqs(snap_seqs),
     m_prog_ctx(prog_ctx), m_on_finish(on_finish), m_cct(dst_image_ctx->cct),
     m_lock(unique_lock_name("ImageCopyRequest::m_lock", this)) {
 }
 
 template <typename I>
 void ImageCopyRequest<I>::send() {
-  util::compute_snap_map(m_snap_id_start, m_snap_id_end, m_snap_seqs,
+  m_dst_image_ctx->snap_lock.get_read();
+  util::compute_snap_map(m_dst_image_ctx->cct, m_src_snap_id_start,
+                         m_src_snap_id_end, m_dst_image_ctx->snaps, m_snap_seqs,
                          &m_snap_map);
+  m_dst_image_ctx->snap_lock.put_read();
+
   if (m_snap_map.empty()) {
     lderr(m_cct) << "failed to map snapshots within boundary" << dendl;
     finish(-EINVAL);
@@ -117,12 +122,18 @@ void ImageCopyRequest<I>::send_next_object_copy() {
 
   ++m_current_ops;
 
+  uint32_t flags = 0;
+  if (m_flatten) {
+    flags |= OBJECT_COPY_REQUEST_FLAG_FLATTEN;
+  }
+
   Context *ctx = new FunctionContext(
     [this, ono](int r) {
       handle_object_copy(ono, r);
     });
   ObjectCopyRequest<I> *req = ObjectCopyRequest<I>::create(
-      m_src_image_ctx, m_dst_image_ctx, m_snap_map, ono, m_flatten, ctx);
+    m_src_image_ctx, m_dst_image_ctx, m_src_snap_id_start, m_dst_snap_id_start,
+    m_snap_map, ono, flags, ctx);
   req->send();
 }
 

@@ -33,11 +33,16 @@
 
 class health_check_map_t;
 class DaemonServer;
+class MgrSession;
+class ModuleCommand;
 class PyModuleRegistry;
 
 class ActivePyModules
 {
-  std::map<std::string, std::unique_ptr<ActivePyModule>> modules;
+  // module class instances not yet created
+  std::set<std::string, std::less<>> pending_modules;
+  // module class instances already created
+  std::map<std::string, std::shared_ptr<ActivePyModule>> modules;
   PyModuleConfig &module_config;
   std::map<std::string, std::string> store_cache;
   DaemonStateIndex &daemon_state;
@@ -90,6 +95,7 @@ public:
      const std::string &svc_id);
   PyObject *get_context();
   PyObject *get_osdmap();
+  /// @note @c fct is not allowed to acquire locks when holding GIL
   PyObject *with_perf_counters(
       std::function<void(
         PerfCounterInstance& counter_instance,
@@ -137,7 +143,8 @@ public:
   void set_uri(const std::string& module_name, const std::string &uri);
 
   int handle_command(
-    const std::string &module_name,
+    const ModuleCommand& module_command,
+    const MgrSession& session,
     const cmdmap_t &cmdmap,
     const bufferlist &inbuf,
     std::stringstream *ds,
@@ -152,6 +159,9 @@ public:
                   const std::string &notify_id);
   void notify_all(const LogEntry &log_entry);
 
+  bool is_pending(std::string_view name) const {
+    return pending_modules.count(name) > 0;
+  }
   bool module_exists(const std::string &name) const
   {
     return modules.count(name) > 0;

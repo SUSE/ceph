@@ -235,6 +235,9 @@
 /* Define to 1 if you have sched.h. */
 #cmakedefine HAVE_SCHED 1
 
+/* Define to 1 if you have sigdescr_np. */
+#cmakedefine HAVE_SIGDESCR_NP 1
+
 /* Support SSE (Streaming SIMD Extensions) instructions */
 #cmakedefine HAVE_SSE
 
@@ -325,7 +328,7 @@
 /* Define if endian type is little endian */
 #cmakedefine CEPH_LITTLE_ENDIAN
 
-#cmakedefine PYTHON_EXECUTABLE "@MGR_PYTHON_EXECUTABLE@"
+#cmakedefine MGR_PYTHON_EXECUTABLE "@MGR_PYTHON_EXECUTABLE@"
 
 /* Define to 1 if you have the `getprogname' function. */
 #cmakedefine HAVE_GETPROGNAME 1
@@ -344,6 +347,9 @@
 
 /* Defined if rabbitmq-c is available for rgw amqp push endpoint */
 #cmakedefine WITH_RADOSGW_AMQP_ENDPOINT
+
+/* Defined if libedkafka is available for rgw kafka push endpoint */
+#cmakedefine WITH_RADOSGW_KAFKA_ENDPOINT
 
 /* Defined if std::map::merge() is supported */
 #cmakedefine HAVE_STDLIB_MAP_SPLICING

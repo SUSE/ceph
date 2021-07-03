@@ -23,6 +23,7 @@
 #include "rgw_tag.h"
 
 #include <atomic>
+#include <tuple>
 
 #define HASH_PRIME 7877
 #define MAX_ID_LEN 255
@@ -129,7 +130,7 @@ public:
   bool valid() const {
     if (!days.empty() && !date.empty()) {
       return false;
-    } else if (!days.empty() && get_days() <=0) {
+    } else if (!days.empty() && get_days() < 0) {
       return false;
     }
     //We've checked date in xml parsing
@@ -151,7 +152,11 @@ public:
     decode(storage_class, bl);
     DECODE_FINISH(bl);
   }
-  void dump(Formatter *f) const;
+  void dump(Formatter *f) const {  
+    f->dump_string("days", days);
+    f->dump_string("date", date);
+    f->dump_string("storage_class", storage_class);
+  }
 };
 WRITE_CLASS_ENCODER(LCTransition)
 
@@ -210,8 +215,6 @@ class LCFilter
   void dump(Formatter *f) const;
 };
 WRITE_CLASS_ENCODER(LCFilter)
-
-
 
 class LCRule
 {
@@ -370,6 +373,14 @@ struct transition_action
   boost::optional<ceph::real_time> date;
   string storage_class;
   transition_action() : days(0) {}
+  void dump(Formatter *f) const {
+    if (!date) {
+      f->dump_int("days", days);
+    } else {
+      utime_t ut(*date);
+      f->dump_stream("date") << ut;
+    }
+  }
 };
 
 /* XXX why not LCRule? */
@@ -515,6 +526,13 @@ namespace rgw::lc {
 
 int fix_lc_shard_entry(RGWRados *store, const RGWBucketInfo& bucket_info,
 		       const map<std::string,bufferlist>& battrs);
+
+std::string s3_expiration_header(
+  DoutPrefixProvider* dpp,
+  const rgw_obj_key& obj_key,
+  const RGWObjTags& obj_tagset,
+  const ceph::real_time& mtime,
+  const std::map<std::string, buffer::list>& bucket_attrs);
 
 } // namespace rgw::lc
 

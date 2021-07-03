@@ -17,7 +17,6 @@
 #include "rgw_auth.h"
 #include "rgw_auth_registry.h"
 #include "rgw_rest_sts.h"
-#include "rgw_auth_s3.h"
 
 #include "rgw_formats.h"
 #include "rgw_client_io.h"
@@ -169,11 +168,11 @@ void RGWREST_STS::send_response()
 
 int RGWSTSGetSessionToken::verify_permission()
 {
-  rgw::IAM::Partition partition = rgw::IAM::Partition::aws;
-  rgw::IAM::Service service = rgw::IAM::Service::s3;
+  rgw::Partition partition = rgw::Partition::aws;
+  rgw::Service service = rgw::Service::s3;
   if (!verify_user_permission(this,
                               s,
-                              rgw::IAM::ARN(partition, service, "", s->user->user_id.tenant, ""),
+                              rgw::ARN(partition, service, "", s->user->user_id.tenant, ""),
                               rgw::IAM::stsGetSessionToken)) {
     return -EACCES;
   }
@@ -188,7 +187,12 @@ int RGWSTSGetSessionToken::get_params()
   tokenCode = s->info.args.get("TokenCode");
 
   if (! duration.empty()) {
-    uint64_t duration_in_secs = stoull(duration);
+    string err;
+    uint64_t duration_in_secs = strict_strtoll(duration.c_str(), 10, &err);
+    if (!err.empty()) {
+      return -EINVAL;
+    }
+
     if (duration_in_secs < STS::GetSessionTokenRequest::getMinDuration() ||
             duration_in_secs > s->cct->_conf->rgw_sts_max_session_duration)
       return -EINVAL;
@@ -345,13 +349,7 @@ int RGW_Auth_STS::authorize(const DoutPrefixProvider *dpp,
 
 void RGWHandler_REST_STS::rgw_sts_parse_input()
 {
-  const auto max_size = s->cct->_conf->rgw_max_put_param_size;
-
-  int ret = 0;
-  bufferlist data;
-  std::tie(ret, data) = rgw_rest_read_all_input(s, max_size, false);
-  string post_body = data.to_str();
-  if (data.length() > 0) {
+  if (post_body.size() > 0) {
     ldout(s->cct, 10) << "Content of POST: " << post_body << dendl;
 
     if (post_body.find("Action") != string::npos) {
@@ -360,16 +358,11 @@ void RGWHandler_REST_STS::rgw_sts_parse_input()
       for (const auto& t : tokens) {
         auto pos = t.find("=");
         if (pos != string::npos) {
-           std::string key = t.substr(0, pos);
-           std::string value = t.substr(pos + 1, t.size() - 1);
-           if (key == "RoleArn" || key == "Policy") {
-            value = url_decode(value);
-           }
-           ldout(s->cct, 10) << "Key: " << key << "Value: " << value << dendl;
-           s->info.args.append(key, value);
-         }
-       }
-    }
+          s->info.args.append(t.substr(0,pos),
+                              url_decode(t.substr(pos+1, t.size() -1)));
+        }
+      }
+    } 
   }
   auto payload_hash = rgw::auth::s3::calc_v4_payload_hash(post_body);
   s->info.args.append("PayloadHash", payload_hash);
@@ -422,7 +415,7 @@ int RGWHandler_REST_STS::init_from_header(struct req_state* s,
   string req;
   string first;
 
-  s->prot_flags |= RGW_REST_STS;
+  s->prot_flags = RGW_REST_STS;
 
   const char *p, *req_name;
   if (req_name = s->relative_uri.c_str(); *req_name == '?') {

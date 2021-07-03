@@ -7,10 +7,11 @@ import errno
 import json
 import threading
 import time
+import six
 
 import bcrypt
 
-from mgr_module import CLIReadCommand, CLIWriteCommand
+from mgr_module import CLICheckNonemptyFileInput, CLIReadCommand, CLIWriteCommand
 
 from .. import mgr, logger
 from ..security import Scope, Permission
@@ -20,10 +21,21 @@ from ..exceptions import RoleAlreadyExists, RoleDoesNotExist, ScopeNotValid, \
                          RoleNotInUser
 
 
+def ensure_text(s, encoding='utf-8', errors='strict'):
+    """Ported from six."""
+    if isinstance(s, six.binary_type):
+        return s.decode(encoding, errors)
+    elif isinstance(s, six.text_type):
+        return s
+    else:
+        raise TypeError("not expecting type '%s'" % type(s))
+
+
 # password hashing algorithm
 def password_hash(password, salt_password=None):
     if not password:
         return None
+    password = ensure_text(password)
     if not salt_password:
         salt_password = bcrypt.gensalt()
     else:
@@ -102,7 +114,7 @@ ADMIN_ROLE = Role('administrator', 'Administrator', {
 # read-only role provides read-only permission for all scopes
 READ_ONLY_ROLE = Role('read-only', 'Read-Only', {
     scope_name: [_P.READ] for scope_name in Scope.all_scopes()
-    if scope_name != Scope.DASHBOARD_SETTINGS
+    if scope_name not in (Scope.DASHBOARD_SETTINGS, Scope.CONFIG_OPT)
 })
 
 
@@ -112,13 +124,14 @@ BLOCK_MGR_ROLE = Role('block-manager', 'Block Manager', {
     Scope.POOL: [_P.READ],
     Scope.ISCSI: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.RBD_MIRRORING: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
+    Scope.GRAFANA: [_P.READ],
 })
 
 
 # RadosGW manager role provides all permissions for block related scopes
 RGW_MGR_ROLE = Role('rgw-manager', 'RGW Manager', {
     Scope.RGW: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
-    Scope.CONFIG_OPT: [_P.READ],
+    Scope.GRAFANA: [_P.READ],
 })
 
 
@@ -131,26 +144,27 @@ CLUSTER_MGR_ROLE = Role('cluster-manager', 'Cluster Manager', {
     Scope.MANAGER: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.CONFIG_OPT: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.LOG: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
+    Scope.GRAFANA: [_P.READ],
 })
 
 
 # Pool manager role provides all permissions for pool related scopes
 POOL_MGR_ROLE = Role('pool-manager', 'Pool Manager', {
     Scope.POOL: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
-    Scope.CONFIG_OPT: [_P.READ],
+    Scope.GRAFANA: [_P.READ],
 })
 
-# Pool manager role provides all permissions for CephFS related scopes
+# CephFS manager role provides all permissions for CephFS related scopes
 CEPHFS_MGR_ROLE = Role('cephfs-manager', 'CephFS Manager', {
     Scope.CEPHFS: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
-    Scope.CONFIG_OPT: [_P.READ],
+    Scope.GRAFANA: [_P.READ],
 })
 
 GANESHA_MGR_ROLE = Role('ganesha-manager', 'NFS Ganesha Manager', {
     Scope.NFS_GANESHA: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.CEPHFS: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
     Scope.RGW: [_P.READ, _P.CREATE, _P.UPDATE, _P.DELETE],
-    Scope.CONFIG_OPT: [_P.READ],
+    Scope.GRAFANA: [_P.READ],
 })
 
 
@@ -320,24 +334,6 @@ class AccessControlDB(object):
             version = cls.VERSION
         return "{}{}".format(cls.ACDB_CONFIG_KEY, version)
 
-    def check_and_update_db(self):
-        logger.debug("AC: Checking for previews DB versions")
-        if self.VERSION == 1:  # current version
-            # check if there is username/password from previous version
-            username = mgr.get_module_option('username', None)
-            password = mgr.get_module_option('password', None)
-            if username and password:
-                logger.debug("AC: Found single user credentials: user=%s",
-                             username)
-                # found user credentials
-                user = self.create_user(username, "", None, None)
-                # password is already hashed, so setting manually
-                user.password = password
-                user.add_roles([ADMIN_ROLE])
-                self.save()
-        else:
-            raise NotImplementedError()
-
     @classmethod
     def load(cls):
         logger.info("AC: Loading user roles DB version=%s", cls.VERSION)
@@ -346,8 +342,6 @@ class AccessControlDB(object):
         if json_db is None:
             logger.debug("AC: No DB v%s found, creating new...", cls.VERSION)
             db = cls(cls.VERSION, {}, {})
-            # check if we can update from a previous version database
-            db.check_and_update_db()
             return db
 
         db = json.loads(json_db)
@@ -365,10 +359,11 @@ def load_access_control_db():
 # CLI dashboard access control scope commands
 
 @CLIWriteCommand('dashboard set-login-credentials',
-                 'name=username,type=CephString '
-                 'name=password,type=CephString',
-                 'Set the login credentials')
-def set_login_credentials_cmd(_, username, password):
+                 'name=username,type=CephString',
+                 'Set the login credentials. Password read from -i <file>')
+@CLICheckNonemptyFileInput
+def set_login_credentials_cmd(_, username, inbuf):
+    password = inbuf
     try:
         user = mgr.ACCESS_CTRL_DB.get_user(username)
         user.set_password(password)
@@ -498,13 +493,14 @@ def ac_user_show_cmd(_, username=None):
 
 @CLIWriteCommand('dashboard ac-user-create',
                  'name=username,type=CephString '
-                 'name=password,type=CephString,req=false '
                  'name=rolename,type=CephString,req=false '
                  'name=name,type=CephString,req=false '
                  'name=email,type=CephString,req=false',
-                 'Create a user')
-def ac_user_create_cmd(_, username, password=None, rolename=None, name=None,
+                 'Create a user. Password read from -i <file>')
+@CLICheckNonemptyFileInput
+def ac_user_create_cmd(_, username, inbuf, rolename=None, name=None,
                        email=None):
+    password = inbuf
     try:
         role = mgr.ACCESS_CTRL_DB.get_role(rolename) if rolename else None
     except RoleDoesNotExist as ex:
@@ -607,10 +603,11 @@ def ac_user_del_roles_cmd(_, username, roles):
 
 
 @CLIWriteCommand('dashboard ac-user-set-password',
-                 'name=username,type=CephString '
-                 'name=password,type=CephString',
-                 'Set user password')
-def ac_user_set_password(_, username, password):
+                 'name=username,type=CephString',
+                 'Set user password from -i <file>')
+@CLICheckNonemptyFileInput
+def ac_user_set_password(_, username, inbuf):
+    password = inbuf
     try:
         user = mgr.ACCESS_CTRL_DB.get_user(username)
         user.set_password(password)

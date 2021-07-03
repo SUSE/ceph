@@ -22,7 +22,8 @@ set(lib_mon_srcs
   ConfigKeyService.cc
   ../mds/MDSAuthCaps.cc
   ../mgr/mgr_commands.cc
-  ../osd/OSDCap.cc)
+  ../osd/OSDCap.cc
+  $<TARGET_OBJECTS:mgr_cap_obj>)
 
 if(HAVE_GSSAPI)
   list(APPEND lib_mon_srcs
@@ -30,6 +31,5 @@ if(HAVE_GSSAPI)
 endif()
 
 add_library(mon STATIC
-  ${lib_mon_srcs}
-  $<TARGET_OBJECTS:kv_objs>)
-target_link_libraries(mon heap_profiler)
+  ${lib_mon_srcs})
+target_link_libraries(mon kv heap_profiler)

@@ -13,6 +13,7 @@ import fnmatch
 import time
 import threading
 import socket
+import six
 from six.moves import urllib
 import cherrypy
 
@@ -25,6 +26,17 @@ from . import logger, mgr
 from .exceptions import ViewCacheNoDataException
 from .settings import Settings
 from .services.auth import JwtManager
+
+
+def ensure_str(s, encoding='utf-8', errors='strict'):
+    """Ported from six."""
+    if not isinstance(s, (six.text_type, six.binary_type)):
+        raise TypeError("not expecting type '%s'" % type(s))
+    if six.PY2 and isinstance(s, six.text_type):
+        s = s.encode(encoding, errors)
+    elif six.PY3 and isinstance(s, six.binary_type):
+        s = s.decode(encoding, errors)
+    return s
 
 
 class RequestLoggingTool(cherrypy.Tool):
@@ -42,6 +54,9 @@ class RequestLoggingTool(cherrypy.Tool):
     def request_begin(self):
         req = cherrypy.request
         user = JwtManager.get_username()
+        if user is not None:
+            # PY2: Encode user to str to prevent further implicit decoding
+            user = ensure_str(user)
         # Log the request.
         logger.debug('[%s:%s] [%s] [%s] %s', req.remote.ip, req.remote.port,
                      req.method, user, req.path_info)
@@ -115,7 +130,7 @@ class RequestLoggingTool(cherrypy.Tool):
         if user:
             logger_fn("[%s:%s] [%s] [%s] [%s] [%s] [%s] %s", req.remote.ip,
                       req.remote.port, req.method, status,
-                      "{0:.3f}s".format(lat), user, length, req.path_info)
+                      "{0:.3f}s".format(lat), ensure_str(user), length, req.path_info)
         else:
             logger_fn("[%s:%s] [%s] [%s] [%s] [%s] %s", req.remote.ip,
                       req.remote.port, req.method, status,
@@ -579,6 +594,7 @@ class Task(object):
         return str(self)
 
     def _run(self):
+        NotificationQueue.register(self._handle_task_finished, 'cd_task_finished', 100)
         with self.lock:
             assert not self.running
             self.executor.init(self)
@@ -604,9 +620,13 @@ class Task(object):
             if not self.exception:
                 self.set_progress(100, True)
         NotificationQueue.new_notification('cd_task_finished', self)
-        self.event.set()
         logger.debug("TK: execution of %s finished in: %s s", self,
                      self.duration)
+
+    def _handle_task_finished(self, task):
+        if self == task:
+            NotificationQueue.deregister(self._handle_task_finished)
+            self.event.set()
 
     def wait(self, timeout=None):
         with self.lock:
@@ -858,6 +878,26 @@ def str_to_bool(val):
     if isinstance(val, bool):
         return val
     return bool(strtobool(val))
+
+
+def json_str_to_object(value):  # type: (AnyStr) -> Any
+    """
+    It converts a JSON valid string representation to object.
+
+    >>> result = json_str_to_object('{"a": 1}')
+    >>> result == {'a': 1}
+    True
+    """
+    if value == '':
+        return value
+
+    try:
+        # json.loads accepts binary input from version >=3.6
+        value = value.decode('utf-8')  # type: ignore
+    except AttributeError:
+        pass
+
+    return json.loads(value)
 
 
 def get_request_body_params(request):

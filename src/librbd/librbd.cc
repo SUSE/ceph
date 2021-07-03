@@ -643,8 +643,8 @@ namespace librbd {
     TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
     tracepoint(librbd, trash_undelete_enter, io_ctx.get_pool_name().c_str(),
                io_ctx.get_id(), id, name);
-    int r = librbd::api::Trash<>::restore(io_ctx, RBD_TRASH_IMAGE_SOURCE_USER,
-                                          id, name);
+    int r = librbd::api::Trash<>::restore(
+      io_ctx, librbd::api::Trash<>::RESTORE_SOURCE_WHITELIST, id, name);
     tracepoint(librbd, trash_undelete_exit, r);
     return r;
   }
@@ -840,8 +840,29 @@ namespace librbd {
     return librbd::api::Mirror<>::mode_get(io_ctx, mirror_mode);
   }
 
+  int RBD::mirror_site_name_get(librados::Rados& rados,
+                                std::string* site_name) {
+    return librbd::api::Mirror<>::site_name_get(rados, site_name);
+  }
+
+  int RBD::mirror_site_name_set(librados::Rados& rados,
+                                const std::string& site_name) {
+    return librbd::api::Mirror<>::site_name_set(rados, site_name);
+  }
+
   int RBD::mirror_mode_set(IoCtx& io_ctx, rbd_mirror_mode_t mirror_mode) {
     return librbd::api::Mirror<>::mode_set(io_ctx, mirror_mode);
+  }
+
+  int RBD::mirror_peer_bootstrap_create(IoCtx& io_ctx, std::string* token) {
+    return librbd::api::Mirror<>::peer_bootstrap_create(io_ctx, token);
+  }
+
+  int RBD::mirror_peer_bootstrap_import(IoCtx& io_ctx,
+                                        rbd_mirror_peer_direction_t direction,
+                                        const std::string& token) {
+    return librbd::api::Mirror<>::peer_bootstrap_import(io_ctx, direction,
+                                                        token);
   }
 
   int RBD::mirror_peer_add(IoCtx& io_ctx, std::string *uuid,
@@ -1457,7 +1478,7 @@ namespace librbd {
   int64_t Image::get_data_pool_id()
   {
     ImageCtx *ictx = reinterpret_cast<ImageCtx *>(ctx);
-    return ictx->data_ctx.get_id();
+    return librbd::api::Image<>::get_data_pool_id(ictx);
   }
 
   int Image::parent_info(string *parent_pool_name, string *parent_name,
@@ -2224,8 +2245,8 @@ namespace librbd {
     }
 
     bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
-    if (discard_zero && mem_is_zero(bl.c_str(), bl.length())) {
-      int r = ictx->io_work_queue->discard(ofs, len, 0);
+    if (discard_zero && bl.is_zero()) {
+      int r = ictx->io_work_queue->write_zeroes(ofs, len, 0U, op_flags);
       tracepoint(librbd, writesame_exit, r);
       return r;
     }
@@ -2233,6 +2254,13 @@ namespace librbd {
     int r = ictx->io_work_queue->writesame(ofs, len, bufferlist{bl}, op_flags);
     tracepoint(librbd, writesame_exit, r);
     return r;
+  }
+
+  ssize_t Image::write_zeroes(uint64_t ofs, size_t len, int zero_flags,
+                              int op_flags)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return ictx->io_work_queue->write_zeroes(ofs, len, zero_flags, op_flags);
   }
 
   ssize_t Image::compare_and_write(uint64_t ofs, size_t len,
@@ -2362,8 +2390,9 @@ namespace librbd {
     }
 
     bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
-    if (discard_zero && mem_is_zero(bl.c_str(), bl.length())) {
-      ictx->io_work_queue->aio_discard(get_aio_completion(c), off, len, 0);
+    if (discard_zero && bl.is_zero()) {
+      ictx->io_work_queue->aio_write_zeroes(get_aio_completion(c), off, len, 0U,
+                                            op_flags, true);
       tracepoint(librbd, aio_writesame_exit, 0);
       return 0;
     }
@@ -2371,6 +2400,15 @@ namespace librbd {
     ictx->io_work_queue->aio_writesame(get_aio_completion(c), off, len,
                                        bufferlist{bl}, op_flags);
     tracepoint(librbd, aio_writesame_exit, 0);
+    return 0;
+  }
+
+  int Image::aio_write_zeroes(uint64_t off, size_t len, RBD::AioCompletion *c,
+                              int zero_flags, int op_flags)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    ictx->io_work_queue->aio_write_zeroes(
+      get_aio_completion(c), off, len, zero_flags, op_flags, true);
     return 0;
   }
 
@@ -2685,6 +2723,34 @@ extern "C" int rbd_image_options_is_empty(rbd_image_options_t opts)
 }
 
 /* pool mirroring */
+extern "C" int rbd_mirror_site_name_get(rados_t cluster, char *name,
+                                        size_t *max_len) {
+  librados::Rados rados;
+  librados::Rados::from_rados_t(cluster, rados);
+
+  std::string site_name;
+  int r = librbd::api::Mirror<>::site_name_get(rados, &site_name);
+  if (r < 0) {
+    return r;
+  }
+
+  auto total_len = site_name.size() + 1;
+  if (*max_len < total_len) {
+    *max_len = total_len;
+    return -ERANGE;
+  }
+  *max_len = total_len;
+
+  strcpy(name, site_name.c_str());
+  return 0;
+}
+
+extern "C" int rbd_mirror_site_name_set(rados_t cluster, const char *name) {
+  librados::Rados rados;
+  librados::Rados::from_rados_t(cluster, rados);
+  return librbd::api::Mirror<>::site_name_set(rados, name);
+}
+
 extern "C" int rbd_mirror_mode_get(rados_ioctx_t p,
                                    rbd_mirror_mode_t *mirror_mode) {
   librados::IoCtx io_ctx;
@@ -2697,6 +2763,37 @@ extern "C" int rbd_mirror_mode_set(rados_ioctx_t p,
   librados::IoCtx io_ctx;
   librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
   return librbd::api::Mirror<>::mode_set(io_ctx, mirror_mode);
+}
+
+extern "C" int rbd_mirror_peer_bootstrap_create(rados_ioctx_t p, char *token,
+                                                size_t *max_len) {
+  librados::IoCtx io_ctx;
+  librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
+
+  std::string token_str;
+  int r = librbd::api::Mirror<>::peer_bootstrap_create(io_ctx, &token_str);
+  if (r < 0) {
+    return r;
+  }
+
+  auto total_len = token_str.size() + 1;
+  if (*max_len < total_len) {
+    *max_len = total_len;
+    return -ERANGE;
+  }
+  *max_len = total_len;
+
+  strcpy(token, token_str.c_str());
+  return 0;
+}
+
+extern "C" int rbd_mirror_peer_bootstrap_import(
+    rados_ioctx_t p, rbd_mirror_peer_direction_t direction,
+    const char *token) {
+  librados::IoCtx io_ctx;
+  librados::IoCtx::from_rados_ioctx_t(p, io_ctx);
+
+  return librbd::api::Mirror<>::peer_bootstrap_import(io_ctx, direction, token);
 }
 
 extern "C" int rbd_mirror_peer_add(rados_ioctx_t p, char *uuid,
@@ -3017,6 +3114,7 @@ extern "C" int rbd_list2(rados_ioctx_t p, rbd_image_spec_t *images,
   TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
   tracepoint(librbd, list_enter, io_ctx.get_pool_name().c_str(),
              io_ctx.get_id());
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(images, 0, sizeof(*images) * *size);
   std::vector<librbd::image_spec_t> cpp_image_specs;
   int r = librbd::api::Image<>::list_images(io_ctx, &cpp_image_specs);
@@ -3205,6 +3303,7 @@ extern "C" int rbd_trash_list(rados_ioctx_t p, rbd_trash_image_info_t *entries,
   TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
   tracepoint(librbd, trash_list_enter,
              io_ctx.get_pool_name().c_str(), io_ctx.get_id());
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(entries, 0, sizeof(*entries) * *num_entries);
 
   vector<librbd::trash_image_info_t> cpp_entries;
@@ -3298,8 +3397,8 @@ extern "C" int rbd_trash_restore(rados_ioctx_t p, const char *id,
   TracepointProvider::initialize<tracepoint_traits>(get_cct(io_ctx));
   tracepoint(librbd, trash_undelete_enter, io_ctx.get_pool_name().c_str(),
              io_ctx.get_id(), id, name);
-  int r = librbd::api::Trash<>::restore(io_ctx, RBD_TRASH_IMAGE_SOURCE_USER,
-                                        id, name);
+  int r = librbd::api::Trash<>::restore(
+      io_ctx, librbd::api::Trash<>::RESTORE_SOURCE_WHITELIST, id, name);
   tracepoint(librbd, trash_undelete_exit, r);
   return r;
 }
@@ -3891,9 +3990,7 @@ extern "C" int rbd_open_by_id(rados_ioctx_t p, const char *id,
              ictx->id.c_str(), ictx->snap_name.c_str(), ictx->read_only);
 
   int r = ictx->state->open(0);
-  if (r < 0) {
-    delete ictx;
-  } else {
+  if (r >= 0) {
     *image = (rbd_image_t)ictx;
   }
   tracepoint(librbd, open_image_exit, r);
@@ -3966,9 +4063,7 @@ extern "C" int rbd_open_by_id_read_only(rados_ioctx_t p, const char *id,
              ictx->id.c_str(), ictx->snap_name.c_str(), ictx->read_only);
 
   int r = ictx->state->open(0);
-  if (r < 0) {
-    delete ictx;
-  } else {
+  if (r >= 0) {
     *image = (rbd_image_t)ictx;
   }
   tracepoint(librbd, open_image_exit, r);
@@ -4228,7 +4323,7 @@ extern "C" int rbd_get_block_name_prefix(rbd_image_t image, char *prefix,
 extern "C" int64_t rbd_get_data_pool_id(rbd_image_t image)
 {
   librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx *>(image);
-  return ictx->data_ctx.get_id();
+  return librbd::api::Image<>::get_data_pool_id(ictx);
 }
 
 extern "C" int rbd_get_parent_info(rbd_image_t image,
@@ -4352,6 +4447,7 @@ extern "C" int rbd_get_parent(rbd_image_t image,
   int r = librbd::api::Image<>::get_parent(ictx, &cpp_parent_image,
                                            &cpp_parent_snap);
   if (r < 0) {
+    // FIPS zeroization audit 20191117: these memsets are not security related.
     memset(parent_image, 0, sizeof(rbd_linked_image_spec_t));
     memset(parent_snap, 0, sizeof(rbd_snap_spec_t));
   } else {
@@ -4453,6 +4549,7 @@ extern "C" int rbd_lock_get_owners(rbd_image_t image,
 {
   librbd::ImageCtx *ictx = reinterpret_cast<librbd::ImageCtx*>(image);
   tracepoint(librbd, lock_get_owners_enter, ictx);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(lock_owners, 0, sizeof(*lock_owners) * *max_lock_owners);
   std::list<std::string> lock_owner_list;
   int r = librbd::lock_get_owners(ictx, lock_mode, &lock_owner_list);
@@ -4578,6 +4675,7 @@ extern "C" int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,
     tracepoint(librbd, snap_list_exit, -EINVAL, 0);
     return -EINVAL;
   }
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(snaps, 0, sizeof(*snaps) * *max_snaps);
 
   int r = librbd::snap_list(ictx, cpp_snaps);
@@ -4770,6 +4868,7 @@ extern "C" int rbd_list_children2(rbd_image_t image,
   auto ictx = reinterpret_cast<librbd::ImageCtx*>(image);
   tracepoint(librbd, list_children_enter, ictx, ictx->name.c_str(),
              ictx->snap_name.c_str(), ictx->read_only);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(children, 0, sizeof(*children) * *max_children);
 
   if (!max_children) {
@@ -4832,6 +4931,7 @@ extern "C" int rbd_list_children3(rbd_image_t image,
   auto ictx = reinterpret_cast<librbd::ImageCtx*>(image);
   tracepoint(librbd, list_children_enter, ictx, ictx->name.c_str(),
              ictx->snap_name.c_str(), ictx->read_only);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(images, 0, sizeof(*images) * *max_images);
 
   std::vector<librbd::linked_image_spec_t> cpp_children;
@@ -4866,6 +4966,7 @@ extern "C" int rbd_list_descendants(rbd_image_t image,
                                     size_t *max_images)
 {
   auto ictx = reinterpret_cast<librbd::ImageCtx*>(image);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(images, 0, sizeof(*images) * *max_images);
 
   std::vector<librbd::linked_image_spec_t> cpp_children;
@@ -5142,7 +5243,7 @@ extern "C" ssize_t rbd_writesame(rbd_image_t image, uint64_t ofs, size_t len,
 
   bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
   if (discard_zero && mem_is_zero(buf, data_len)) {
-    int r = ictx->io_work_queue->discard(ofs, len, 0);
+    int r = ictx->io_work_queue->write_zeroes(ofs, len, 0, op_flags);
     tracepoint(librbd, writesame_exit, r);
     return r;
   }
@@ -5152,6 +5253,13 @@ extern "C" ssize_t rbd_writesame(rbd_image_t image, uint64_t ofs, size_t len,
   int r = ictx->io_work_queue->writesame(ofs, len, std::move(bl), op_flags);
   tracepoint(librbd, writesame_exit, r);
   return r;
+}
+
+extern "C" ssize_t rbd_write_zeroes(rbd_image_t image, uint64_t ofs, size_t len,
+                                    int zero_flags, int op_flags)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return ictx->io_work_queue->write_zeroes(ofs, len, zero_flags, op_flags);
 }
 
 extern "C" ssize_t rbd_compare_and_write(rbd_image_t image,
@@ -5365,7 +5473,8 @@ extern "C" int rbd_aio_writesame(rbd_image_t image, uint64_t off, size_t len,
 
   bool discard_zero = ictx->config.get_val<bool>("rbd_discard_on_zeroed_write_same");
   if (discard_zero && mem_is_zero(buf, data_len)) {
-    ictx->io_work_queue->aio_discard(get_aio_completion(comp), off, len, 0);
+    ictx->io_work_queue->aio_write_zeroes(get_aio_completion(comp), off, len, 0,
+                                          op_flags, true);
     tracepoint(librbd, aio_writesame_exit, 0);
     return 0;
   }
@@ -5375,6 +5484,18 @@ extern "C" int rbd_aio_writesame(rbd_image_t image, uint64_t off, size_t len,
   ictx->io_work_queue->aio_writesame(get_aio_completion(comp), off, len,
                                      std::move(bl), op_flags);
   tracepoint(librbd, aio_writesame_exit, 0);
+  return 0;
+}
+
+extern "C" int rbd_aio_write_zeroes(rbd_image_t image, uint64_t off, size_t len,
+                                    rbd_completion_t c, int zero_flags,
+                                    int op_flags)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  librbd::RBD::AioCompletion *comp = (librbd::RBD::AioCompletion *)c;
+
+  ictx->io_work_queue->aio_write_zeroes(
+    get_aio_completion(comp), off, len, zero_flags, op_flags, true);
   return 0;
 }
 
@@ -5868,6 +5989,7 @@ extern "C" int rbd_group_image_list(rados_ioctx_t group_p,
   tracepoint(librbd, group_image_list_enter,
              group_ioctx.get_pool_name().c_str(),
 	     group_ioctx.get_id(), group_name);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(images, 0, sizeof(*images) * *image_size);
 
   if (group_image_info_size != sizeof(rbd_group_image_info_t)) {
@@ -5999,6 +6121,7 @@ extern "C" int rbd_group_snap_list(rados_ioctx_t group_p,
   TracepointProvider::initialize<tracepoint_traits>(get_cct(group_ioctx));
   tracepoint(librbd, group_snap_list_enter, group_ioctx.get_pool_name().c_str(),
 	     group_ioctx.get_id(), group_name);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(snaps, 0, sizeof(*snaps) * *snaps_size);
 
   if (group_snap_info_size != sizeof(rbd_group_snap_info_t)) {
@@ -6168,6 +6291,7 @@ extern "C" int rbd_watchers_list(rbd_image_t image,
   librbd::ImageCtx *ictx = (librbd::ImageCtx*)image;
 
   tracepoint(librbd, list_watchers_enter, ictx, ictx->name.c_str(), ictx->snap_name.c_str(), ictx->read_only);
+  // FIPS zeroization audit 20191117: this memset is not security related.
   memset(watchers, 0, sizeof(*watchers) * *max_watchers);
   int r = librbd::list_watchers(ictx, watcher_list);
   if (r < 0) {

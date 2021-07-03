@@ -42,6 +42,9 @@
 #include "common/PluginRegistry.h"
 #include "common/valgrind.h"
 #include "include/spinlock.h"
+#ifndef WITH_SEASTAR
+#include "mon/MonMap.h"
+#endif
 
 using ceph::bufferlist;
 using ceph::HeartbeatMap;
@@ -196,6 +199,9 @@ public:
   {
     while (1) {
       std::unique_lock l(_lock);
+      if (_exit_thread) {
+        break;
+      }
 
       if (_cct->_conf->heartbeat_interval) {
         auto interval = ceph::make_timespan(_cct->_conf->heartbeat_interval);
@@ -550,6 +556,7 @@ void CephContext::do_command(std::string_view command, const cmdmap_t& cmdmap,
 	f->dump_string("error", "syntax error: 'config get <var>'");
       } else {
 	char buf[4096];
+	// FIPS zeroization audit 20191115: this memset is not security related.
 	memset(buf, 0, sizeof(buf));
 	char *tmp = buf;
 	int r = _conf.get_val(var.c_str(), &tmp, sizeof(buf));
@@ -946,5 +953,14 @@ void CephContext::notify_post_fork()
   ceph::spin_unlock(&_fork_watchers_lock);
   for (auto &&t : _fork_watchers)
     t->handle_post_fork();
+}
+
+void CephContext::set_mon_addrs(const MonMap& mm) {
+  std::vector<entity_addrvec_t> mon_addrs;
+  for (auto& i : mm.mon_info) {
+    mon_addrs.push_back(i.second.public_addrs);
+  }
+
+  set_mon_addrs(mon_addrs);
 }
 #endif	// WITH_SEASTAR

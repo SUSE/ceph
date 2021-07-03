@@ -42,6 +42,7 @@ std::string handle_pyerror()
     PyObject *exc, *val, *tb;
     object formatted_list, formatted;
     PyErr_Fetch(&exc, &val, &tb);
+    PyErr_NormalizeException(&exc, &val, &tb);
     handle<> hexc(exc), hval(allow_null(val)), htb(allow_null(tb));
     object traceback(import("traceback"));
     if (!tb) {
@@ -55,6 +56,7 @@ std::string handle_pyerror()
           std::stringstream ss;
           ss << PyString_AsString(name_attr) << ": " << PyString_AsString(val);
           Py_XDECREF(name_attr);
+          ss << "\nError processing exception object: " << peek_pyerror();
           return ss.str();
         }
     } else {
@@ -68,6 +70,7 @@ std::string handle_pyerror()
           std::stringstream ss;
           ss << PyString_AsString(name_attr) << ": " << PyString_AsString(val);
           Py_XDECREF(name_attr);
+          ss << "\nError processing exception object: " << peek_pyerror();
           return ss.str();
         }
     }
@@ -144,16 +147,6 @@ void PyModuleConfig::set_config(
 {
   const std::string global_key = PyModule::config_prefix
                                    + module_name + "/" + key;
-  {
-    std::lock_guard l(lock);
-
-    if (val) {
-      config[global_key] = *val;
-    } else {
-      config.erase(global_key);
-    }
-  }
-
   Command set_cmd;
   {
     std::ostringstream cmd_json;
@@ -161,23 +154,33 @@ void PyModuleConfig::set_config(
     jf.open_object_section("cmd");
     if (val) {
       jf.dump_string("prefix", "config set");
-      jf.dump_string("who", "mgr");
-      jf.dump_string("name", global_key);
       jf.dump_string("value", *val);
     } else {
       jf.dump_string("prefix", "config rm");
-      jf.dump_string("name", "mgr");
-      jf.dump_string("key", global_key);
     }
+    jf.dump_string("who", "mgr");
+    jf.dump_string("name", global_key);
     jf.close_section();
     jf.flush(cmd_json);
     set_cmd.run(monc, cmd_json.str());
   }
   set_cmd.wait();
 
-  if (set_cmd.r != 0) {
-    dout(0) << "`config set mgr" << global_key << " " << val << "` failed: "
-      << cpp_strerror(set_cmd.r) << dendl;
+  if (set_cmd.r == 0) {
+    std::lock_guard l(lock);
+    if (val) {
+      config[global_key] = *val;
+    } else {
+      config.erase(global_key);
+    }
+  } else {
+    if (val) {
+      dout(0) << "`config set mgr " << global_key << " " << val << "` failed: "
+        << cpp_strerror(set_cmd.r) << dendl;
+    } else {
+      dout(0) << "`config rm mgr " << global_key << "` failed: "
+        << cpp_strerror(set_cmd.r) << dendl;
+    }
     dout(0) << "mon returned " << set_cmd.r << ": " << set_cmd.outs << dendl;
   }
 }
@@ -337,15 +340,15 @@ int PyModule::load(PyThreadState *pMainThreadState)
       PySys_SetArgv(1, (char**)argv);
 #endif
       // Configure sys.path to include mgr_module_path
-      string paths = (":" + g_conf().get_val<std::string>("mgr_module_path") +
-		      ":" + get_site_packages());
+      string paths = (g_conf().get_val<std::string>("mgr_module_path") + ":" +
+                      get_site_packages() + ':');
 #if PY_MAJOR_VERSION >= 3
-      wstring sys_path(Py_GetPath() + wstring(begin(paths), end(paths)));
+      wstring sys_path(wstring(begin(paths), end(paths)) + Py_GetPath());
       PySys_SetPath(const_cast<wchar_t*>(sys_path.c_str()));
       dout(10) << "Computed sys.path '"
 	       << string(begin(sys_path), end(sys_path)) << "'" << dendl;
 #else
-      string sys_path(Py_GetPath() + paths);
+      string sys_path(paths + Py_GetPath());
       PySys_SetPath(const_cast<char*>(sys_path.c_str()));
       dout(10) << "Computed sys.path '" << sys_path << "'" << dendl;
 #endif

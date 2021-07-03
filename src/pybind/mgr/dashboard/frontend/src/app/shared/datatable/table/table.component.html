@@ -34,7 +34,8 @@
     <!-- end search -->
 
     <!-- pagination limit -->
-    <div class="input-group dataTables_paginate">
+    <div class="input-group dataTables_paginate"
+         *ngIf="limit">
       <input class="form-control"
              type="number"
              min="1"
@@ -86,7 +87,7 @@
                  [cssClasses]="paginationClasses"
                  [selectionType]="selectionType"
                  [selected]="selection.selected"
-                 (select)="onSelect()"
+                 (select)="onSelect($event)"
                  [sorts]="userConfig.sorts"
                  (sort)="changeSorting($event)"
                  [columns]="tableColumns"
@@ -165,7 +166,7 @@
 <ng-template #perSecondTpl
              let-row="row"
              let-value="value">
-  {{ value }} /s
+  {{ value | dimless }} /s
 </ng-template>
 
 <ng-template #executingTpl
@@ -175,10 +176,16 @@
      *ngIf="row.cdExecuting"></i>
   {{ value }}
   <span *ngIf="row.cdExecuting"
-        class="text-muted italic">({{ row.cdExecuting }}... )</span>
+        class="text-muted italic">({{ row.cdExecuting }})</span>
 </ng-template>
 
 <ng-template #classAddingTpl
              let-value="value">
   <span class="{{useCustomClass(value)}}">{{ value }}</span>
+</ng-template>
+
+<ng-template #mapTpl
+             let-column="column"
+             let-value="value">
+  <span>{{ value | map:column?.customTemplateConfig }}</span>
 </ng-template>

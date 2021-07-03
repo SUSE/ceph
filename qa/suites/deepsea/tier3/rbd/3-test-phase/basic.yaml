@@ -1,0 +1,9 @@
+tasks:
+- exec:
+    client.0:
+      - "ceph_test_librbd"
+      - "chmod a+r /etc/ceph/ceph.client.admin.keyring"
+- workunit:
+    clients:
+      client.0:
+        - rbd/cli_generic.sh

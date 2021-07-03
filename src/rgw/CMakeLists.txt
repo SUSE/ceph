@@ -19,6 +19,10 @@ function(gperf_generate input output)
     )
 endfunction()
 
+if(Boost_VERSION VERSION_GREATER 1.73)
+  add_definitions(-DBOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT)
+endif()
+
 set(librgw_common_srcs
   services/svc_finisher.cc
   services/svc_notify.cc
@@ -37,11 +41,13 @@ set(librgw_common_srcs
   rgw_aio_throttle.cc
   rgw_auth.cc
   rgw_auth_s3.cc
+  rgw_arn.cc
   rgw_basic_types.cc
   rgw_bucket.cc
   rgw_cache.cc
   rgw_common.cc
   rgw_compression.cc
+  rgw_etag_verifier.cc
   rgw_cors.cc
   rgw_cors_s3.cc
   rgw_dencoder.cc
@@ -69,6 +75,8 @@ set(librgw_common_srcs
   rgw_sync_module_log.cc
   rgw_sync_module_pubsub.cc
   rgw_pubsub_push.cc
+  rgw_notify.cc
+  rgw_notify_event_type.cc
   rgw_sync_module_pubsub_rest.cc
   rgw_sync_log_trim.cc
   rgw_sync_trace.cc
@@ -93,6 +101,8 @@ set(librgw_common_srcs
   rgw_rest_conn.cc
   rgw_rest_log.cc
   rgw_rest_metadata.cc
+  rgw_rest_pubsub.cc
+  rgw_rest_pubsub_common.cc
   rgw_rest_realm.cc
   rgw_rest_role.cc
   rgw_rest_s3.cc
@@ -113,16 +123,38 @@ set(librgw_common_srcs
   rgw_zone.cc
   rgw_sts.cc
   rgw_rest_sts.cc
-  rgw_perf_counters.cc)
+  rgw_perf_counters.cc
+  rgw_object_lock.cc
+  rgw_rest_iam.cc
+  rgw_url.cc)
+
+if(WITH_RADOSGW_AMQP_ENDPOINT)
+  find_package(RabbitMQ REQUIRED)
+endif()
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  find_package(RDKafka 1.9.2)
+  if(NOT RDKafka_FOUND)
+      set(WITH_RADOSGW_KAFKA_ENDPOINT OFF CACHE BOOL "Rados Gateway's pubsub support for Kafka push endpoint" FORCE)
+      message(STATUS "Disabling Kafka endpoint support")
+  endif()
+endif()
 
 if(WITH_RADOSGW_AMQP_ENDPOINT)
   list(APPEND librgw_common_srcs rgw_amqp.cc)
+endif()
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  list(APPEND librgw_common_srcs rgw_kafka.cc)
 endif()
 
 add_library(rgw_common OBJECT ${librgw_common_srcs})
 
 target_include_directories(rgw_common SYSTEM PUBLIC "services")
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
+
+if(WITH_BOOST_CONTEXT)
+  target_include_directories(rgw_common PRIVATE
+    $<TARGET_PROPERTY:spawn,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 
 if(WITH_LTTNG)
   # rgw/rgw_op.cc includes "tracing/rgw_op.h"
@@ -176,10 +208,6 @@ add_dependencies(rgw_a civetweb_h)
 target_include_directories(rgw_a PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
 target_include_directories(rgw_a SYSTEM PUBLIC "../rapidjson/include")
 
-if(WITH_RADOSGW_AMQP_ENDPOINT)
-  find_package(RabbitMQ REQUIRED)
-endif()
-
 target_link_libraries(rgw_a
   PRIVATE
   librados cls_otp_client cls_lock_client cls_rgw_client cls_refcount_client
@@ -196,13 +224,17 @@ if(WITH_CURL_OPENSSL)
 endif()
 
 if(WITH_BOOST_CONTEXT)
-  target_link_libraries(rgw_a PRIVATE Boost::coroutine Boost::context)
+  target_link_libraries(rgw_a PUBLIC spawn)
 endif()
 
 set(rgw_libs rgw_a)
 if(WITH_RADOSGW_AMQP_ENDPOINT)
   # used by rgw_amqp.cc
   list(APPEND rgw_libs RabbitMQ::RabbitMQ)
+endif()
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  # used by rgw_kafka.cc
+  list(APPEND rgw_libs RDKafka::RDKafka)
 endif()
 
 set(radosgw_srcs
@@ -230,6 +262,9 @@ target_link_libraries(radosgw_a PRIVATE ${rgw_libs})
 if(WITH_RADOSGW_BEAST_FRONTEND AND WITH_RADOSGW_BEAST_OPENSSL)
   # used by rgw_asio_frontend.cc
   target_link_libraries(radosgw_a PRIVATE OpenSSL::SSL)
+endif()
+if(WITH_BOOST_CONTEXT)
+  target_link_libraries(radosgw_a PUBLIC spawn)
 endif()
 
 add_executable(radosgw rgw_main.cc)
@@ -311,6 +346,10 @@ if(WITH_RADOSGW_AMQP_ENDPOINT)
   target_link_libraries(rgw PRIVATE RabbitMQ::RabbitMQ)
 endif()
 
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  target_link_libraries(rgw PRIVATE RDKafka::RDKafka)
+endif()
+
 set_target_properties(rgw PROPERTIES OUTPUT_NAME rgw VERSION 2.0.0
   SOVERSION 2)
 install(TARGETS rgw DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -346,8 +385,11 @@ install(TARGETS rgw_admin_user DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(WITH_RADOSGW_AMQP_ENDPOINT)
   target_link_libraries(rgw_admin_user PRIVATE RabbitMQ::RabbitMQ)
 endif()
+if(WITH_RADOSGW_KAFKA_ENDPOINT)
+  target_link_libraries(rgw_admin_user PRIVATE RDKafka::RDKafka)
+endif()
 if(WITH_BOOST_CONTEXT)
-  target_link_libraries(rgw_admin_user PRIVATE Boost::coroutine Boost::context)
+  target_link_libraries(rgw_admin_user PRIVATE spawn)
 endif()
 
 if(WITH_TESTS)
@@ -368,3 +410,9 @@ if(WITH_TESTS)
     ceph_rgw_multiparser
     DESTINATION bin)
 endif(WITH_TESTS)
+
+install(PROGRAMS
+  rgw-gap-list
+  rgw-gap-list-comparator
+  rgw-orphan-list
+  DESTINATION bin)

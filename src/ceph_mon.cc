@@ -61,6 +61,7 @@ int obtain_monmap(MonitorDBStore &store, bufferlist &bl)
   dout(10) << __func__ << dendl;
   /*
    * the monmap may be in one of three places:
+   *  'mon_sync:temp_newer_monmap' - stashed newer map for bootstrap
    *  'monmap:<latest_version_no>' - the monmap we'd really like to have
    *  'mon_sync:latest_monmap'     - last monmap backed up for the last sync
    *  'mkfs:monmap'                - a monmap resulting from mkfs
@@ -74,6 +75,24 @@ int obtain_monmap(MonitorDBStore &store, bufferlist &bl)
       ceph_assert(bl.length() > 0);
       dout(10) << __func__ << " read last committed monmap ver "
                << latest_ver << dendl;
+
+      // see if there is stashed newer map (see bootstrap())
+      if (store.exists("mon_sync", "temp_newer_monmap")) {
+	bufferlist bl2;
+	int err = store.get("mon_sync", "temp_newer_monmap", bl2);
+	ceph_assert(err == 0);
+	ceph_assert(bl2.length() > 0);
+	MonMap b;
+	b.decode(bl2);
+	if (b.get_epoch() > latest_ver) {
+	  dout(10) << __func__ << " using stashed monmap " << b.get_epoch()
+		   << " instead" << dendl;
+	  bl.claim(bl2);
+	} else {
+	  dout(10) << __func__ << " ignoring stashed monmap " << b.get_epoch()
+		   << dendl;
+	}
+      }
       return 0;
     }
   }
@@ -88,6 +107,14 @@ int obtain_monmap(MonitorDBStore &store, bufferlist &bl)
       dout(10) << __func__ << " read backup monmap" << dendl;
       return 0;
     }
+  }
+
+  if (store.exists("mon_sync", "temp_newer_monmap")) {
+    dout(10) << __func__ << " found temp_newer_monmap" << dendl;
+    int err = store.get("mon_sync", "temp_newer_monmap", bl);
+    ceph_assert(err == 0);
+    ceph_assert(bl.length() > 0);
+    return 0;
   }
 
   if (store.exists("mkfs", "monmap")) {
@@ -194,8 +221,10 @@ entity_addrvec_t make_mon_addrs(entity_addr_t a)
   } else if (a.get_port() == CEPH_MON_PORT_LEGACY) {
     a.set_type(entity_addr_t::TYPE_LEGACY);
     addrs.v.push_back(a);
-  } else {
+  } else if (a.get_type() == entity_addr_t::TYPE_ANY) {
     a.set_type(entity_addr_t::TYPE_MSGR2);
+    addrs.v.push_back(a);
+  } else {
     addrs.v.push_back(a);
   }
   return addrs;

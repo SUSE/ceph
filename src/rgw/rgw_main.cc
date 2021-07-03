@@ -38,6 +38,12 @@
 #include "rgw_frontend.h"
 #include "rgw_http_client_curl.h"
 #include "rgw_perf_counters.h"
+#ifdef WITH_RADOSGW_AMQP_ENDPOINT
+#include "rgw_amqp.h"
+#endif
+#ifdef WITH_RADOSGW_KAFKA_ENDPOINT
+#include "rgw_kafka.h"
+#endif
 #if defined(WITH_RADOSGW_BEAST_FRONTEND)
 #include "rgw_asio_frontend.h"
 #endif /* WITH_RADOSGW_BEAST_FRONTEND */
@@ -357,17 +363,32 @@ int main(int argc, const char **argv)
   // S3 website mode is a specialization of S3
   const bool s3website_enabled = apis_map.count("s3website") > 0;
   const bool sts_enabled = apis_map.count("sts") > 0;
+  const bool iam_enabled = apis_map.count("iam") > 0;
+  const bool pubsub_enabled = apis_map.count("pubsub") > 0;
   // Swift API entrypoint could placed in the root instead of S3
   const bool swift_at_root = g_conf()->rgw_swift_url_prefix == "/";
   if (apis_map.count("s3") > 0 || s3website_enabled) {
     if (! swift_at_root) {
       rest.register_default_mgr(set_logging(rest_filter(store, RGW_REST_S3,
-                                                        new RGWRESTMgr_S3(s3website_enabled, sts_enabled))));
+                                                        new RGWRESTMgr_S3(s3website_enabled, sts_enabled, iam_enabled, pubsub_enabled))));
     } else {
       derr << "Cannot have the S3 or S3 Website enabled together with "
            << "Swift API placed in the root of hierarchy" << dendl;
       return EINVAL;
     }
+  }
+
+  if (pubsub_enabled) {
+#ifdef WITH_RADOSGW_AMQP_ENDPOINT
+    if (!rgw::amqp::init(cct.get())) {
+        dout(1) << "ERROR: failed to initialize AMQP manager" << dendl;
+    }
+#endif
+#ifdef WITH_RADOSGW_KAFKA_ENDPOINT
+    if (!rgw::kafka::init(cct.get())) {
+        dout(1) << "ERROR: failed to initialize Kafka manager" << dendl;
+    }
+#endif
   }
 
   if (apis_map.count("swift") > 0) {
@@ -420,8 +441,10 @@ int main(int argc, const char **argv)
 
   /* Initialize the registry of auth strategies which will coordinate
    * the dynamic reconfiguration. */
+  rgw::auth::ImplicitTenants implicit_tenant_context{g_conf()};
+  g_conf().add_observer(&implicit_tenant_context);
   auto auth_registry = \
-    rgw::auth::StrategyRegistry::create(g_ceph_context, store);
+    rgw::auth::StrategyRegistry::create(g_ceph_context, implicit_tenant_context, store);
 
   /* Header custom behavior */
   rest.register_x_headers(g_conf()->rgw_log_http_headers);
@@ -541,11 +564,12 @@ int main(int argc, const char **argv)
 
   // add a watcher to respond to realm configuration changes
   RGWPeriodPusher pusher(store);
-  RGWFrontendPauser pauser(fes, &pusher);
-  RGWRealmReloader reloader(store, service_map_meta, &pauser);
+  RGWFrontendPauser pauser(fes, implicit_tenant_context, &pusher);
+  auto reloader = std::make_unique<RGWRealmReloader>(store,
+						     service_map_meta, &pauser);
 
   RGWRealmWatcher realm_watcher(g_ceph_context, store->svc.zone->get_realm());
-  realm_watcher.add_watcher(RGWRealmNotify::Reload, reloader);
+  realm_watcher.add_watcher(RGWRealmNotify::Reload, *reloader);
   realm_watcher.add_watcher(RGWRealmNotify::ZonesNeedPeriod, pusher);
 
 #if defined(HAVE_SYS_PRCTL_H)
@@ -557,6 +581,8 @@ int main(int argc, const char **argv)
   wait_shutdown();
 
   derr << "shutting down" << dendl;
+
+  reloader.reset(); // stop the realm reloader
 
   for (list<RGWFrontend *>::iterator liter = fes.begin(); liter != fes.end();
        ++liter) {
@@ -593,6 +619,13 @@ int main(int argc, const char **argv)
   rgw_shutdown_resolver();
   rgw_http_client_cleanup();
   rgw::curl::cleanup_curl();
+#ifdef WITH_RADOSGW_AMQP_ENDPOINT
+  rgw::amqp::shutdown();
+#endif
+#ifdef WITH_RADOSGW_KAFKA_ENDPOINT
+  rgw::kafka::shutdown();
+#endif
+  g_conf().remove_observer(&implicit_tenant_context);
 
   rgw_perf_stop(g_ceph_context);
 

@@ -218,6 +218,7 @@ write_image ${CLUSTER1} ${POOL} ${force_promote_image} 100
 write_image ${CLUSTER2} ${POOL} ${force_promote_image} 100
 
 testlog "TEST: cloned images"
+testlog " - default"
 parent_image=test_parent
 parent_snap=snap
 create_image ${CLUSTER2} ${PARENT_POOL} ${parent_image}
@@ -240,7 +241,42 @@ wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${clone_image}
 wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${clone_image} 'up+replaying' 'master_position'
 compare_images ${POOL} ${clone_image}
 
+testlog " - clone v1"
 clone_image ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap} ${POOL} ${clone_image}1
+
+clone_image ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap} ${POOL} \
+            ${clone_image}_v1 --rbd-default-clone-format 1
+test $(get_clone_format ${CLUSTER2} ${POOL} ${clone_image}_v1) = 1
+wait_for_image_replay_started ${CLUSTER1} ${POOL} ${clone_image}_v1
+test $(get_clone_format ${CLUSTER1} ${POOL} ${clone_image}_v1) = 1
+
+testlog " - clone v2"
+parent_snap=snap_v2
+create_snapshot ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+clone_image ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap} ${POOL} \
+            ${clone_image}_v2 --rbd-default-clone-format 2
+test $(get_clone_format ${CLUSTER2} ${POOL} ${clone_image}_v2) = 2
+wait_for_image_replay_started ${CLUSTER1} ${POOL} ${clone_image}_v2
+test $(get_clone_format ${CLUSTER1} ${POOL} ${clone_image}_v2) = 2
+
+remove_snapshot ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+test_snap_moved_to_trash ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+wait_for_snap_moved_to_trash ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap}
+remove_image_retry ${CLUSTER2} ${POOL} ${clone_image}_v2
+wait_for_image_present ${CLUSTER1} ${POOL} ${clone_image}_v2 'deleted'
+test_snap_removed_from_trash ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+wait_for_snap_removed_from_trash ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap}
+
+testlog " - clone v2 non-primary"
+create_snapshot ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+wait_for_snap_present ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap}
+clone_image ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap} ${POOL} \
+            ${clone_image}_v2 --rbd-default-clone-format 2
+remove_snapshot ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+test_snap_removed_from_trash ${CLUSTER2} ${PARENT_POOL} ${parent_image} ${parent_snap}
+wait_for_snap_moved_to_trash ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap}
+remove_image_retry ${CLUSTER1} ${POOL} ${clone_image}_v2
+wait_for_snap_removed_from_trash ${CLUSTER1} ${PARENT_POOL} ${parent_image} ${parent_snap}
 
 testlog "TEST: data pool"
 dp_image=test_data_pool
@@ -304,6 +340,35 @@ for i in ${image2} ${image4}; do
   wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${i}
   compare_images ${POOL} ${i}
 done
+
+testlog "TEST: remove mirroring pool"
+pool=pool_to_remove
+for cluster in ${CLUSTER1} ${CLUSTER2}; do
+    CEPH_ARGS='' ceph --cluster ${cluster} osd pool create ${pool} 16 16
+    CEPH_ARGS='' rbd --cluster ${cluster} pool init ${pool}
+    rbd --cluster ${cluster} mirror pool enable ${pool} pool
+done
+rbd --cluster ${CLUSTER1} mirror pool peer add ${pool} ${CLUSTER2}
+rbd --cluster ${CLUSTER2} mirror pool peer add ${pool} ${CLUSTER1}
+rdp_image=test_remove_data_pool
+create_image ${CLUSTER2} ${pool} ${image} 128
+create_image ${CLUSTER2} ${POOL} ${rdp_image} 128 --data-pool ${pool}
+write_image ${CLUSTER2} ${pool} ${image} 100
+write_image ${CLUSTER2} ${POOL} ${rdp_image} 100
+wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${pool} ${image}
+wait_for_status_in_pool_dir ${CLUSTER1} ${pool} ${image} 'up+replaying' 'master_position'
+wait_for_replay_complete ${CLUSTER1} ${CLUSTER2} ${POOL} ${rdp_image}
+wait_for_status_in_pool_dir ${CLUSTER1} ${POOL} ${rdp_image} 'up+replaying' 'master_position'
+for cluster in ${CLUSTER1} ${CLUSTER2}; do
+    CEPH_ARGS='' ceph --cluster ${cluster} osd pool rm ${pool} ${pool} --yes-i-really-really-mean-it
+done
+remove_image_retry ${CLUSTER2} ${POOL} ${rdp_image}
+wait_for_image_present ${CLUSTER1} ${POOL} ${rdp_image} 'deleted'
+for i in 0 1 2 4 8 8 8 8 16 16; do
+    sleep $i
+    admin_daemons "${CLUSTER2}" rbd mirror status ${pool}/${image} || break
+done
+admin_daemons "${CLUSTER2}" rbd mirror status ${pool}/${image} && false
 
 testlog "TEST: snapshot rename"
 snap_name='snap_rename'

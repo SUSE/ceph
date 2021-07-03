@@ -15,6 +15,32 @@
 namespace librbd {
 namespace api {
 
+namespace {
+
+void update_pool_timestamp(librados::IoCtx& io_ctx) {
+  CephContext *cct = (CephContext *)io_ctx.cct();
+
+  auto now = ceph_clock_now();
+  std::string cmd =
+    R"({)"
+      R"("prefix": "config set", )"
+      R"("who": "global", )"
+      R"("name": "rbd_config_pool_override_update_timestamp", )"
+      R"("value": ")" + stringify(now.sec()) + R"(")"
+    R"(})";
+
+  librados::Rados rados(io_ctx);
+  bufferlist in_bl;
+  std::string ss;
+  int r = rados.mon_command(cmd, in_bl, nullptr, &ss);
+  if (r < 0) {
+    lderr(cct) << "failed to notify clients of pool config update: "
+               << cpp_strerror(r) << dendl;
+  }
+}
+
+} // anonymous namespace
+
 template <typename I>
 int PoolMetadata<I>::get(librados::IoCtx& io_ctx,
                      const std::string &key, std::string *value) {
@@ -34,6 +60,8 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
                          const std::string &value) {
   CephContext *cct = (CephContext *)io_ctx.cct();
 
+  bool need_update_pool_timestamp = false;
+
   std::string config_key;
   if (util::is_metadata_config_override(key, &config_key)) {
     if (!librbd::api::Config<I>::is_option_name(io_ctx, config_key)) {
@@ -47,6 +75,8 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
                  << dendl;
       return -EINVAL;
     }
+
+    need_update_pool_timestamp = true;
   }
 
   ceph::bufferlist bl;
@@ -57,6 +87,10 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
     lderr(cct) << "failed setting metadata " << key << ": " << cpp_strerror(r)
                << dendl;
     return r;
+  }
+
+  if (need_update_pool_timestamp) {
+    update_pool_timestamp(io_ctx);
   }
 
   return 0;
@@ -83,6 +117,11 @@ int PoolMetadata<I>::remove(librados::IoCtx& io_ctx, const std::string &key) {
     lderr(cct) << "failed removing metadata " << key << ": " << cpp_strerror(r)
                << dendl;
     return r;
+  }
+
+  std::string config_key;
+  if (util::is_metadata_config_override(key, &config_key)) {
+    update_pool_timestamp(io_ctx);
   }
 
   return 0;

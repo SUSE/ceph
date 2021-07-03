@@ -350,13 +350,24 @@ int PGBackend::objects_list_partial(
 
   while (!_next.is_max() && ls->size() < (unsigned)min) {
     vector<ghobject_t> objects;
-    r = store->collection_list(
-      ch,
-      _next,
-      ghobject_t::get_max(),
-      max - ls->size(),
-      &objects,
-      &_next);
+    if (HAVE_FEATURE(parent->min_upacting_features(),
+                     OSD_FIXED_COLLECTION_LIST)) {
+      r = store->collection_list(
+        ch,
+        _next,
+        ghobject_t::get_max(),
+        max - ls->size(),
+        &objects,
+        &_next);
+    } else {
+      r = store->collection_list_legacy(
+        ch,
+        _next,
+        ghobject_t::get_max(),
+        max - ls->size(),
+        &objects,
+        &_next);
+    }
     if (r != 0) {
       derr << __func__ << " list collection " << ch << " got: " << cpp_strerror(r) << dendl;
       break;
@@ -385,13 +396,25 @@ int PGBackend::objects_list_range(
 {
   ceph_assert(ls);
   vector<ghobject_t> objects;
-  int r = store->collection_list(
-    ch,
-    ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    INT_MAX,
-    &objects,
-    NULL);
+  int r;
+  if (HAVE_FEATURE(parent->min_upacting_features(),
+                   OSD_FIXED_COLLECTION_LIST)) {
+    r = store->collection_list(
+      ch,
+      ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      INT_MAX,
+      &objects,
+      NULL);
+  } else {
+    r = store->collection_list_legacy(
+      ch,
+      ghobject_t(start, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      ghobject_t(end, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+      INT_MAX,
+      &objects,
+      NULL);
+  }
   ls->reserve(objects.size());
   for (vector<ghobject_t>::iterator i = objects.begin();
        i != objects.end();
@@ -755,6 +778,18 @@ bool PGBackend::be_compare_scrub_objects(
 		<< " != size " << auth.size
 		<< " from shard " << auth_shard;
     obj_result.set_size_mismatch();
+  }
+  // If the replica is too large and we didn't already count it for this object
+  //
+  if (candidate.size > cct->_conf->osd_max_object_size
+      && !obj_result.has_size_too_large()) {
+    if (error != CLEAN)
+      errorstream << ", ";
+    error = FOUND_ERROR;
+    errorstream << "size " << candidate.size
+		<< " > " << cct->_conf->osd_max_object_size
+		<< " is too large";
+    obj_result.set_size_too_large();
   }
   for (map<string,bufferptr>::const_iterator i = auth.attrs.begin();
        i != auth.attrs.end();
@@ -1258,10 +1293,16 @@ void PGBackend::be_omap_checks(const map<pg_shard_t,ScrubMap*> &maps,
       omap_stats.omap_bytes += obj.object_omap_bytes;
       omap_stats.omap_keys += obj.object_omap_keys;
       if (obj.large_omap_object_found) {
+        pg_t pg;
+        auto osdmap = get_osdmap();
+        osdmap->map_to_pg(k.pool, k.oid.name, k.get_key(), k.nspace, &pg);
+        pg_t mpg = osdmap->raw_pg_to_pg(pg);
         omap_stats.large_omap_objects++;
-        warnstream << "Large omap object found. Object: " << k << " Key count: "
-                   << obj.large_omap_object_key_count << " Size (bytes): "
-                   << obj.large_omap_object_value_size << '\n';
+        warnstream << "Large omap object found. Object: " << k
+                   << " PG: " << pg << " (" << mpg << ")"
+                   << " Key count: " << obj.large_omap_object_key_count
+                   << " Size (bytes): " << obj.large_omap_object_value_size
+                   << '\n';
         break;
       }
     }

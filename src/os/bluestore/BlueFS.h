@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <limits>
 
 #include "bluefs_types.h"
 #include "common/RefCountedObj.h"
@@ -49,6 +50,8 @@ enum {
   l_bluefs_read_bytes,
   l_bluefs_read_prefetch_count,
   l_bluefs_read_prefetch_bytes,
+  l_bluefs_read_zeros_candidate,
+  l_bluefs_read_zeros_errors,
 
   l_bluefs_last,
 };
@@ -63,7 +66,33 @@ public:
     uint64_t min_size,
     uint64_t size,
     PExtentVector& extents) = 0;
+  /** Reports amount of space that can be transferred to BlueFS.
+   * This gives either current state, when alloc_size is currently used
+   * BlueFS's size, or simulation when alloc_size is different.
+   * @params
+   * alloc_size - allocation unit size to check
+   */
+  virtual size_t available_freespace(uint64_t alloc_size) = 0;
 };
+
+class BlueFSVolumeSelector {
+public:
+  typedef std::vector<std::pair<std::string, uint64_t>> paths;
+
+  virtual ~BlueFSVolumeSelector() {
+  }
+  virtual void* get_hint_by_device(uint8_t dev) const = 0;
+  virtual void* get_hint_by_dir(const string& dirname) const = 0;
+
+  virtual void add_usage(void* file_hint, const bluefs_fnode_t& fnode) = 0;
+  virtual void sub_usage(void* file_hint, const bluefs_fnode_t& fnode) = 0;
+  virtual void add_usage(void* file_hint, uint64_t fsize) = 0;
+  virtual void sub_usage(void* file_hint, uint64_t fsize) = 0;
+  virtual uint8_t select_prefer_bdev(void* hint) = 0;
+  virtual void get_paths(const std::string& base, paths& res) const = 0;
+  virtual void dump(ostream& sout) = 0;
+};
+class BlueFS;
 
 class BlueFS {
 public:
@@ -94,6 +123,8 @@ public:
     std::atomic_int num_readers, num_writers;
     std::atomic_int num_reading;
 
+    void* vselector_hint = nullptr;
+
     File()
       : RefCountedObject(NULL, 0),
 	refs(0),
@@ -102,7 +133,8 @@ public:
 	deleted(false),
 	num_readers(0),
 	num_writers(0),
-	num_reading(0)
+	num_reading(0),
+        vselector_hint(nullptr)
       {}
     ~File() override {
       ceph_assert(num_readers.load() == 0);
@@ -179,11 +211,15 @@ public:
     // to use buffer_appender exclusively here (e.g., it's notion of
     // offset will remain accurate).
     void append(const char *buf, size_t len) {
+      uint64_t l0 = buffer.length();
+      ceph_assert(l0 + len <= std::numeric_limits<unsigned>::max());
       buffer_appender.append(buf, len);
     }
 
     // note: used internally only, for ino 1 or 0.
-    void append(bufferlist& bl) {
+    void append(ceph::buffer::list& bl) {
+      uint64_t l0 = buffer.length();
+      ceph_assert(l0 + bl.length() <= std::numeric_limits<unsigned>::max());
       buffer.claim_append(bl);
     }
 
@@ -299,11 +335,18 @@ private:
   vector<IOContext*> ioc;                     ///< IOContexts for bdevs
   vector<interval_set<uint64_t> > block_all;  ///< extents in bdev we own
   vector<Allocator*> alloc;                   ///< allocators for bdevs
+  vector<uint64_t> alloc_size;                ///< alloc size for each device
   vector<interval_set<uint64_t>> pending_release; ///< extents to release
 
   BlockDevice::aio_callback_t discard_cb[3]; //discard callbacks for each dev
 
   BlueFSDeviceExpander* slow_dev_expander = nullptr;
+  std::unique_ptr<BlueFSVolumeSelector> vselector;
+
+  class SocketHook;
+  SocketHook* asok_hook = nullptr;
+  // used to trigger zeros into read (debug / verify)
+  std::atomic<uint64_t> inject_read_zeros{0};
 
   void _init_logger();
   void _shutdown_logger();
@@ -317,7 +360,10 @@ private:
   FileRef _get_file(uint64_t ino);
   void _drop_link(FileRef f);
 
-  int _get_slow_device_id() { return bdev[BDEV_SLOW] ? BDEV_SLOW : BDEV_DB; }
+  unsigned _get_slow_device_id() {
+    return bdev[BDEV_SLOW] ? BDEV_SLOW : BDEV_DB;
+  }
+  const char* get_device_name(unsigned id);
   int _expand_slow_device(uint64_t min_size, PExtentVector& extents);
   int _allocate(uint8_t bdev, uint64_t len,
 		bluefs_fnode_t* node);
@@ -325,7 +371,8 @@ private:
 				 PExtentVector* extents);
 
   int _flush_range(FileWriter *h, uint64_t offset, uint64_t length);
-  int _flush(FileWriter *h, bool force);
+  int _flush(FileWriter *h, bool focce, std::unique_lock<ceph::mutex>& l);
+  int _flush(FileWriter *h, bool force, bool *flushed = nullptr);
   int _fsync(FileWriter *h, std::unique_lock<ceph::mutex>& l);
 
 #ifdef HAVE_LIBAIO
@@ -365,14 +412,14 @@ private:
   int _preallocate(FileRef f, uint64_t off, uint64_t len);
   int _truncate(FileWriter *h, uint64_t off);
 
-  int _read(
+  int64_t _read(
     FileReader *h,   ///< [in] read from here
     FileReaderBuffer *buf, ///< [in] reader state
     uint64_t offset, ///< [in] offset
     size_t len,      ///< [in] this many bytes
     bufferlist *outbl,   ///< [out] optional: reference the result here
     char *out);      ///< [out] optional: or copy it here
-  int _read_random(
+  int64_t _read_random(
     FileReader *h,   ///< [in] read from here
     uint64_t offset, ///< [in] offset
     size_t len,      ///< [in] this many bytes
@@ -396,7 +443,8 @@ private:
     return 4096;
   }
 
-  void _add_block_extent(unsigned bdev, uint64_t offset, uint64_t len);
+  void _add_block_extent(unsigned bdev, uint64_t offset, uint64_t len,
+                         bool skip=false);
 
 public:
   BlueFS(CephContext* cct);
@@ -405,13 +453,16 @@ public:
   // the super is always stored on bdev 0
   int mkfs(uuid_d osd_uuid);
   int mount();
-  void umount();
+  void umount(bool avoid_compact = false);
   int prepare_new_device(int id);
   
   int log_dump();
 
   void collect_metadata(map<string,string> *pm, unsigned skip_bdev_id);
   void get_devices(set<string> *ls);
+  uint64_t get_alloc_size(int id) {
+    return alloc_size[id];
+  }
   int fsck();
 
   int device_migrate_to_new(
@@ -468,24 +519,37 @@ public:
   int lock_file(const string& dirname, const string& filename, FileLock **p);
   int unlock_file(FileLock *l);
 
-  void flush_log();
   void compact_log();
 
   /// sync any uncommitted state to disk
-  void sync_metadata();
+  void sync_metadata(bool avoid_compact);
+  /// test and compact log, if necessary
+  void _maybe_compact_log(std::unique_lock<ceph::mutex>& l);
 
   void set_slow_device_expander(BlueFSDeviceExpander* a) {
     slow_dev_expander = a;
   }
+  void set_volume_selector(BlueFSVolumeSelector* s) {
+    vselector.reset(s);
+  }
+  void dump_volume_selector(ostream& sout) {
+    vselector->dump(sout);
+  }
+  void get_vselector_paths(const std::string& base,
+                           BlueFSVolumeSelector::paths& res) const {
+    return vselector->get_paths(base, res);
+  }
+
   int add_block_device(unsigned bdev, const string& path, bool trim,
 		       bool shared_with_bluestore=false);
   bool bdev_support_label(unsigned id);
   uint64_t get_block_device_size(unsigned bdev);
 
   /// gift more block space
-  void add_block_extent(unsigned bdev, uint64_t offset, uint64_t len) {
+  void add_block_extent(unsigned bdev, uint64_t offset, uint64_t len,
+                        bool skip=false) {
     std::unique_lock l(lock);
-    _add_block_extent(bdev, offset, len);
+    _add_block_extent(bdev, offset, len, skip);
     int r = _flush_and_sync_log(l);
     ceph_assert(r == 0);
   }
@@ -497,9 +561,31 @@ public:
   // handler for discard event
   void handle_discard(unsigned dev, interval_set<uint64_t>& to_release);
 
-  void flush(FileWriter *h) {
-    std::lock_guard l(lock);
-    _flush(h, false);
+  void flush(FileWriter *h, bool force = false) {
+    std::unique_lock l(lock);
+    int r = _flush(h, force, l);
+    ceph_assert(r == 0);
+  }
+
+  void append_try_flush(FileWriter *h, const char* buf, size_t len) {
+    size_t max_size = 1ull << 30; // cap to 1GB
+    while (len > 0) {
+      bool need_flush = true;
+      auto l0 = h->buffer.length();
+      if (l0 < max_size) {
+	size_t l = std::min(len, max_size - l0);
+	h->append(buf, l);
+	buf += l;
+	len -= l;
+	need_flush = h->buffer.length() >= cct->_conf->bluefs_min_flush_size;
+      }
+      if (need_flush) {
+	flush(h, true);
+	// make sure we've made any progress with flush hence the
+	// loop doesn't iterate forever
+	ceph_assert(h->buffer.length() < max_size);
+      }
+    }
   }
   void flush_range(FileWriter *h, uint64_t offset, uint64_t length) {
     std::lock_guard l(lock);
@@ -507,16 +593,18 @@ public:
   }
   int fsync(FileWriter *h) {
     std::unique_lock l(lock);
-    return _fsync(h, l);
+    int r = _fsync(h, l);
+    _maybe_compact_log(l);
+    return r;
   }
-  int read(FileReader *h, FileReaderBuffer *buf, uint64_t offset, size_t len,
+  int64_t read(FileReader *h, FileReaderBuffer *buf, uint64_t offset, size_t len,
 	   bufferlist *outbl, char *out) {
     // no need to hold the global lock here; we only touch h and
     // h->file, and read vs write or delete is already protected (via
     // atomics and asserts).
     return _read(h, buf, offset, len, outbl, out);
   }
-  int read_random(FileReader *h, uint64_t offset, size_t len,
+  int64_t read_random(FileReader *h, uint64_t offset, size_t len,
 		  char *out) {
     // no need to hold the global lock here; we only touch h and
     // h->file, and read vs write or delete is already protected (via
@@ -535,7 +623,60 @@ public:
     std::lock_guard l(lock);
     return _truncate(h, offset);
   }
+  int do_replay_recovery_read(FileReader *log,
+			      size_t log_pos,
+			      size_t read_offset,
+			      size_t read_len,
+			      bufferlist* bl);
 
+  /// test purpose methods
+  const PerfCounters* get_perf_counters() const {
+    return logger;
+  }
+
+private:
+  // Wrappers for BlockDevice::read(...) and BlockDevice::read_random(...)
+  // They are used for checking if read values are all 0, and reread if so.
+  int read(uint8_t ndev, uint64_t off, uint64_t len,
+	   ceph::buffer::list *pbl, IOContext *ioc, bool buffered);
+  int read_random(uint8_t ndev, uint64_t off, uint64_t len, char *buf, bool buffered);
+};
+
+class OriginalVolumeSelector : public BlueFSVolumeSelector {
+  uint64_t wal_total;
+  uint64_t db_total;
+  uint64_t slow_total;
+
+public:
+  OriginalVolumeSelector(
+    uint64_t _wal_total,
+    uint64_t _db_total,
+    uint64_t _slow_total)
+    : wal_total(_wal_total), db_total(_db_total), slow_total(_slow_total) {}
+
+  void* get_hint_by_device(uint8_t dev) const override;
+  void* get_hint_by_dir(const string& dirname) const override;
+
+  void add_usage(void* hint, const bluefs_fnode_t& fnode) override {
+    // do nothing
+    return;
+  }
+  void sub_usage(void* hint, const bluefs_fnode_t& fnode) override {
+    // do nothing
+    return;
+  }
+  void add_usage(void* hint, uint64_t fsize) override {
+    // do nothing
+    return;
+  }
+  void sub_usage(void* hint, uint64_t fsize) override {
+    // do nothing
+    return;
+  }
+
+  uint8_t select_prefer_bdev(void* hint) override;
+  void get_paths(const std::string& base, paths& res) const override;
+  void dump(ostream& sout) override;
 };
 
 #endif

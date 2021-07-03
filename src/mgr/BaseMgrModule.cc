@@ -123,10 +123,18 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
 
   char *cmd_json = nullptr;
   char *tag = nullptr;
+  char *inbuf_ptr = nullptr;
+  Py_ssize_t inbuf_len = 0;
+  bufferlist inbuf = {};
+
   PyObject *completion = nullptr;
-  if (!PyArg_ParseTuple(args, "Ossss:ceph_send_command",
-        &completion, &type, &name, &cmd_json, &tag)) {
+  if (!PyArg_ParseTuple(args, "Ossssz#:ceph_send_command",
+        &completion, &type, &name, &cmd_json, &tag, &inbuf_ptr, &inbuf_len)) {
     return nullptr;
+  }
+
+  if (inbuf_ptr) {
+    inbuf.append(inbuf_ptr, (unsigned)inbuf_len);
   }
 
   auto set_fn = PyObject_GetAttrString(completion, "complete");
@@ -162,7 +170,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     self->py_modules->get_monc().start_mon_command(
         name,
         {cmd_json},
-        {},
+        inbuf,
         &command_c->outbl,
         &command_c->outs,
         new C_OnFinisher(c, &self->py_modules->cmd_finisher));
@@ -182,7 +190,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     self->py_modules->get_objecter().osd_command(
         osd_id,
         {cmd_json},
-        {},
+        inbuf,
         &tid,
         &command_c->outbl,
         &command_c->outs,
@@ -191,7 +199,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     int r = self->py_modules->get_client().mds_command(
         name,
         {cmd_json},
-        {},
+        inbuf,
         &command_c->outbl,
         &command_c->outs,
         new C_OnFinisher(command_c, &self->py_modules->cmd_finisher));
@@ -217,7 +225,7 @@ ceph_send_command(BaseMgrModule *self, PyObject *args)
     self->py_modules->get_objecter().pg_command(
         pgid,
         {cmd_json},
-        {},
+        inbuf,
         &tid,
         &command_c->outbl,
         &command_c->outs,
@@ -296,9 +304,9 @@ ceph_set_health_checks(BaseMgrModule *self, PyObject *args)
 	  severity = HEALTH_ERR;
 	}
       } else if (ks == "summary") {
-	if (!PyString_Check(v)) {
+	if (!PyString_Check(v) && !PyUnicode_Check(v)) {
 	  derr << __func__ << " check " << check_name
-	       << " summary value not string" << dendl;
+	       << " summary value not [unicode] string" << dendl;
 	  continue;
 	}
 	summary = PyString_AsString(v);
@@ -310,9 +318,9 @@ ceph_set_health_checks(BaseMgrModule *self, PyObject *args)
 	}
 	for (int k = 0; k < PyList_Size(v); ++k) {
 	  PyObject *di = PyList_GET_ITEM(v, k);
-	  if (!PyString_Check(di)) {
+	  if (!PyString_Check(di) && !PyUnicode_Check(di)) {
 	    derr << __func__ << " check " << check_name
-		 << " detail item " << k << " not a string" << dendl;
+		 << " detail item " << k << " not a [unicode] string" << dendl;
 	    continue;
 	  }
 	  detail.push_back(PyString_AsString(di));
@@ -337,7 +345,7 @@ ceph_set_health_checks(BaseMgrModule *self, PyObject *args)
   self->py_modules->set_health_checks(self->this_module->get_name(),
                                       std::move(out_checks));
   PyEval_RestoreThread(tstate);
-  
+
   Py_RETURN_NONE;
 }
 
@@ -562,7 +570,13 @@ ceph_get_version(BaseMgrModule *self, PyObject *args)
 }
 
 static PyObject *
-ceph_get_context(BaseMgrModule *self, PyObject *args)
+ceph_get_release_name(BaseMgrModule *self, PyObject *args)
+{
+  return PyString_FromString(ceph_release_to_str());
+}
+
+static PyObject *
+ceph_get_context(BaseMgrModule *self)
 {
   return self->py_modules->get_context();
 }
@@ -1001,6 +1015,42 @@ ceph_get_osd_perf_counters(BaseMgrModule *self, PyObject *args)
   return self->py_modules->get_osd_perf_counters(query_id);
 }
 
+static PyObject*
+ceph_is_authorized(BaseMgrModule *self, PyObject *args)
+{
+  PyObject *args_dict = NULL;
+  if (!PyArg_ParseTuple(args, "O:ceph_is_authorized", &args_dict)) {
+    return nullptr;
+  }
+
+  if (!PyDict_Check(args_dict)) {
+    derr << __func__ << " arg not a dict" << dendl;
+    Py_RETURN_FALSE;
+  }
+
+  std::map<std::string, std::string> arguments;
+
+  PyObject *args_list = PyDict_Items(args_dict);
+  for (int i = 0; i < PyList_Size(args_list); ++i) {
+    PyObject *kv = PyList_GET_ITEM(args_list, i);
+
+    char *arg_key = nullptr;
+    char *arg_value = nullptr;
+    if (!PyArg_ParseTuple(kv, "ss:pair", &arg_key, &arg_value)) {
+      derr << __func__ << " dict item " << i << " not a size 2 tuple" << dendl;
+      continue;
+    }
+
+    arguments[arg_key] = arg_value;
+  }
+
+  if (self->this_module->is_authorized(arguments)) {
+    Py_RETURN_TRUE;
+  }
+
+  Py_RETURN_FALSE;
+}
+
 PyMethodDef BaseMgrModule_methods[] = {
   {"_ceph_get", (PyCFunction)ceph_state_get, METH_VARARGS,
    "Get a cluster object"},
@@ -1056,8 +1106,11 @@ PyMethodDef BaseMgrModule_methods[] = {
   {"_ceph_cluster_log", (PyCFunction)ceph_cluster_log, METH_VARARGS,
    "Emit a cluster log message"},
 
-  {"_ceph_get_version", (PyCFunction)ceph_get_version, METH_VARARGS,
+  {"_ceph_get_version", (PyCFunction)ceph_get_version, METH_NOARGS,
    "Get the ceph version of this process"},
+
+  {"_ceph_get_release_name", (PyCFunction)ceph_get_release_name, METH_NOARGS,
+   "Get the ceph release name of this process"},
 
   {"_ceph_get_context", (PyCFunction)ceph_get_context, METH_NOARGS,
     "Get a CephContext* in a python capsule"},
@@ -1090,6 +1143,9 @@ PyMethodDef BaseMgrModule_methods[] = {
 
   {"_ceph_get_osd_perf_counters", (PyCFunction)ceph_get_osd_perf_counters,
     METH_VARARGS, "Get osd perf counters"},
+
+  {"_ceph_is_authorized", (PyCFunction)ceph_is_authorized,
+    METH_VARARGS, "Verify the current session caps are valid"},
 
   {NULL, NULL, 0, NULL}
 };

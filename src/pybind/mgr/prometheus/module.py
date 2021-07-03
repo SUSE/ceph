@@ -11,6 +11,11 @@ import time
 from mgr_module import MgrModule, MgrStandbyModule, CommandResult, PG_STATES
 from mgr_util import get_default_addr
 from rbd import RBD
+from collections import namedtuple
+try:
+    from typing import Optional
+except:
+    pass
 
 # Defaults for the Prometheus HTTP server.  Can also set in config-key
 # see https://github.com/prometheus/prometheus/wiki/Default-port-allocations
@@ -42,12 +47,10 @@ os._exit = os_exit_noop
 # to access things in class Module from subclass Root.  Because
 # it's a dict, the writer doesn't need to declare 'global' for access
 
-_global_instance = {'plugin': None}
-
-
-def global_instance():
-    assert _global_instance['plugin'] is not None
-    return _global_instance['plugin']
+_global_instance = None  # type: Optional[Module]
+cherrypy.config.update({
+    'response.headers.server': 'Ceph-Prometheus'
+})
 
 
 def health_status_to_number(status):
@@ -62,7 +65,8 @@ def health_status_to_number(status):
 DF_CLUSTER = ['total_bytes', 'total_used_bytes', 'total_used_raw_bytes']
 
 DF_POOL = ['max_avail', 'stored', 'stored_raw', 'objects', 'dirty',
-           'quota_bytes', 'quota_objects', 'rd', 'rd_bytes', 'wr', 'wr_bytes']
+           'quota_bytes', 'quota_objects', 'rd', 'rd_bytes', 'wr', 'wr_bytes',
+           'compress_bytes_used', 'compress_under_bytes']
 
 OSD_POOL_STATS = ('recovering_objects_per_sec', 'recovering_bytes_per_sec',
                   'recovering_keys_per_sec', 'num_objects_recovered',
@@ -106,6 +110,11 @@ DISK_OCCUPATION = ('ceph_daemon', 'device', 'db_device',
                    'wal_device', 'instance')
 
 NUM_OBJECTS = ['degraded', 'misplaced', 'unfound']
+
+alert_metric = namedtuple('alert_metric', 'name description')
+HEALTH_CHECKS = [
+    alert_metric('SLOW_OPS', 'OSD or Monitor requests taking a long time to process' ),
+]
 
 
 class Metric(object):
@@ -176,6 +185,58 @@ class Metric(object):
         return expfmt
 
 
+class MetricCollectionThread(threading.Thread):
+    def __init__(self, module):
+        # type: (Module) -> None
+        self.mod = module
+        self.active = True
+        self.event = threading.Event()
+        super(MetricCollectionThread, self).__init__(target=self.collect)
+
+    def collect(self):
+        self.mod.log.info('starting metric collection thread')
+        while self.active:
+            self.mod.log.debug('collecting cache in thread')
+            if self.mod.have_mon_connection():
+                start_time = time.time()
+
+                try:
+                    data = self.mod.collect()
+                except:
+                    # Log any issues encountered during the data collection and continue
+                    self.mod.log.exception("failed to collect metrics:")
+                    self.event.wait(self.mod.scrape_interval)
+                    continue
+
+                duration = time.time() - start_time
+
+                sleep_time = self.mod.scrape_interval - duration
+                if sleep_time < 0:
+                    self.mod.log.warning(
+                        'Collecting data took more time than configured scrape interval. '
+                        'This possibly results in stale data. Please check the '
+                        '`stale_cache_strategy` configuration option. '
+                        'Collecting data took {:.2f} seconds but scrape interval is configured '
+                        'to be {:.0f} seconds.'.format(
+                            duration,
+                            self.mod.scrape_interval,
+                        )
+                    )
+                    sleep_time = 0
+
+                with self.mod.collect_lock:
+                    self.mod.collect_cache = data
+                    self.mod.collect_time = duration
+
+                self.event.wait(sleep_time)
+            else:
+                self.mod.log.error('No MON connection')
+                self.event.wait(self.mod.scrape_interval)
+
+    def stop(self):
+        self.active = False
+        self.event.set()
+
 class Module(MgrModule):
     COMMANDS = [
         {
@@ -189,17 +250,22 @@ class Module(MgrModule):
         {'name': 'server_addr'},
         {'name': 'server_port'},
         {'name': 'scrape_interval'},
+        {'name': 'stale_cache_strategy'},
         {'name': 'rbd_stats_pools'},
-        {'name': 'rbd_stats_pools_refresh_interval'},
+        {'name': 'rbd_stats_pools_refresh_interval', 'type': 'int', 'default': 300},
     ]
+
+    STALE_CACHE_FAIL = 'fail'
+    STALE_CACHE_RETURN = 'return'
 
     def __init__(self, *args, **kwargs):
         super(Module, self).__init__(*args, **kwargs)
         self.metrics = self._setup_static_metrics()
         self.shutdown_event = threading.Event()
-        self.collect_lock = threading.RLock()
+        self.collect_lock = threading.Lock()
         self.collect_time = 0
-        self.collect_timeout = 5.0
+        self.scrape_interval = 15.0
+        self.stale_cache_strategy = self.STALE_CACHE_FAIL
         self.collect_cache = None
         self.rbd_stats = {
             'pools': {},
@@ -219,7 +285,9 @@ class Module(MgrModule):
                                  'desc': 'RBD image reads latency (msec)'},
             },
         }
-        _global_instance['plugin'] = self
+        global _global_instance
+        _global_instance = self
+        self.metrics_thread = MetricCollectionThread(_global_instance)
 
     def _setup_static_metrics(self):
         metrics = {}
@@ -317,7 +385,8 @@ class Module(MgrModule):
         metrics['pg_total'] = Metric(
             'gauge',
             'pg_total',
-            'PG Total Count'
+            'PG Total Count per Pool',
+            ('pool_id',)
         )
 
         metrics['scrape_duration_seconds'] = Metric(
@@ -362,7 +431,8 @@ class Module(MgrModule):
             metrics[path] = Metric(
                 'gauge',
                 path,
-                'PG {}'.format(state),
+                'PG {} per pool'.format(state),
+                ('pool_id',)
             )
         for state in DF_CLUSTER:
             path = 'cluster_{}'.format(state)
@@ -387,13 +457,60 @@ class Module(MgrModule):
                 'Number of {} objects'.format(state),
             )
 
+        for check in HEALTH_CHECKS:
+            path = 'healthcheck_{}'.format(check.name.lower())
+            metrics[path] = Metric(
+                'gauge',
+                path,
+                check.description,
+            )
+
         return metrics
 
     def get_health(self):
+
+        def _get_value(message, delim=' ', word_pos=0):
+            """Extract value from message (default is 1st field)"""
+            v_str = message.split(delim)[word_pos]
+            if v_str.isdigit():
+                return int(v_str), 0
+            return 0, 1
+
         health = json.loads(self.get('health')['json'])
+        # set overall health
         self.metrics['health_status'].set(
             health_status_to_number(health['status'])
         )
+
+        # Examine the health to see if any health checks triggered need to
+        # become a metric.
+        active_healthchecks = health.get('checks', {})
+        active_names = active_healthchecks.keys()
+
+        for check in HEALTH_CHECKS:
+            path = 'healthcheck_{}'.format(check.name.lower())
+
+            if path in self.metrics:
+
+                if check.name in active_names:
+                    check_data = active_healthchecks[check.name]
+                    message = check_data['summary'].get('message', '')
+                    v, err = 0, 0
+
+                    if check.name == "SLOW_OPS":
+                        # 42 slow ops, oldest one blocked for 12 sec, daemons [osd.0, osd.3] have slow ops.
+                        v, err = _get_value(message)
+
+                    if err:
+                        self.log.error("healthcheck {} message format is incompatible and has been dropped".format(check.name))
+                        # drop the metric, so it's no longer emitted
+                        del self.metrics[path]
+                        continue
+                    else:
+                        self.metrics[path].set(v)
+                else:
+                    # health check is not active, so give it a default of 0
+                    self.metrics[path].set(0)
 
     def get_pool_stats(self):
         # retrieve pool stats to provide per pool recovery metrics
@@ -452,7 +569,7 @@ class Module(MgrModule):
             host_version = servers.get((id_, 'mon'), ('', ''))
             self.metrics['mon_metadata'].set(1, (
                 'mon.{}'.format(id_), host_version[0],
-                mon['public_addr'].split(':')[0], rank,
+                mon['public_addr'].rsplit(':', 1)[0], rank,
                 host_version[1]
             ))
             in_quorum = int(rank in mon_status['quorum'])
@@ -476,18 +593,17 @@ class Module(MgrModule):
             host_version = servers.get((mgr, 'mgr'), ('', ''))
             if mgr == active:
                 _state = 1
-                ceph_release = host_version[1].split()[-2] # e.g. nautilus
             else:
                 _state = 0
-            
+
             self.metrics['mgr_metadata'].set(1, (
                 'mgr.{}'.format(mgr), host_version[0],
                 host_version[1]
             ))
             self.metrics['mgr_status'].set(_state, (
-                'mgr.{}'.format(mgr), 
+                'mgr.{}'.format(mgr),
             ))
-        always_on_modules = mgr_map['always_on_modules'][ceph_release]
+        always_on_modules = mgr_map['always_on_modules'].get(self.release_name, [])
         active_modules = list(always_on_modules)
         active_modules.extend(mgr_map['modules'])
 
@@ -505,32 +621,23 @@ class Module(MgrModule):
             self.metrics['mgr_module_can_run'].set(_can_run, (mod_name,))
 
     def get_pg_status(self):
-        # TODO add per pool status?
-        pg_status = self.get('pg_status')
 
-        # Set total count of PGs, first
-        self.metrics['pg_total'].set(pg_status['num_pgs'])
+        pg_summary = self.get('pg_summary')
 
-        reported_states = {}
-        for pg in pg_status['pgs_by_state']:
-            for state in pg['state_name'].split('+'):
-                reported_states[state] = reported_states.get(
-                    state, 0) + pg['count']
+        for pool in pg_summary['by_pool']:
+            num_by_state = dict((state, 0) for state in PG_STATES)
+            num_by_state['total'] = 0
 
-        for state in reported_states:
-            path = 'pg_{}'.format(state)
-            try:
-                self.metrics[path].set(reported_states[state])
-            except KeyError:
-                self.log.warn("skipping pg in unknown state {}".format(state))
+            for state_name, count in pg_summary['by_pool'][pool].items():
+                for state in state_name.split('+'):
+                    num_by_state[state] += count
+                num_by_state['total'] += count
 
-        for state in PG_STATES:
-            if state not in reported_states:
+            for state, num in num_by_state.items():
                 try:
-                    self.metrics['pg_{}'.format(state)].set(0)
+                    self.metrics["pg_{}".format(state)].set(num, (pool,))
                 except KeyError:
-                    self.log.warn(
-                        "skipping pg in unknown state {}".format(state))
+                    self.log.warn("skipping pg in unknown state {}".format(state))
 
     def get_osd_stats(self):
         osd_stats = self.get('osd_stats')
@@ -565,8 +672,8 @@ class Module(MgrModule):
             # id can be used to link osd metrics and metadata
             id_ = osd['osd']
             # collect osd metadata
-            p_addr = osd['public_addr'].split(':')[0]
-            c_addr = osd['cluster_addr'].split(':')[0]
+            p_addr = osd['public_addr'].rsplit(':', 1)[0]
+            c_addr = osd['cluster_addr'].rsplit(':', 1)[0]
             if p_addr == "-" or c_addr == "-":
                 self.log.info(
                     "Missing address metadata for osd {0}, skipping occupation"
@@ -616,6 +723,7 @@ class Module(MgrModule):
                     'osd.{}'.format(id_),
                 ))
 
+            osd_dev_node = None
             if obj_store == "filestore":
                 # collect filestore backend device
                 osd_dev_node = osd_metadata.get(
@@ -696,21 +804,44 @@ class Module(MgrModule):
 
         # Parse rbd_stats_pools option, which is a comma or space separated
         # list of pool[/namespace] entries. If no namespace is specifed the
-        # stats are collected for every namespace in the pool.
+        # stats are collected for every namespace in the pool. The wildcard
+        # '*' can be used to indicate all pools or namespaces
         pools_string = self.get_localized_module_option('rbd_stats_pools', '')
-        pools = {}
-        for p in [x for x in re.split('[\s,]+', pools_string) if x]:
-            s = p.split('/', 2)
+        pool_keys = []
+        for x in re.split('[\s,]+', pools_string):
+            if not x:
+                continue
+
+            s = x.split('/', 2)
             pool_name = s[0]
-            if len(s) == 1:
+            namespace_name = None
+            if len(s) == 2:
+                namespace_name = s[1]
+
+            if pool_name == "*":
+                # collect for all pools
+                osd_map = self.get('osd_map')
+                for pool in osd_map['pools']:
+                    if 'rbd' not in pool.get('application_metadata', {}):
+                        continue
+                    pool_keys.append((pool['pool_name'], namespace_name))
+            else:
+                pool_keys.append((pool_name, namespace_name))
+
+        pools = {}
+        for pool_key in pool_keys:
+            pool_name = pool_key[0]
+            namespace_name = pool_key[1]
+            if not namespace_name or namespace_name == "*":
                 # empty set means collect for all namespaces
                 pools[pool_name] = set()
                 continue
+
             if pool_name not in pools:
                 pools[pool_name] = set()
             elif not pools[pool_name]:
                 continue
-            pools[pool_name].add(s[1])
+            pools[pool_name].add(namespace_name)
 
         rbd_stats_pools = {}
         for pool_id in list(self.rbd_stats['pools']):
@@ -902,6 +1033,33 @@ class Module(MgrModule):
             del self.rbd_stats['query']
         self.rbd_stats['pools'].clear()
 
+    def add_fixed_name_metrics(self):
+        """
+        Add fixed name metrics from existing ones that have details in their names
+        that should be in labels (not in name).
+        For backward compatibility, a new fixed name metric is created (instead of replacing)
+        and details are put in new labels.
+        Intended for RGW sync perf. counters but extendable as required.
+        See: https://tracker.ceph.com/issues/45311
+        """
+        new_metrics = {}
+        for metric_path in self.metrics.keys():
+            # Address RGW sync perf. counters.
+            match = re.search('^data-sync-from-(.*)\.', metric_path)
+            if match:
+                new_path = re.sub('from-([^.]*)', 'from-zone', metric_path)
+                if new_path not in new_metrics:
+                    new_metrics[new_path] = Metric(
+                        self.metrics[metric_path].mtype,
+                        new_path,
+                        self.metrics[metric_path].desc,
+                        self.metrics[metric_path].labelnames + ('source_zone',)
+                    )
+                for label_values, value in self.metrics[metric_path].value.items():
+                    new_metrics[new_path].set(value, label_values + (match.group(1),))
+
+        self.metrics.update(new_metrics)
+
     def collect(self):
         # Clear the metrics before scraping
         for k in self.metrics.keys():
@@ -966,6 +1124,7 @@ class Module(MgrModule):
                         )
                     self.metrics[path].set(value, labels)
 
+        self.add_fixed_name_metrics()
         self.get_rbd_stats()
 
         _end_time = time.time()
@@ -991,7 +1150,7 @@ class Module(MgrModule):
                 # TODO use get_config_prefix or get_config here once
                 # https://github.com/ceph/ceph/pull/20458 is merged
                 result = CommandResult("")
-                global_instance().send_command(
+                _global_instance.send_command(
                     result, "mon", '',
                     json.dumps({
                         "prefix": "config-key get",
@@ -1000,7 +1159,7 @@ class Module(MgrModule):
                     "")
                 r, outb, outs = result.wait()
                 if r != 0:
-                    global_instance().log.error("Failed to retrieve port for mgr {}: {}".format(id_, outs))
+                    _global_instance.log.error("Failed to retrieve port for mgr {}: {}".format(id_, outs))
                     targets.append('{}:{}'.format(hostname, DEFAULT_PORT))
                 else:
                     port = json.loads(outb)
@@ -1047,33 +1206,54 @@ class Module(MgrModule):
 
             @cherrypy.expose
             def metrics(self):
-                instance = global_instance()
                 # Lock the function execution
-                try:
-                    instance.collect_lock.acquire()
-                    return self._metrics(instance)
-                finally:
-                    instance.collect_lock.release()
+                with _global_instance.collect_lock:
+                    return self._metrics(_global_instance)
 
             @staticmethod
             def _metrics(instance):
-                # Return cached data if available and collected before the cache times out
-                if instance.collect_cache and time.time() - instance.collect_time < instance.collect_timeout:
+                # Return cached data if available
+                if not instance.collect_cache:
+                    raise cherrypy.HTTPError(503, 'No cached data available yet')
+
+                def respond():
                     cherrypy.response.headers['Content-Type'] = 'text/plain'
                     return instance.collect_cache
 
-                if instance.have_mon_connection():
-                    instance.collect_cache = None
-                    instance.collect_time = time.time()
-                    instance.collect_cache = instance.collect()
-                    cherrypy.response.headers['Content-Type'] = 'text/plain'
-                    return instance.collect_cache
-                else:
-                    raise cherrypy.HTTPError(503, 'No MON connection')
+                if instance.collect_time < instance.scrape_interval:
+                    # Respond if cache isn't stale
+                    return respond()
+
+                if instance.stale_cache_strategy == instance.STALE_CACHE_RETURN:
+                    # Respond even if cache is stale
+                    instance.log.info(
+                        'Gathering data took {:.2f} seconds, metrics are stale for {:.2f} seconds, '
+                        'returning metrics from stale cache.'.format(
+                            instance.collect_time,
+                            instance.collect_time - instance.scrape_interval
+                        )
+                    )
+                    return respond()
+
+                if instance.stale_cache_strategy == instance.STALE_CACHE_FAIL:
+                    # Fail if cache is stale
+                    msg = (
+                        'Gathering data took {:.2f} seconds, metrics are stale for {:.2f} seconds, '
+                        'returning "service unavailable".'.format(
+                            instance.collect_time,
+                            instance.collect_time - instance.scrape_interval,
+                        )
+                    )
+                    instance.log.error(msg)
+                    raise cherrypy.HTTPError(503, msg)
 
         # Make the cache timeout for collecting configurable
-        self.collect_timeout = self.get_localized_module_option(
-            'scrape_interval', 5.0)
+        self.scrape_interval = float(self.get_localized_module_option('scrape_interval', 15.0))
+
+        self.stale_cache_strategy = self.get_localized_module_option('stale_cache_strategy', 'log')
+        if self.stale_cache_strategy not in [self.STALE_CACHE_FAIL,
+                                             self.STALE_CACHE_RETURN]:
+            self.stale_cache_strategy = self.STALE_CACHE_FAIL
 
         server_addr = self.get_localized_module_option(
             'server_addr', get_default_addr())
@@ -1084,10 +1264,12 @@ class Module(MgrModule):
             (server_addr, server_port)
         )
 
+        self.metrics_thread.start()
+
         # Publish the URI that others may use to access the service we're
         # about to start serving
         self.set_uri('http://{0}:{1}/'.format(
-            socket.getfqdn() if server_addr == '::' else server_addr,
+            socket.getfqdn() if server_addr in ['::', '0.0.0.0'] else server_addr,
             server_port
         ))
 
@@ -1103,9 +1285,13 @@ class Module(MgrModule):
         # wait for the shutdown event
         self.shutdown_event.wait()
         self.shutdown_event.clear()
+        # tell metrics collection thread to stop collecting new metrics
+        self.metrics_thread.stop()
         cherrypy.engine.stop()
         self.log.info('Engine stopped.')
         self.shutdown_rbd_stats()
+        # wait for the metrics collection thread to stop
+        self.metrics_thread.join()
 
     def shutdown(self):
         self.log.info('Stopping engine...')

@@ -114,6 +114,7 @@ CopyupRequest<I>::CopyupRequest(I *ictx, const std::string &oid,
     m_trace(util::create_trace(*m_image_ctx, "copy-up", parent_trace)),
     m_lock("CopyupRequest", false, false)
 {
+  ceph_assert(m_image_ctx->data_ctx.is_valid());
   m_async_op.start_op(*util::get_image_ctx(m_image_ctx));
 }
 
@@ -231,11 +232,16 @@ void CopyupRequest<I>::deep_copy() {
 
   ldout(cct, 20) << "oid=" << m_oid << ", flatten=" << m_flatten << dendl;
 
+  uint32_t flags = deep_copy::OBJECT_COPY_REQUEST_FLAG_MIGRATION;
+  if (m_flatten) {
+    flags |= deep_copy::OBJECT_COPY_REQUEST_FLAG_FLATTEN;
+  }
+
   auto ctx = util::create_context_callback<
     CopyupRequest<I>, &CopyupRequest<I>::handle_deep_copy>(this);
   auto req = deep_copy::ObjectCopyRequest<I>::create(
-    m_image_ctx->parent, m_image_ctx, m_image_ctx->migration_info.snap_map,
-    m_object_no, m_flatten, ctx);
+    m_image_ctx->parent, m_image_ctx, 0, 0,
+    m_image_ctx->migration_info.snap_map, m_object_no, flags, ctx);
 
   req->send();
 }

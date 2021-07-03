@@ -338,8 +338,7 @@ int MultipartObjectProcessor::process_first_chunk(bufferlist&& data,
   int r = writer.write_exclusive(data);
   if (r == -EEXIST) {
     // randomize the oid prefix and reprepare the head/manifest
-    std::string oid_rand(32, 0);
-    gen_rand_alphanumeric(store->ctx(), oid_rand.data(), oid_rand.size());
+    std::string oid_rand = gen_rand_alphanumeric(store->ctx(), 32);
 
     mp.init(target_obj.key.name, upload_id, oid_rand);
     manifest.set_prefix(target_obj.key.name + "." + oid_rand);
@@ -391,12 +390,10 @@ int MultipartObjectProcessor::prepare_head()
     return r;
   }
   stripe_size = manifest_gen.cur_stripe_max_size();
-
-  uint64_t max_head_size = std::min(chunk_size, stripe_size);
-  set_head_chunk_size(max_head_size);
+  set_head_chunk_size(stripe_size);
 
   chunk = ChunkProcessor(&writer, chunk_size);
-  stripe = StripeProcessor(&chunk, this, max_head_size);
+  stripe = StripeProcessor(&chunk, this, stripe_size);
   return 0;
 }
 
@@ -487,7 +484,7 @@ int MultipartObjectProcessor::complete(size_t accounted_size,
       .set_must_exist(true)
       .set(p, bl);
   if (r < 0) {
-    return r;
+    return r == -ENOENT ? -ERR_NO_SUCH_UPLOAD : r;
   }
 
   if (!obj_op.meta.canceled) {
@@ -559,8 +556,14 @@ int AppendObjectProcessor::prepare()
       size_t pos = s.find("-");
       cur_etag = s.substr(0, pos);
     }
+
+    iter = astate->attrset.find(RGW_ATTR_STORAGE_CLASS);
+    if (iter != astate->attrset.end()) {
+      tail_placement_rule.storage_class = iter->second.to_str();
+    }
     cur_manifest = &astate->manifest;
     manifest.set_prefix(cur_manifest->get_prefix());
+    astate->keep_tail = true;
   }
   manifest.set_multipart_part_rule(store->ctx()->_conf->rgw_obj_stripe_size, cur_part_num);
 

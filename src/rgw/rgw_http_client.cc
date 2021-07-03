@@ -13,6 +13,7 @@
 #include "rgw_common.h"
 #include "rgw_http_client.h"
 #include "rgw_http_errors.h"
+#include "common/async/completion.h"
 #include "common/RefCountedObj.h"
 
 #include "rgw_coroutine.h"
@@ -46,23 +47,54 @@ struct rgw_http_req_data : public RefCountedObject {
   Mutex lock;
   Cond cond;
 
+  using Signature = void(boost::system::error_code);
+  using Completion = ceph::async::Completion<Signature>;
+  std::unique_ptr<Completion> completion;
+
   rgw_http_req_data() : id(-1), lock("rgw_http_req_data::lock") {
+    // FIPS zeroization audit 20191115: this memset is not security related.
     memset(error_buf, 0, sizeof(error_buf));
   }
 
-  int wait() {
-    Mutex::Locker l(lock);
+  template <typename ExecutionContext, typename CompletionToken>
+  auto async_wait(ExecutionContext& ctx, CompletionToken&& token) {
+    boost::asio::async_completion<CompletionToken, Signature> init(token);
+    auto& handler = init.completion_handler;
+    {
+      std::unique_lock l{lock};
+      completion = Completion::create(ctx.get_executor(), std::move(handler));
+    }
+    return init.result.get();
+  }
+  int wait(optional_yield y) {
     if (done) {
       return ret;
     }
-    cond.Wait(lock);
+#ifdef HAVE_BOOST_CONTEXT
+    if (y) {
+      auto& context = y.get_io_context();
+      auto& yield = y.get_yield_context();
+      boost::system::error_code ec;
+      async_wait(context, yield[ec]);
+      return -ec.value();
+    }
+#endif
+    Mutex::Locker l(lock);
+    while (!done) {
+      cond.Wait(lock);
+    }       
     return ret;
   }
 
   void set_state(int bitmask);
 
-  void finish(int r) {
+  void finish(int r, long http_status = -1) {
     Mutex::Locker l(lock);
+    if (http_status != -1) {
+      if (client) {
+        client->set_http_status(http_status);
+      }
+    }
     ret = r;
     if (curl_handle)
       do_curl_easy_cleanup(curl_handle);
@@ -73,15 +105,15 @@ struct rgw_http_req_data : public RefCountedObject {
     curl_handle = NULL;
     h = NULL;
     done = true;
-    cond.Signal();
-  }
-
-  bool _is_done() {
-    return done;
+    if (completion) {
+      boost::system::error_code ec(-ret, boost::system::system_category());
+      Completion::post(std::move(completion), ec);
+    } else {
+      cond.Signal();
+    }
   }
 
   bool is_done() {
-    Mutex::Locker l(lock);
     return done;
   }
 
@@ -89,7 +121,7 @@ struct rgw_http_req_data : public RefCountedObject {
     Mutex::Locker l(lock);
     return ret;
   }
-
+  
   RGWHTTPManager *get_manager() {
     Mutex::Locker l(lock);
     return mgr;
@@ -448,9 +480,9 @@ static bool is_upload_request(const string& method)
 /*
  * process a single simple one off request
  */
-int RGWHTTPClient::process()
+int RGWHTTPClient::process(optional_yield y)
 {
-  return RGWHTTP::process(this);
+  return RGWHTTP::process(this, y);
 }
 
 string RGWHTTPClient::to_str()
@@ -499,16 +531,25 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
   curl_easy_setopt(easy_handle, CURLOPT_ERRORBUFFER, (void *)req_data->error_buf);
   curl_easy_setopt(easy_handle, CURLOPT_LOW_SPEED_TIME, cct->_conf->rgw_curl_low_speed_time);
   curl_easy_setopt(easy_handle, CURLOPT_LOW_SPEED_LIMIT, cct->_conf->rgw_curl_low_speed_limit);
-  if (h) {
-    curl_easy_setopt(easy_handle, CURLOPT_HTTPHEADER, (void *)h);
-  }
   curl_easy_setopt(easy_handle, CURLOPT_READFUNCTION, send_http_data);
   curl_easy_setopt(easy_handle, CURLOPT_READDATA, (void *)req_data);
   if (send_data_hint || is_upload_request(method)) {
     curl_easy_setopt(easy_handle, CURLOPT_UPLOAD, 1L);
   }
   if (has_send_len) {
-    curl_easy_setopt(easy_handle, CURLOPT_INFILESIZE, (void *)send_len); 
+    // TODO: prevent overflow by using curl_off_t
+    // and: CURLOPT_INFILESIZE_LARGE, CURLOPT_POSTFIELDSIZE_LARGE
+    const long size = send_len;
+    curl_easy_setopt(easy_handle, CURLOPT_INFILESIZE, size);
+    if (method == "POST") {
+      curl_easy_setopt(easy_handle, CURLOPT_POSTFIELDSIZE, size); 
+      // TODO: set to size smaller than 1MB should prevent the "Expect" field
+      // from being sent. So explicit removal is not needed
+      h = curl_slist_append(h, "Expect:");
+    }
+  }
+  if (h) {
+    curl_easy_setopt(easy_handle, CURLOPT_HTTPHEADER, (void *)h);
   }
   if (!verify_ssl) {
     curl_easy_setopt(easy_handle, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -516,6 +557,7 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
     dout(20) << "ssl verification is set to off" << dendl;
   }
   curl_easy_setopt(easy_handle, CURLOPT_PRIVATE, (void *)req_data);
+  curl_easy_setopt(easy_handle, CURLOPT_TIMEOUT, req_timeout);
 
   return 0;
 }
@@ -528,9 +570,9 @@ bool RGWHTTPClient::is_done()
 /*
  * wait for async request to complete
  */
-int RGWHTTPClient::wait()
+int RGWHTTPClient::wait(optional_yield y)
 {
-  return req_data->wait();
+  return req_data->wait(y);
 }
 
 void RGWHTTPClient::cancel()
@@ -828,9 +870,9 @@ void RGWHTTPManager::_complete_request(rgw_http_req_data *req_data)
   req_data->put();
 }
 
-void RGWHTTPManager::finish_request(rgw_http_req_data *req_data, int ret)
+void RGWHTTPManager::finish_request(rgw_http_req_data *req_data, int ret, long http_status)
 {
-  req_data->finish(ret);
+  req_data->finish(ret, http_status);
   complete_request(req_data);
 }
 
@@ -867,7 +909,7 @@ void RGWHTTPManager::_unlink_request(rgw_http_req_data *req_data)
   if (req_data->curl_handle) {
     curl_multi_remove_handle((CURLM *)multi_handle, req_data->get_easy_handle());
   }
-  if (!req_data->_is_done()) {
+  if (!req_data->is_done()) {
     _finish_request(req_data, -ECANCELED);
   }
 }
@@ -891,6 +933,13 @@ void RGWHTTPManager::manage_pending_requests()
 
   RWLock::WLocker wl(reqs_lock);
 
+  if (!reqs_change_state.empty()) {
+    for (auto siter : reqs_change_state) {
+      _set_req_state(siter);
+    }
+    reqs_change_state.clear();
+  }
+
   if (!unregistered_reqs.empty()) {
     for (auto& r : unregistered_reqs) {
       _unlink_request(r);
@@ -913,13 +962,6 @@ void RGWHTTPManager::manage_pending_requests()
     } else {
       max_threaded_req = iter->first + 1;
     }
-  }
-
-  if (!reqs_change_state.empty()) {
-    for (auto siter : reqs_change_state) {
-      _set_req_state(siter);
-    }
-    reqs_change_state.clear();
   }
 
   for (auto piter : remove_reqs) {
@@ -1146,7 +1188,7 @@ void *RGWHTTPManager::reqs_thread_entry()
           status = -EAGAIN;
         }
         int id = req_data->id;
-	finish_request(req_data, status);
+	finish_request(req_data, status, http_status);
         switch (result) {
           case CURLE_OK:
             break;
@@ -1211,7 +1253,7 @@ int RGWHTTP::send(RGWHTTPClient *req) {
   return 0;
 }
 
-int RGWHTTP::process(RGWHTTPClient *req) {
+int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
   if (!req) {
     return 0;
   }
@@ -1220,6 +1262,6 @@ int RGWHTTP::process(RGWHTTPClient *req) {
     return r;
   }
 
-  return req->wait();
+  return req->wait(y);
 }
 

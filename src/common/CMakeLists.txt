@@ -4,6 +4,9 @@ add_library(common_buffer_obj OBJECT
 add_library(common_texttable_obj OBJECT
   TextTable.cc)
 
+add_library(common_prioritycache_obj OBJECT
+  PriorityCache.cc)
+
 set(common_srcs
   AsyncOpTracker.cc
   BackTrace.cc
@@ -20,7 +23,6 @@ set(common_srcs
   Mutex.cc
   OutputDataSocket.cc
   PluginRegistry.cc
-  PriorityCache.cc
   Readahead.cc
   SloppyCRCMap.cc
   SubProcess.cc
@@ -80,6 +82,7 @@ set(common_srcs
   perf_counters_collection.cc
   perf_histogram.cc
   pick_address.cc
+  random_string.cc
   reverse.c
   run_cmd.cc
   scrub_types.cc
@@ -165,7 +168,7 @@ elseif(HAVE_ARMV8_CRC)
     crc32c_aarch64.c)
 endif(HAVE_INTEL)
 
-add_library(crc32 ${crc32_srcs})
+add_library(crc32 STATIC ${crc32_srcs})
 if(HAVE_ARMV8_CRC)
   set_target_properties(crc32 PROPERTIES
     COMPILE_FLAGS "${CMAKE_C_FLAGS} ${ARMV8_CRC_COMPILE_FLAGS}")
@@ -175,7 +178,7 @@ target_link_libraries(crc32
 
 add_library(common_utf8 STATIC utf8.c)
 
-if(WITH_LIBCEPHFS OR WITH_KRBD)
+if(HAVE_KEYUTILS)
   set(parse_secret_srcs
     secret.c)
   add_library(parse_secret_objs OBJECT ${parse_secret_srcs})

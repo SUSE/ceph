@@ -1,6 +1,8 @@
 # vim: expandtab smarttab shiftwidth=4 softtabstop=4
+import base64
 import errno
 import functools
+import json
 import socket
 import os
 import time
@@ -28,7 +30,8 @@ from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
                  RBD_IMAGE_MIGRATION_STATE_PREPARED, RBD_CONFIG_SOURCE_CONFIG,
                  RBD_CONFIG_SOURCE_POOL, RBD_CONFIG_SOURCE_IMAGE,
                  RBD_MIRROR_PEER_ATTRIBUTE_NAME_MON_HOST,
-                 RBD_MIRROR_PEER_ATTRIBUTE_NAME_KEY)
+                 RBD_MIRROR_PEER_ATTRIBUTE_NAME_KEY,
+                 RBD_MIRROR_PEER_DIRECTION_RX)
 
 rados = None
 ioctx = None
@@ -180,7 +183,7 @@ def check_default_params(format, order=None, features=None, stripe_count=None,
             feature_data_pool = 128
         image_name = get_temp_image_name()
         if exception is None:
-            RBD().create(ioctx, image_name, IMG_SIZE)
+            RBD().create(ioctx, image_name, IMG_SIZE, old_format=(format == 1))
             try:
                 with Image(ioctx, image_name) as image:
                     eq(format == 1, image.old_format())
@@ -535,6 +538,10 @@ class TestImage(object):
     def test_image_auto_close(self):
         image = Image(ioctx, image_name)
 
+    def test_use_after_close(self):
+        self.image.close()
+        assert_raises(InvalidArgument, self.image.stat)
+
     def test_write(self):
         data = rand_data(256)
         self.image.write(data, 0)
@@ -543,6 +550,12 @@ class TestImage(object):
         data = rand_data(256)
         self.image.write(data, 0, LIBRADOS_OP_FLAG_FADVISE_DONTNEED)
         self.image.write(data, 0, LIBRADOS_OP_FLAG_FADVISE_NOCACHE)
+
+    def test_write_zeroes(self):
+        data = rand_data(256)
+        self.image.write(data, 0)
+        self.image.write_zeroes(0, 256)
+        eq(self.image.read(256, 256), b'\0' * 256)
 
     def test_read(self):
         data = self.image.read(0, 20)
@@ -1066,6 +1079,20 @@ class TestImage(object):
         data = rand_data(256)
         self.image.write(data, 0)
         comp = self.image.aio_discard(0, 256, cb)
+        comp.wait_for_complete_and_cb()
+        eq(retval[0], 0)
+        eq(comp.get_return_value(), 0)
+        eq(sys.getrefcount(comp), 2)
+        eq(self.image.read(256, 256), b'\0' * 256)
+
+    def test_aio_write_zeroes(self):
+        retval = [None]
+        def cb(comp):
+            retval[0] = comp.get_return_value()
+
+        data = rand_data(256)
+        self.image.write(data, 0)
+        comp = self.image.aio_write_zeroes(0, 256, cb)
         comp.wait_for_complete_and_cb()
         eq(retval[0], 0)
         eq(comp.get_return_value(), 0)
@@ -1725,10 +1752,13 @@ class TestExclusiveLock(object):
                 rados2.conf_set('rbd_blacklist_on_break_lock', 'true')
                 with Image(ioctx2, image_name) as image, \
                      Image(blacklist_ioctx, image_name) as blacklist_image:
+
+                    lock_owners = list(image.lock_get_owners())
+                    eq(0, len(lock_owners))
+
                     blacklist_image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE)
                     assert_raises(ReadOnlyImage, image.lock_acquire,
                                   RBD_LOCK_MODE_EXCLUSIVE)
-
                     lock_owners = list(image.lock_get_owners())
                     eq(1, len(lock_owners))
                     eq(RBD_LOCK_MODE_EXCLUSIVE, lock_owners[0]['mode'])
@@ -1775,6 +1805,30 @@ class TestMirroring(object):
         remove_image()
         self.rbd.mirror_mode_set(ioctx, self.initial_mirror_mode)
 
+    def test_site_name(self):
+        site_name = "us-west-1"
+        self.rbd.mirror_site_name_set(rados, site_name)
+        eq(site_name, self.rbd.mirror_site_name_get(rados))
+        self.rbd.mirror_site_name_set(rados, "")
+        eq(rados.get_fsid(), self.rbd.mirror_site_name_get(rados))
+
+    def test_mirror_peer_bootstrap(self):
+        eq([], list(self.rbd.mirror_peer_list(ioctx)))
+
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_DISABLED)
+        assert_raises(InvalidArgument, self.rbd.mirror_peer_bootstrap_create,
+                      ioctx);
+
+        self.rbd.mirror_mode_set(ioctx, RBD_MIRROR_MODE_POOL)
+        token_b64 = self.rbd.mirror_peer_bootstrap_create(ioctx)
+        token = base64.b64decode(token_b64)
+        token_dict = json.loads(token)
+        eq(sorted(['fsid', 'client_id', 'key', 'mon_host']),
+            sorted(list(token_dict.keys())))
+
+        # requires different cluster
+        assert_raises(InvalidArgument, self.rbd.mirror_peer_bootstrap_import,
+            ioctx, RBD_MIRROR_PEER_DIRECTION_RX, token_b64)
 
     def test_mirror_peer(self):
         eq([], list(self.rbd.mirror_peer_list(ioctx)))

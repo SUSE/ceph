@@ -7,7 +7,6 @@ export class PrometheusAlertLabels {
 
 class Annotations {
   description: string;
-  summary: string;
 }
 
 class CommonAlertmanagerAlert {
@@ -26,6 +25,12 @@ class PrometheusAlert {
   value: number;
 }
 
+export interface PrometheusRuleGroup {
+  name: string;
+  file: string;
+  rules: PrometheusRule[];
+}
+
 export class PrometheusRule {
   name: string; // => PrometheusAlertLabels.alertname
   query: string;
@@ -37,6 +42,7 @@ export class PrometheusRule {
   alerts: PrometheusAlert[]; // Shows only active alerts
   health: string;
   type: string;
+  group?: string; // Added field for flattened list
 }
 
 export class AlertmanagerAlert extends CommonAlertmanagerAlert {
@@ -73,6 +79,6 @@ export class PrometheusCustomAlert {
   status: 'resolved' | 'unprocessed' | 'active' | 'suppressed';
   name: string;
   url: string;
-  summary: string;
+  description: string;
   fingerprint?: string | boolean;
 }

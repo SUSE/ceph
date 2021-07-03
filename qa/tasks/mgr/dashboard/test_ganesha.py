@@ -3,9 +3,8 @@
 
 from __future__ import absolute_import
 
-import time
 
-from .helper import DashboardTestCase, JObj, JLeaf, JList
+from .helper import DashboardTestCase
 
 
 class GaneshaTest(DashboardTestCase):
@@ -27,7 +26,7 @@ class GaneshaTest(DashboardTestCase):
     @classmethod
     def setUpClass(cls):
         super(GaneshaTest, cls).setUpClass()
-        cls.create_pool('ganesha', 3, 'replicated')
+        cls.create_pool('ganesha', 2**2, 'replicated')
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node1'])
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node2'])
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node3'])
@@ -41,8 +40,8 @@ class GaneshaTest(DashboardTestCase):
             'user', 'create', '--uid', 'admin', '--display-name', 'admin',
             '--system', '--access-key', 'admin', '--secret', 'admin'
         ])
-        cls._ceph_cmd(['dashboard', 'set-rgw-api-secret-key', 'admin'])
-        cls._ceph_cmd(['dashboard', 'set-rgw-api-access-key', 'admin'])
+        cls._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-secret-key'], 'admin')
+        cls._ceph_cmd_with_secret(['dashboard', 'set-rgw-api-access-key'], 'admin')
 
     @classmethod
     def tearDownClass(cls):

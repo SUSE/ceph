@@ -70,7 +70,7 @@ function ensure_decent_gcc_on_ubuntu {
     local old=$(gcc -dumpfullversion -dumpversion)
     local new=$1
     local codename=$2
-    if dpkg --compare-versions $old ge 7.0; then
+    if dpkg --compare-versions $old ge ${new}.0; then
 	return
     fi
 
@@ -97,10 +97,10 @@ msyaQpNl/m/lNtOLhR64v5ZybofB2EWkMxUzX8D/FQ==
 -----END PGP PUBLIC KEY BLOCK-----
 ENDOFKEY
 	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y g++-7
+	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y g++-${new}
     fi
 
-    case $codename in
+    case "$codename" in
         trusty)
             old=4.8;;
         xenial)
@@ -120,8 +120,8 @@ ENDOFKEY
     $SUDO update-alternatives --auto gcc
 
     # cmake uses the latter by default
-    $SUDO ln -nsf /usr/bin/gcc /usr/bin/$(uname -m)-linux-gnu-gcc
-    $SUDO ln -nsf /usr/bin/g++ /usr/bin/$(uname -m)-linux-gnu-g++
+    $SUDO ln -nsf /usr/bin/gcc /usr/bin/${ARCH}-linux-gnu-gcc
+    $SUDO ln -nsf /usr/bin/g++ /usr/bin/${ARCH}-linux-gnu-g++
 }
 
 function install_pkg_on_ubuntu {
@@ -147,26 +147,42 @@ function install_pkg_on_ubuntu {
 }
 
 function install_boost_on_ubuntu {
+    local ver=1.72
+    local installed_ver=$(apt -qq list --installed ceph-libboost*-dev 2>/dev/null |
+                              grep -e 'libboost[0-9].[0-9]\+-dev' |
+                              cut -d' ' -f2 |
+                              cut -d'.' -f1,2)
+    if test -n "$installed_ver"; then
+        if echo "$installed_ver" | grep -q "^$ver"; then
+            return
+        else
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y remove "ceph-libboost.*${installed_ver}.*"
+            $SUDO rm -f /etc/apt/sources.list.d/ceph-libboost${installed_ver}.list
+        fi
+    fi
     local codename=$1
+    local project=libboost
+    local sha1=1d7c7a00cc3f37e340bae0360191a757b44ec80c
     install_pkg_on_ubuntu \
-	ceph-libboost1.67 \
-	dd38c27740c1f9a9e6719a07eef84a1369dc168b \
+	$project \
+	$sha1 \
 	$codename \
-	ceph-libboost-atomic1.67-dev \
-	ceph-libboost-chrono1.67-dev \
-	ceph-libboost-container1.67-dev \
-	ceph-libboost-context1.67-dev \
-	ceph-libboost-coroutine1.67-dev \
-	ceph-libboost-date-time1.67-dev \
-	ceph-libboost-filesystem1.67-dev \
-	ceph-libboost-iostreams1.67-dev \
-	ceph-libboost-program-options1.67-dev \
-	ceph-libboost-python1.67-dev \
-	ceph-libboost-random1.67-dev \
-	ceph-libboost-regex1.67-dev \
-	ceph-libboost-system1.67-dev \
-	ceph-libboost-thread1.67-dev \
-	ceph-libboost-timer1.67-dev
+	ceph-libboost-atomic$ver-dev \
+	ceph-libboost-chrono$ver-dev \
+	ceph-libboost-container$ver-dev \
+	ceph-libboost-context$ver-dev \
+	ceph-libboost-coroutine$ver-dev \
+	ceph-libboost-date-time$ver-dev \
+	ceph-libboost-filesystem$ver-dev \
+	ceph-libboost-iostreams$ver-dev \
+	ceph-libboost-program-options$ver-dev \
+	ceph-libboost-python$ver-dev \
+	ceph-libboost-random$ver-dev \
+	ceph-libboost-regex$ver-dev \
+	ceph-libboost-system$ver-dev \
+	ceph-libboost-test$ver-dev \
+	ceph-libboost-thread$ver-dev \
+	ceph-libboost-timer$ver-dev
 }
 
 function version_lt {
@@ -183,11 +199,11 @@ function ensure_decent_gcc_on_rh {
 	    cat <<EOF
 Your GCC is too old. Please run following command to add DTS to your environment:
 
-scl enable devtoolset-7 bash
+scl enable devtoolset-8 bash
 
 Or add following line to the end of ~/.bashrc to add it permanently:
 
-source scl_source enable devtoolset-7
+source scl_source enable devtoolset-8
 
 see https://www.softwarecollections.org/en/scls/rhscl/devtoolset-7/ for more details.
 EOF
@@ -267,17 +283,17 @@ else
         for_make_check=false
     fi
     source /etc/os-release
-    case $ID in
+    case "$ID" in
     debian|ubuntu|devuan)
         echo "Using apt-get to install dependencies"
         $SUDO apt-get install -y devscripts equivs
         $SUDO apt-get install -y dpkg-dev
         case "$VERSION" in
             *Trusty*)
-                ensure_decent_gcc_on_ubuntu 7 trusty
+                ensure_decent_gcc_on_ubuntu 8 trusty
                 ;;
             *Xenial*)
-                ensure_decent_gcc_on_ubuntu 7 xenial
+                ensure_decent_gcc_on_ubuntu 8 xenial
                 install_boost_on_ubuntu xenial
                 ;;
             *Bionic*)
@@ -308,53 +324,57 @@ else
 	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get -y remove ceph-build-deps
 	install_seastar_deps
 	if [ "$control" != "debian/control" ] ; then rm $control; fi
-	$SUDO apt-get install -y libxmlsec1 libxmlsec1-nss libxmlsec1-openssl libxmlsec1-dev
         ;;
     centos|fedora|rhel|ol|virtuozzo)
-        yumdnf="yum"
-        builddepcmd="yum-builddep -y --setopt=*.skip_if_unavailable=true"
-        if test "$(echo "$VERSION_ID >= 22" | bc)" -ne 0; then
-            yumdnf="dnf"
-            builddepcmd="dnf -y builddep --allowerasing"
+        yumdnf="dnf"
+        builddepcmd="dnf -y builddep --allowerasing"
+        if [[ $ID =~ centos|rhel ]] && version_lt $VERSION_ID 8; then
+            yumdnf="yum"
+            builddepcmd="yum-builddep -y --setopt=*.skip_if_unavailable=true"
         fi
         echo "Using $yumdnf to install dependencies"
-	if [ "$ID" = "centos" -a $(uname -m) = aarch64 ]; then
+	if [ "$ID" = "centos" -a "$ARCH" = "aarch64" ]; then
 	    $SUDO yum-config-manager --disable centos-sclo-sclo || true
 	    $SUDO yum-config-manager --disable centos-sclo-rh || true
 	    $SUDO yum remove centos-release-scl || true
 	fi
-        case $ID in
+        case "$ID" in
             fedora)
-                if test $yumdnf = yum; then
-                    $SUDO $yumdnf install -y yum-utils
-                fi
+                $SUDO $yumdnf install -y $yumdnf-utils
                 ;;
             centos|rhel|ol|virtuozzo)
                 MAJOR_VERSION="$(echo $VERSION_ID | cut -d. -f1)"
-                $SUDO yum install -y yum-utils
+                $SUDO $yumdnf install -y $yumdnf-utils
                 if test $ID = rhel ; then
                     $SUDO yum-config-manager --enable rhel-$MAJOR_VERSION-server-optional-rpms
                 fi
-                $SUDO yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/$MAJOR_VERSION/x86_64/
-                $SUDO yum install --nogpgcheck -y epel-release
+                rpm --quiet --query epel-release || \
+		    $SUDO $yumdnf -y install --nogpgcheck https://dl.fedoraproject.org/pub/epel/epel-release-latest-$MAJOR_VERSION.noarch.rpm
                 $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$MAJOR_VERSION
                 $SUDO rm -f /etc/yum.repos.d/dl.fedoraproject.org*
                 if test $ID = centos -a $MAJOR_VERSION = 7 ; then
-		    case $(uname -m) in
+		    $SUDO $yumdnf install -y python36-devel
+		    case "$ARCH" in
 			x86_64)
-			    $SUDO yum -y install centos-release-scl
-			    dts_ver=7
+			    $SUDO $yumdnf -y install centos-release-scl
+			    dts_ver=8
 			    ;;
 			aarch64)
-			    $SUDO yum -y install centos-release-scl-rh
+			    $SUDO $yumdnf -y install centos-release-scl-rh
 			    $SUDO yum-config-manager --disable centos-sclo-rh
 			    $SUDO yum-config-manager --enable centos-sclo-rh-testing
-			    dts_ver=7
+			    dts_ver=8
 			    ;;
 		    esac
                 elif test $ID = rhel -a $MAJOR_VERSION = 7 ; then
-                    $SUDO yum-config-manager --enable rhel-server-rhscl-7-rpms
-                    dts_ver=7
+                    $SUDO yum-config-manager \
+			  --enable rhel-server-rhscl-7-rpms \
+			  --enable rhel-7-server-devtools-rpms
+                    dts_ver=8
+                elif test $ID = centos -a $MAJOR_VERSION = 8 ; then
+                    $SUDO dnf config-manager --set-enabled PowerTools
+                elif test $ID = rhel -a $MAJOR_VERSION = 8 ; then
+                    $SUDO subscription-manager repos --enable "codeready-builder-for-rhel-8-*-rpms"
                 fi
                 ;;
         esac
@@ -366,16 +386,17 @@ else
             ensure_decent_gcc_on_rh $dts_ver
 	fi
         ! grep -q -i error: $DIR/yum-builddep.out || exit 1
-        # for building python-saml and its dependencies
-        $SUDO $yumdnf install -y xmlsec1 xmlsec1-nss xmlsec1-openssl xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel
         ;;
     opensuse*|suse|sles)
         echo "Using zypper to install dependencies"
         zypp_install="zypper --gpg-auto-import-keys --non-interactive install --no-recommends"
-        $SUDO $zypp_install systemd-rpm-macros
+        $SUDO $zypp_install systemd-rpm-macros rpm-build || exit 1
+        if [ -e /usr/bin/python2 ] ; then
+            # see https://tracker.ceph.com/issues/23981
+            $SUDO $zypp_install python2-virtualenv python2-devel || exit 1
+        fi
         munge_ceph_spec_in $for_make_check $DIR/ceph.spec
         $SUDO $zypp_install $(rpmspec -q --buildrequires $DIR/ceph.spec) || exit 1
-        $SUDO $zypp_install libxmlsec1-1 libxmlsec1-nss1 libxmlsec1-openssl1 xmlsec1-devel xmlsec1-openssl-devel
         ;;
     alpine)
         # for now we need the testing repo for leveldb

@@ -27,16 +27,10 @@
 
 // For PerfCounterType
 #include "messages/MMgrReport.h"
+#include "DaemonKey.h"
 
 namespace ceph {
   class Formatter;
-}
-
-// Unique reference to a daemon within a cluster
-typedef std::pair<std::string, std::string> DaemonKey;
-
-static inline std::string to_string(const DaemonKey& dk) {
-  return dk.first + "." + dk.second;
 }
 
 // An instance of a performance counter type, within
@@ -179,6 +173,10 @@ class DaemonState
 	  devices[i.second] = i.first;
 	}
       }
+    }
+    p = m.find("hostname");
+    if (p != m.end()) {
+      hostname = p->second;
     }
   }
 
@@ -389,6 +387,7 @@ public:
    */
   void cull(const std::string& svc_name,
 	    const std::set<std::string>& names_exist);
+  void cull_services(const std::set<std::string>& types_exist);
 };
 
 #endif

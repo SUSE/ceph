@@ -365,27 +365,12 @@ class Docs(BaseController):
     def api_all_json(self):
         return self._gen_spec(True, "/api")
 
-    def _swagger_ui_page(self, all_endpoints=False, token=None):
+    def _swagger_ui_page(self, all_endpoints=False):
         base = cherrypy.request.base
         if all_endpoints:
             spec_url = "{}/docs/api-all.json".format(base)
         else:
             spec_url = "{}/docs/api.json".format(base)
-
-        auth_header = cherrypy.request.headers.get('authorization')
-        jwt_token = ""
-        if auth_header is not None:
-            scheme, params = auth_header.split(' ', 1)
-            if scheme.lower() == 'bearer':
-                jwt_token = params
-        else:
-            if token is not None:
-                jwt_token = token
-
-        api_key_callback = """, onComplete: () => {{
-                        ui.preauthorizeApiKey('jwt', '{}');
-                    }}
-        """.format(jwt_token)
 
         page = """
         <!DOCTYPE html>
@@ -393,11 +378,8 @@ class Docs(BaseController):
         <head>
             <meta charset="UTF-8">
             <meta name="referrer" content="no-referrer" />
-            <link href="https://fonts.googleapis.com/css?family=Open+Sans:400, \
-                        700|Source+Code+Pro:300,600|Titillium+Web:400,600,700"
-                  rel="stylesheet">
             <link rel="stylesheet" type="text/css"
-                  href="//unpkg.com/swagger-ui-dist@3/swagger-ui.css" >
+                  href="/swagger-ui.css" >
             <style>
                 html
                 {{
@@ -419,7 +401,7 @@ class Docs(BaseController):
         </head>
         <body>
         <div id="swagger-ui"></div>
-        <script src="//unpkg.com/swagger-ui-dist@3/swagger-ui-bundle.js">
+        <script src="/swagger-ui-bundle.js">
         </script>
         <script>
             window.onload = function() {{
@@ -430,22 +412,16 @@ class Docs(BaseController):
                         SwaggerUIBundle.presets.apis
                     ],
                     layout: "BaseLayout"
-                    {}
                 }})
                 window.ui = ui
             }}
         </script>
         </body>
         </html>
-        """.format(spec_url, api_key_callback)
+        """.format(spec_url)
 
         return page
 
     @Endpoint(json_response=False)
     def __call__(self, all_endpoints=False):
         return self._swagger_ui_page(all_endpoints)
-
-    @Endpoint('POST', path="/", json_response=False,
-              query_params="{all_endpoints}")
-    def _with_token(self, token, all_endpoints=False):
-        return self._swagger_ui_page(all_endpoints, token)

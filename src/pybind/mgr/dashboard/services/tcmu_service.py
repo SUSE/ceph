@@ -1,3 +1,5 @@
+from mgr_util import get_most_recent_rate
+
 from dashboard.services.ceph_service import CephService
 from .. import mgr
 
@@ -12,6 +14,8 @@ class TcmuService(object):
         images = {}
         for service in CephService.get_service_list(SERVICE_TYPE):
             metadata = service['metadata']
+            if metadata is None:
+                continue
             status = service['status']
             hostname = service['hostname']
 
@@ -58,10 +62,9 @@ class TcmuService(object):
                     image['stats_history'] = {}
                     for s in ['rd', 'wr', 'rd_bytes', 'wr_bytes']:
                         perf_key = "{}{}".format(perf_key_prefix, s)
-                        image['stats'][s] = CephService.get_rate(
-                            'tcmu-runner', service_id, perf_key)
-                        image['stats_history'][s] = CephService.get_rates(
-                            'tcmu-runner', service_id, perf_key)
+                        rates = CephService.get_rates('tcmu-runner', service_id, perf_key)
+                        image['stats'][s] = get_most_recent_rate(rates)
+                        image['stats_history'][s] = rates
             else:
                 daemon['non_optimized_paths'] += 1
                 image['non_optimized_paths'].append(hostname)

@@ -32,7 +32,9 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "mgr[py] "
 
-
+std::set<std::string> obsolete_modules = {
+  "orchestrator_cli",
+};
 
 void PyModuleRegistry::init()
 {
@@ -41,10 +43,10 @@ void PyModuleRegistry::init()
   // Set up global python interpreter
 #if PY_MAJOR_VERSION >= 3
 #define WCHAR(s) L ## #s
-  Py_SetProgramName(const_cast<wchar_t*>(WCHAR(PYTHON_EXECUTABLE)));
+  Py_SetProgramName(const_cast<wchar_t*>(WCHAR(MGR_PYTHON_EXECUTABLE)));
 #undef WCHAR
 #else
-  Py_SetProgramName(const_cast<char*>(PYTHON_EXECUTABLE));
+  Py_SetProgramName(const_cast<char*>(MGR_PYTHON_EXECUTABLE));
 #endif
   // Add more modules
   if (g_conf().get_val<bool>("daemonize")) {
@@ -286,14 +288,16 @@ std::set<std::string> PyModuleRegistry::probe_modules(const std::string &path) c
 }
 
 int PyModuleRegistry::handle_command(
-  std::string const &module_name,
+  const ModuleCommand& module_command,
+  const MgrSession& session,
   const cmdmap_t &cmdmap,
   const bufferlist &inbuf,
   std::stringstream *ds,
   std::stringstream *ss)
 {
   if (active_modules) {
-    return active_modules->handle_command(module_name, cmdmap, inbuf, ds, ss);
+    return active_modules->handle_command(module_command, session, cmdmap,
+                                          inbuf, ds, ss);
   } else {
     // We do not expect to be called before active modules is up, but
     // it's straightfoward to handle this case so let's do it.
@@ -368,6 +372,12 @@ void PyModuleRegistry::get_health_checks(health_check_map_t *checks)
 
     // report failed always_on modules as health errors
     for (const auto& name : mgr_map.get_always_on_modules()) {
+      if (obsolete_modules.count(name)) {
+	continue;
+      }
+      if (active_modules->is_pending(name)) {
+	continue;
+      }
       if (!active_modules->module_exists(name)) {
         if (failed_modules.find(name) == failed_modules.end() &&
             dependency_modules.find(name) == dependency_modules.end()) {
@@ -417,7 +427,10 @@ void PyModuleRegistry::handle_config(const std::string &k, const std::string &v)
   std::lock_guard l(module_config.lock);
 
   if (!v.empty()) {
-    dout(4) << "Loaded module_config entry " << k << ":" << v << dendl;
+    // removing value to hide sensitive data going into mgr logs
+    // leaving this for debugging purposes
+    // dout(10) << "Loaded module_config entry " << k << ":" << v << dendl;
+    dout(4) << "Loaded module_config entry " << k << ":" << dendl;
     module_config.config[k] = v;
   } else {
     module_config.config.erase(k);

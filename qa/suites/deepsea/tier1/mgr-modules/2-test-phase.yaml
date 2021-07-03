@@ -1,0 +1,10 @@
+tasks:
+        - exec:
+                client.salt_master:
+                        - 'ceph -s'
+        - deepsea.script:
+                mgr.x:
+                        mgr_plugin_dashboard_smoke.sh:
+        - ses_qa:
+        - ses_qa.validation:
+                mgr_plugin_influx:

@@ -96,24 +96,27 @@ def get_pythonlib_dir():
     return "lib.{version[0]}".format(version=sys.version_info)
 
 
-def get_cmake_variables(names):
+def get_cmake_variables(*names):
     vars = dict((name, None) for name in names)
     for line in open(os.path.join(MYPDIR, "CMakeCache.txt")):
         # parse lines like "WITH_ASAN:BOOL=ON"
         for name in names:
             if line.startswith("{}:".format(name)):
-                vars[name] = line.split("=")[1].strip()
+                type_value = line.split(":")[1].strip()
+                t, v = type_value.split("=")
+                if t == 'BOOL':
+                    v = v.upper() in ('TRUE', '1', 'Y', 'YES', 'ON')
+                vars[name] = v
                 break
         if all(vars.values()):
             break
-    return vars
+    return [vars[name] for name in names]
 
 
 if os.path.exists(os.path.join(MYPDIR, "CMakeCache.txt")) \
      and os.path.exists(os.path.join(MYPDIR, "bin/init-ceph")):
-    vars = get_cmake_variables(["ceph_SOURCE_DIR", "ASAN_LIBRARY"])
-    src_path = vars["ceph_SOURCE_DIR"]
-    asan_lib_path = vars["ASAN_LIBRARY"]
+    src_path, with_asan, asan_lib_path = \
+        get_cmake_variables("ceph_SOURCE_DIR", "WITH_ASAN", "ASAN_LIBRARY")
     if src_path is None:
         # Huh, maybe we're not really in a cmake environment?
         pass
@@ -125,8 +128,8 @@ if os.path.exists(os.path.join(MYPDIR, "CMakeCache.txt")) \
         pythonlib_path = os.path.join(lib_path,
                                       "cython_modules",
                                       get_pythonlib_dir())
-
-        respawn_in_path(lib_path, pybind_path, pythonlib_path, asan_lib_path)
+        respawn_in_path(lib_path, pybind_path, pythonlib_path,
+                        asan_lib_path if with_asan else None)
 
         if 'PATH' in os.environ and bin_path not in os.environ['PATH']:
             os.environ['PATH'] = os.pathsep.join([bin_path, os.environ['PATH']])
@@ -520,7 +523,7 @@ def ceph_conf(parsed_args, field, name):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE)
     outdata, errdata = p.communicate()
-    if len(errdata):
+    if p.returncode != 0:
         raise RuntimeError('unable to get conf option %s for %s: %s' % (field, name, errdata))
     return outdata.rstrip()
 
@@ -677,6 +680,9 @@ def complete(sigdict, args, target):
     match_count = 0
     comps = []
     for cmdtag, cmd in sigdict.items():
+        flags = cmd.get('flags', 0)
+        if flags & (Flag.OBSOLETE | Flag.HIDDEN):
+            continue
         sig = cmd['sig']
         j = 0
         # iterate over all arguments, except last one
@@ -1207,18 +1213,6 @@ def main():
                               errno.errorcode.get(ret, 'Unknown'), outs),
                           file=sys.stderr)
 
-        if ret < 0:
-            ret = -ret
-            errstr = errno.errorcode.get(ret, 'Unknown')
-            print(u'Error {0}: {1}'.format(errstr, outs), file=sys.stderr)
-            if len(targets) > 1:
-                final_ret = ret
-            else:
-                return ret
-
-        if outs:
-            print(prefix + outs, file=sys.stderr)
-
         sys.stdout.flush()
 
         if parsed_args.output_file:
@@ -1244,8 +1238,23 @@ def main():
                 except IOError as e:
                     if e.errno != errno.EPIPE:
                         raise e
+        final_e = None
+        try:
+            sys.stdout.flush()
+        except IOError as e:
+            if e.errno != errno.EPIPE:
+                final_e = e
 
-        sys.stdout.flush()
+        if ret < 0:
+            ret = -ret
+            errstr = errno.errorcode.get(ret, 'Unknown')
+            print(u'Error {0}: {1}'.format(errstr, outs), file=sys.stderr)
+            final_ret = ret
+        elif outs:
+            print(prefix + outs, file=sys.stderr)
+
+        if final_e:
+            raise final_e
 
     # Block until command completion (currently scrub and deep_scrub only)
     if block:

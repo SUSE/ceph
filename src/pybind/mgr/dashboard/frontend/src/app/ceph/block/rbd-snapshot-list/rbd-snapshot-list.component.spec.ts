@@ -10,12 +10,14 @@ import { Subject, throwError as observableThrowError } from 'rxjs';
 
 import {
   configureTestBed,
+  expectItemTasks,
   i18nProviders,
   PermissionHelper
 } from '../../../../testing/unit-test-helper';
 import { ApiModule } from '../../../shared/api/api.module';
 import { RbdService } from '../../../shared/api/rbd.service';
 import { ComponentsModule } from '../../../shared/components/components.module';
+import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
 import { DataTableModule } from '../../../shared/datatable/datatable.module';
 import { TableActionsComponent } from '../../../shared/datatable/table-actions/table-actions.component';
 import { ExecutingTask } from '../../../shared/models/executing-task';
@@ -25,6 +27,7 @@ import { AuthStorageService } from '../../../shared/services/auth-storage.servic
 import { NotificationService } from '../../../shared/services/notification.service';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskListService } from '../../../shared/services/task-list.service';
+import { RbdSnapshotFormComponent } from '../rbd-snapshot-form/rbd-snapshot-form.component';
 import { RbdSnapshotListComponent } from './rbd-snapshot-list.component';
 import { RbdSnapshotModel } from './rbd-snapshot.model';
 
@@ -80,11 +83,12 @@ describe('RbdSnapshotListComponent', () => {
     beforeEach(() => {
       fixture.detectChanges();
       const i18n = TestBed.get(I18n);
+      const actionLabelsI18n = TestBed.get(ActionLabelsI18n);
       called = false;
       rbdService = new RbdService(null, null);
       notificationService = new NotificationService(null, null, null);
       authStorageService = new AuthStorageService();
-      authStorageService.set('user', '', { 'rbd-image': ['create', 'read', 'update', 'delete'] });
+      authStorageService.set('user', { 'rbd-image': ['create', 'read', 'update', 'delete'] });
       component = new RbdSnapshotListComponent(
         authStorageService,
         null,
@@ -95,7 +99,8 @@ describe('RbdSnapshotListComponent', () => {
         notificationService,
         null,
         null,
-        i18n
+        i18n,
+        actionLabelsI18n
       );
       spyOn(rbdService, 'deleteSnapshot').and.returnValue(observableThrowError({ status: 500 }));
       spyOn(notificationService, 'notifyTask').and.stub();
@@ -134,10 +139,6 @@ describe('RbdSnapshotListComponent', () => {
       summaryService.addRunningTask(task);
     };
 
-    const expectImageTasks = (snapshot: RbdSnapshotModel, executing: string) => {
-      expect(snapshot.cdExecuting).toEqual(executing);
-    };
-
     const refresh = (data) => {
       summaryService['summaryDataSource'].next(data);
     };
@@ -164,10 +165,10 @@ describe('RbdSnapshotListComponent', () => {
     it('should add a new image from a task', () => {
       addTask('rbd/snap/create', 'd');
       expect(component.snapshots.length).toBe(4);
-      expectImageTasks(component.snapshots[0], undefined);
-      expectImageTasks(component.snapshots[1], undefined);
-      expectImageTasks(component.snapshots[2], undefined);
-      expectImageTasks(component.snapshots[3], 'Creating');
+      expectItemTasks(component.snapshots[0], undefined);
+      expectItemTasks(component.snapshots[1], undefined);
+      expectItemTasks(component.snapshots[2], undefined);
+      expectItemTasks(component.snapshots[3], 'Creating');
     });
 
     it('should show when an existing image is being modified', () => {
@@ -175,9 +176,9 @@ describe('RbdSnapshotListComponent', () => {
       addTask('rbd/snap/delete', 'b');
       addTask('rbd/snap/rollback', 'c');
       expect(component.snapshots.length).toBe(3);
-      expectImageTasks(component.snapshots[0], 'Updating');
-      expectImageTasks(component.snapshots[1], 'Deleting');
-      expectImageTasks(component.snapshots[2], 'Rolling back');
+      expectItemTasks(component.snapshots[0], 'Updating');
+      expectItemTasks(component.snapshots[1], 'Deleting');
+      expectItemTasks(component.snapshots[2], 'Rolling back');
     });
   });
 
@@ -185,9 +186,16 @@ describe('RbdSnapshotListComponent', () => {
     beforeEach(() => {
       component.poolName = 'pool01';
       component.rbdName = 'image01';
-      spyOn(TestBed.get(BsModalService), 'show').and.callFake((content) => {
+      spyOn(TestBed.get(BsModalService), 'show').and.callFake(() => {
         const ref = new BsModalRef();
-        ref.content = new content();
+        ref.content = new RbdSnapshotFormComponent(
+          null,
+          null,
+          null,
+          null,
+          TestBed.get(I18n),
+          TestBed.get(ActionLabelsI18n)
+        );
         ref.content.onSubmit = new Subject();
         return ref;
       });
@@ -204,7 +212,7 @@ describe('RbdSnapshotListComponent', () => {
     it('should display suggested snapshot name', () => {
       component.openCreateSnapshotModal();
       expect(component.modalRef.content.snapName).toMatch(
-        RegExp(`^${component.rbdName}_[\\d-]+T[\\d.:]+\\+[\\d:]+\$`)
+        RegExp(`^${component.rbdName}_[\\d-]+T[\\d.:]+[\\+-][\\d:]+$`)
       );
     });
   });

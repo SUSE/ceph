@@ -499,7 +499,8 @@ public:
 
   virtual void on_removal(ObjectStore::Transaction *t) = 0;
 
-  void _delete_some(ObjectStore::Transaction *t);
+  ghobject_t _delete_some(ObjectStore::Transaction *t,
+    ghobject_t _next);
 
   virtual void set_dynamic_perf_stats_queries(
     const std::list<OSDPerfMetricQuery> &queries) {
@@ -1673,11 +1674,13 @@ protected:
     hobject_t end = info.pgid.pgid.get_hobj_end(pool.info.get_pg_num());
     add_backoff(s, begin, end);
   }
+public:
   void release_pg_backoffs() {
     hobject_t begin = info.pgid.pgid.get_hobj_start();
     hobject_t end = info.pgid.pgid.get_hobj_end(pool.info.get_pg_num());
     release_backoffs(begin, end);
   }
+protected:
 
   // -- scrub --
 public:
@@ -1687,7 +1690,7 @@ public:
 
     // metadata
     set<pg_shard_t> reserved_peers;
-    bool reserved, reserve_failed;
+    bool local_reserved, remote_reserved, reserve_failed;
     epoch_t epoch_start;
 
     // common to both scrubs
@@ -1715,7 +1718,7 @@ public:
     utime_t sleep_start;
 
     // flags to indicate explicitly requested scrubs (by admin)
-    bool must_scrub, must_deep_scrub, must_repair, need_auto;
+    bool must_scrub, must_deep_scrub, must_repair, need_auto, req_scrub;
 
     // Priority to use for scrub scheduling
     unsigned priority = 0;
@@ -1840,6 +1843,7 @@ public:
       must_deep_scrub = false;
       must_repair = false;
       need_auto = false;
+      req_scrub = false;
       time_for_deep = false;
       auto_repair = false;
       check_repair = false;
@@ -1876,6 +1880,7 @@ public:
 
 protected:
   bool scrub_after_recovery;
+  bool save_req_scrub; // Saved for scrub_after_recovery
 
   int active_pushes;
 
@@ -1894,6 +1899,7 @@ protected:
     const hobject_t& soid, list<pair<ScrubMap::object, pg_shard_t> > *ok_peers,
     pg_shard_t bad_peer);
 
+  void abort_scrub();
   void chunky_scrub(ThreadPool::TPHandle &handle);
   void scrub_compare_maps();
   /**
@@ -2043,7 +2049,7 @@ protected:
   TrivialEvent(NeedUpThru)
   TrivialEvent(Backfilled)
   TrivialEvent(LocalBackfillReserved)
-  TrivialEvent(RejectRemoteReservation)
+  TrivialEvent(RejectTooFullRemoteReservation)
   public:
   TrivialEvent(RequestBackfill)
   protected:
@@ -2284,7 +2290,6 @@ protected:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< ActMap >,
 	boost::statechart::custom_reaction< MNotifyRec >,
-	boost::statechart::transition< NeedActingChange, WaitActingChange >,
 	boost::statechart::custom_reaction<SetForceRecovery>,
 	boost::statechart::custom_reaction<UnsetForceRecovery>,
 	boost::statechart::custom_reaction<SetForceBackfill>,
@@ -2431,12 +2436,12 @@ protected:
         boost::statechart::custom_reaction< Backfilled >,
 	boost::statechart::custom_reaction< DeferBackfill >,
 	boost::statechart::custom_reaction< UnfoundBackfill >,
-	boost::statechart::custom_reaction< RemoteReservationRejected >,
+	boost::statechart::custom_reaction< RemoteReservationRejectedTooFull >,
 	boost::statechart::custom_reaction< RemoteReservationRevokedTooFull>,
 	boost::statechart::custom_reaction< RemoteReservationRevoked>
 	> reactions;
       explicit Backfilling(my_context ctx);
-      boost::statechart::result react(const RemoteReservationRejected& evt) {
+      boost::statechart::result react(const RemoteReservationRejectedTooFull& evt) {
 	// for compat with old peers
 	post_event(RemoteReservationRevokedTooFull());
 	return discard_event();
@@ -2454,7 +2459,7 @@ protected:
     struct WaitRemoteBackfillReserved : boost::statechart::state< WaitRemoteBackfillReserved, Active >, NamedState {
       typedef boost::mpl::list<
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
-	boost::statechart::custom_reaction< RemoteReservationRejected >,
+	boost::statechart::custom_reaction< RemoteReservationRejectedTooFull >,
 	boost::statechart::custom_reaction< RemoteReservationRevoked >,
 	boost::statechart::transition< AllBackfillsReserved, Backfilling >
 	> reactions;
@@ -2463,15 +2468,20 @@ protected:
       void retry();
       void exit();
       boost::statechart::result react(const RemoteBackfillReserved& evt);
-      boost::statechart::result react(const RemoteReservationRejected& evt);
+      boost::statechart::result react(const RemoteReservationRejectedTooFull& evt);
       boost::statechart::result react(const RemoteReservationRevoked& evt);
     };
 
     struct WaitLocalBackfillReserved : boost::statechart::state< WaitLocalBackfillReserved, Active >, NamedState {
       typedef boost::mpl::list<
-	boost::statechart::transition< LocalBackfillReserved, WaitRemoteBackfillReserved >
+	boost::statechart::transition< LocalBackfillReserved, WaitRemoteBackfillReserved >,
+	boost::statechart::custom_reaction< RemoteBackfillReserved >
 	> reactions;
       explicit WaitLocalBackfillReserved(my_context ctx);
+      boost::statechart::result react(const RemoteBackfillReserved& evt) {
+	/* no-op */
+	return discard_event();
+      }
       void exit();
     };
 
@@ -2479,12 +2489,12 @@ protected:
       typedef boost::mpl::list<
 	boost::statechart::transition< RequestBackfill, WaitLocalBackfillReserved>,
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
-	boost::statechart::custom_reaction< RemoteReservationRejected >
+	boost::statechart::custom_reaction< RemoteReservationRejectedTooFull >
 	> reactions;
       explicit NotBackfilling(my_context ctx);
       void exit();
       boost::statechart::result react(const RemoteBackfillReserved& evt);
-      boost::statechart::result react(const RemoteReservationRejected& evt);
+      boost::statechart::result react(const RemoteReservationRejectedTooFull& evt);
     };
 
     struct NotRecovering : boost::statechart::state< NotRecovering, Active>, NamedState {
@@ -2562,7 +2572,7 @@ protected:
       typedef boost::mpl::list<
 	boost::statechart::transition< RecoveryDone, RepNotRecovering >,
 	// for compat with old peers
-	boost::statechart::transition< RemoteReservationRejected, RepNotRecovering >,
+	boost::statechart::transition< RemoteReservationRejectedTooFull, RepNotRecovering >,
 	boost::statechart::transition< RemoteReservationCanceled, RepNotRecovering >,
 	boost::statechart::custom_reaction< BackfillTooFull >,
 	boost::statechart::custom_reaction< RemoteRecoveryPreempted >,
@@ -2578,15 +2588,15 @@ protected:
     struct RepWaitBackfillReserved : boost::statechart::state< RepWaitBackfillReserved, ReplicaActive >, NamedState {
       typedef boost::mpl::list<
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
-	boost::statechart::custom_reaction< RejectRemoteReservation >,
-	boost::statechart::custom_reaction< RemoteReservationRejected >,
+	boost::statechart::custom_reaction< RejectTooFullRemoteReservation >,
+	boost::statechart::custom_reaction< RemoteReservationRejectedTooFull >,
 	boost::statechart::custom_reaction< RemoteReservationCanceled >
 	> reactions;
       explicit RepWaitBackfillReserved(my_context ctx);
       void exit();
       boost::statechart::result react(const RemoteBackfillReserved &evt);
-      boost::statechart::result react(const RejectRemoteReservation &evt);
-      boost::statechart::result react(const RemoteReservationRejected &evt);
+      boost::statechart::result react(const RejectTooFullRemoteReservation &evt);
+      boost::statechart::result react(const RemoteReservationRejectedTooFull &evt);
       boost::statechart::result react(const RemoteReservationCanceled &evt);
     };
 
@@ -2594,13 +2604,13 @@ protected:
       typedef boost::mpl::list<
 	boost::statechart::custom_reaction< RemoteRecoveryReserved >,
 	// for compat with old peers
-	boost::statechart::custom_reaction< RemoteReservationRejected >,
+	boost::statechart::custom_reaction< RemoteReservationRejectedTooFull >,
 	boost::statechart::custom_reaction< RemoteReservationCanceled >
 	> reactions;
       explicit RepWaitRecoveryReserved(my_context ctx);
       void exit();
       boost::statechart::result react(const RemoteRecoveryReserved &evt);
-      boost::statechart::result react(const RemoteReservationRejected &evt) {
+      boost::statechart::result react(const RemoteReservationRejectedTooFull &evt) {
 	// for compat with old peers
 	post_event(RemoteReservationCanceled());
 	return discard_event();
@@ -2612,8 +2622,8 @@ protected:
       typedef boost::mpl::list<
 	boost::statechart::custom_reaction< RequestRecoveryPrio >,
 	boost::statechart::custom_reaction< RequestBackfillPrio >,
-	boost::statechart::custom_reaction< RejectRemoteReservation >,
-	boost::statechart::transition< RemoteReservationRejected, RepNotRecovering >,
+	boost::statechart::custom_reaction< RejectTooFullRemoteReservation >,
+	boost::statechart::transition< RemoteReservationRejectedTooFull, RepNotRecovering >,
 	boost::statechart::transition< RemoteReservationCanceled, RepNotRecovering >,
 	boost::statechart::custom_reaction< RemoteRecoveryReserved >,
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
@@ -2630,7 +2640,7 @@ protected:
 	// my reservation completion raced with a RELEASE from primary
 	return discard_event();
       }
-      boost::statechart::result react(const RejectRemoteReservation &evt);
+      boost::statechart::result react(const RejectTooFullRemoteReservation &evt);
       void exit();
     };
 
@@ -2735,6 +2745,8 @@ protected:
 	boost::statechart::custom_reaction< DeleteSome >,
 	boost::statechart::transition<DeleteInterrupted, WaitDeleteReserved>
 	> reactions;
+      ghobject_t next;
+      ceph::mono_clock::time_point start;	
       explicit Deleting(my_context ctx);
       boost::statechart::result react(const DeleteSome &evt);
       void exit();
@@ -2775,6 +2787,7 @@ protected:
 	boost::statechart::custom_reaction< MLogRec >,
 	boost::statechart::custom_reaction< GotLog >,
 	boost::statechart::custom_reaction< AdvMap >,
+	boost::statechart::transition< NeedActingChange, WaitActingChange >,
 	boost::statechart::transition< IsIncomplete, Incomplete >
 	> reactions;
       boost::statechart::result react(const AdvMap&);
@@ -3136,6 +3149,9 @@ protected:
   // abstract bits
   friend class FlushState;
 
+public:
+  void init_collection_pool_opts();
+protected:
   virtual void on_role_change() = 0;
   virtual void on_pool_change() = 0;
   virtual void on_change(ObjectStore::Transaction *t) = 0;

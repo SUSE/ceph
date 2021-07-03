@@ -1663,9 +1663,10 @@ void PrimaryLogPG::calc_trim_to_aggressive()
     target = cct->_conf->osd_max_pg_log_entries;
   }
   // limit pg log trimming up to the can_rollback_to value
-  eversion_t limit = std::min(
+  eversion_t limit = std::min({
     pg_log.get_head(),
-    pg_log.get_can_rollback_to());
+    pg_log.get_can_rollback_to(),
+    last_update_ondisk});
   dout(10) << __func__ << " limit = " << limit << dendl;
 
   if (limit != eversion_t() &&
@@ -5426,14 +5427,16 @@ struct C_ExtentCmpRead : public Context {
   ceph_le64 read_length{};
   bufferlist read_bl;
   Context *fill_extent_ctx;
+  bool munged;
 
   C_ExtentCmpRead(PrimaryLogPG *primary_log_pg, OSDOp &osd_op,
 		  boost::optional<uint32_t> maybe_crc, uint64_t size,
-		  OSDService *osd, hobject_t soid, __le32 flags)
+		  OSDService *osd, hobject_t soid, __le32 flags, bool munged)
     : primary_log_pg(primary_log_pg), osd_op(osd_op),
       fill_extent_ctx(new FillInVerifyExtent(&read_length, &osd_op.rval,
 					     &read_bl, maybe_crc, size,
-					     osd, soid, flags)) {
+					     osd, soid, flags)),
+      munged(munged) {
   }
   ~C_ExtentCmpRead() override {
     delete fill_extent_ctx;
@@ -5450,12 +5453,12 @@ struct C_ExtentCmpRead : public Context {
     fill_extent_ctx = nullptr;
 
     if (osd_op.rval >= 0) {
-      osd_op.rval = primary_log_pg->finish_extent_cmp(osd_op, read_bl);
+      osd_op.rval = primary_log_pg->finish_extent_cmp(osd_op, read_bl, munged);
     }
   }
 };
 
-int PrimaryLogPG::do_extent_cmp(OpContext *ctx, OSDOp& osd_op)
+int PrimaryLogPG::do_extent_cmp(OpContext *ctx, OSDOp& osd_op, bool munged)
 {
   dout(20) << __func__ << dendl;
   ceph_osd_op& op = osd_op.op;
@@ -5475,10 +5478,10 @@ int PrimaryLogPG::do_extent_cmp(OpContext *ctx, OSDOp& osd_op)
 
   if (op.extent.length == 0) {
     dout(20) << __func__ << " zero length extent" << dendl;
-    return finish_extent_cmp(osd_op, bufferlist{});
+    return finish_extent_cmp(osd_op, bufferlist{}, munged);
   } else if (!ctx->obs->exists || ctx->obs->oi.is_whiteout()) {
     dout(20) << __func__ << " object DNE" << dendl;
-    return finish_extent_cmp(osd_op, {});
+    return finish_extent_cmp(osd_op, {}, munged);
   } else if (pool.info.is_erasure()) {
     // If there is a data digest and it is possible we are reading
     // entire object, pass the digest.
@@ -5491,7 +5494,7 @@ int PrimaryLogPG::do_extent_cmp(OpContext *ctx, OSDOp& osd_op)
     // async read
     auto& soid = oi.soid;
     auto extent_cmp_ctx = new C_ExtentCmpRead(this, osd_op, maybe_crc, oi.size,
-					      osd, soid, op.flags);
+					      osd, soid, op.flags, munged);
     ctx->pending_async_reads.push_back({
       {op.extent.offset, op.extent.length, op.flags},
       {&extent_cmp_ctx->read_bl, extent_cmp_ctx}});
@@ -5518,15 +5521,21 @@ int PrimaryLogPG::do_extent_cmp(OpContext *ctx, OSDOp& osd_op)
     derr << __func__ << " failed " << result << dendl;
     return result;
   }
-  return finish_extent_cmp(osd_op, read_op.outdata);
+  return finish_extent_cmp(osd_op, read_op.outdata, munged);
 }
 
-int PrimaryLogPG::finish_extent_cmp(OSDOp& osd_op, const bufferlist &read_bl)
+int PrimaryLogPG::finish_extent_cmp(OSDOp& osd_op, const bufferlist &read_bl, bool munged)
 {
   for (uint64_t idx = 0; idx < osd_op.indata.length(); ++idx) {
     char read_byte = (idx < read_bl.length() ? read_bl[idx] : 0);
     if (osd_op.indata[idx] != read_byte) {
-        return (-MAX_ERRNO - idx);
+        if (munged) {
+	  dout(10) << "munging mismatch: " << idx << dendl;
+	  // SES < 5 mismatch returns -EILSEQ, with offset sent as response data
+	  encode(idx, osd_op.outdata);
+	  return -EILSEQ;
+	}
+	return (-MAX_ERRNO - idx);
     }
   }
 
@@ -5779,6 +5788,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
   ObjectState& obs = ctx->new_obs;
   object_info_t& oi = obs.oi;
   const hobject_t& soid = oi.soid;
+  bool cmpext_munged = false;
   const bool skip_data_digest = osd->store->has_builtin_csum() &&
     osd->osd_skip_data_digest;
 
@@ -5808,6 +5818,19 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
     dout(10) << "do_osd_op  " << osd_op << dendl;
 
     auto bp = osd_op.indata.cbegin();
+
+    if ((op.op == CEPH_OSD_OP_CHECKSUM)
+			    && (osd_op.indata.length() > sizeof(op.checksum))) {
+      // CEPH_OSD_OP_CHECKSUM opcode was used in SES < 5 for CMPEXT.
+      // This is detectable via the data buffer size, which is *always* a single
+      // sector for old cmpext reqs.
+      dout(10) << "munging CACHE_PIN -> CMPEXT datalen:"
+	       << osd_op.indata.length() << " payloadlen:"
+	       << op.payload_len << " sizeof(struct):"
+	       << sizeof(op.checksum) << dendl;
+      op.op = CEPH_OSD_OP_CMPEXT;
+      cmpext_munged = true;
+    }
 
     // user-visible modifcation?
     switch (op.op) {
@@ -5864,7 +5887,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 		 op.extent.truncate_seq);
 
       if (op_finisher == nullptr) {
-	result = do_extent_cmp(ctx, osd_op);
+	result = do_extent_cmp(ctx, osd_op, cmpext_munged);
       } else {
 	result = op_finisher->execute();
       }
@@ -6551,6 +6574,8 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  if (op.extent.offset > oi.size) {
 	    t->truncate(
 	      soid, op.extent.offset);
+            truncate_update_size_and_usage(ctx->delta_stats, oi,
+                                           op.extent.offset);
 	  } else {
 	    t->nop(soid);
 	  }
@@ -6982,6 +7007,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	  map<string,bufferlist> rmattrs;
 	  result = getattrs_maybe_cache(ctx->obc, &rmattrs);
 	  if (result < 0) {
+	    dout(10) << __func__ << " error: " << cpp_strerror(result) << dendl;
 	    return result;
 	  }
 	  map<string, bufferlist>::iterator iter;
@@ -7797,6 +7823,9 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
     if (result < 0)
       break;
+  }
+  if (result < 0) {
+    dout(10) << __func__ << " error: " << cpp_strerror(result) << dendl;
   }
   return result;
 }
@@ -11590,7 +11619,7 @@ void PrimaryLogPG::remove_missing_object(const hobject_t &soid,
   ceph_assert(r == 0);
 }
 
-void PrimaryLogPG::finish_degraded_object(const hobject_t& oid)
+void PrimaryLogPG::finish_degraded_object(const hobject_t oid)
 {
   dout(10) << __func__ << " " << oid << dendl;
   if (callbacks_for_degraded_object.count(oid)) {
@@ -11684,7 +11713,10 @@ void PrimaryLogPG::recover_got(hobject_t oid, eversion_t v)
 {
   dout(10) << "got missing " << oid << " v " << v << dendl;
   pg_log.recover_got(oid, v, info);
-  if (pg_log.get_log().complete_to != pg_log.get_log().log.end()) {
+  if (pg_log.get_log().log.empty()) {
+    dout(10) << "last_complete now " << info.last_complete
+             << " while log is empty" << dendl;
+  } else if (pg_log.get_log().complete_to != pg_log.get_log().log.end()) {
     dout(10) << "last_complete now " << info.last_complete
 	     << " log.complete_to " << pg_log.get_log().complete_to->version
 	     << dendl;
@@ -13514,16 +13546,22 @@ void PrimaryLogPG::scan_range(
     if (is_primary())
       obc = object_contexts.lookup(*p);
     if (obc) {
+      if (!obc->obs.exists) {
+	/* If the object does not exist here, it must have been removed
+	 * between the collection_list_partial and here.  This can happen
+	 * for the first item in the range, which is usually last_backfill.
+	 */
+	continue;
+      }
       bi->objects[*p] = obc->obs.oi.version;
       dout(20) << "  " << *p << " " << obc->obs.oi.version << dendl;
     } else {
       bufferlist bl;
       int r = pgbackend->objects_get_attr(*p, OI_ATTR, &bl);
-
       /* If the object does not exist here, it must have been removed
-	 * between the collection_list_partial and here.  This can happen
-	 * for the first item in the range, which is usually last_backfill.
-	 */
+       * between the collection_list_partial and here.  This can happen
+       * for the first item in the range, which is usually last_backfill.
+       */
       if (r == -ENOENT)
 	continue;
 
@@ -15257,6 +15295,7 @@ int PrimaryLogPG::rep_repair_primary_object(const hobject_t& soid, OpContext *ct
     eio_errors_to_process = true;
     ceph_assert(is_clean());
     state_set(PG_STATE_REPAIR);
+    state_clear(PG_STATE_CLEAN);
     queue_peering_event(
         PGPeeringEventRef(
 	  std::make_shared<PGPeeringEvent>(

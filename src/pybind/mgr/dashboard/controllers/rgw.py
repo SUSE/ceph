@@ -6,11 +6,12 @@ import json
 import cherrypy
 
 from . import ApiController, BaseController, RESTController, Endpoint, \
-    ReadPermission
+    ReadPermission, allow_empty_body
 from .. import logger
 from ..exceptions import DashboardException
 from ..rest_client import RequestException
-from ..security import Scope
+from ..security import Scope, Permission
+from ..services.auth import AuthManager, JwtManager
 from ..services.ceph_service import CephService
 from ..services.rgw_client import RgwClient
 
@@ -23,9 +24,23 @@ class Rgw(BaseController):
     def status(self):
         status = {'available': False, 'message': None}
         try:
+            if not CephService.get_service_list('rgw'):
+                raise LookupError('No RGW service is running.')
             instance = RgwClient.admin_instance()
             # Check if the service is online.
-            if not instance.is_service_online():
+            try:
+                is_online = instance.is_service_online()
+            except RequestException as e:
+                # Drop this instance because the RGW client seems not to
+                # exist anymore (maybe removed via orchestrator). Removing
+                # the instance from the cache will result in the correct
+                # error message next time when the backend tries to
+                # establish a new connection (-> 'No RGW found' instead
+                # of 'RGW REST API failed request ...').
+                # Note, this only applies to auto-detected RGW clients.
+                RgwClient.drop_instance(instance.userid)
+                raise e
+            if not is_online:
                 msg = 'Failed to connect to the Object Gateway\'s Admin Ops API.'
                 raise RequestException(msg)
             # Ensure the API user ID is known by the RGW.
@@ -103,6 +118,18 @@ class RgwRESTController(RESTController):
             raise DashboardException(e, http_status_code=500, component='rgw')
 
 
+@ApiController('/rgw/site', Scope.RGW)
+class RgwSite(RgwRESTController):
+    def list(self, query=None):
+        if query == 'realms':
+            result = RgwClient.admin_instance().get_realms()
+        else:
+            # @TODO: for multisite: by default, retrieve cluster topology/map.
+            raise DashboardException(http_status_code=501, component='rgw', msg='Not Implemented')
+
+        return result
+
+
 @ApiController('/rgw/bucket', Scope.RGW)
 class RgwBucket(RgwRESTController):
 
@@ -121,13 +148,40 @@ class RgwBucket(RgwRESTController):
                 if bucket['tenant'] else bucket['bucket']
         return bucket
 
-    def list(self):
-        return self.proxy('GET', 'bucket')
+    @staticmethod
+    def strip_tenant_from_bucket_name(bucket_name, uid):
+        # type (str, str) => str
+        """
+        When linking a bucket to a new user belonging to same tenant
+        as the previous owner, tenant must be removed from the bucket name.
+        >>> RgwBucket.strip_tenant_from_bucket_name('tenant/bucket-name', 'tenant$user1')
+        'bucket-name'
+        >>> RgwBucket.strip_tenant_from_bucket_name('tenant/bucket-name', 'tenant2$user2')
+        'tenant/bucket-name'
+        >>> RgwBucket.strip_tenant_from_bucket_name('bucket-name', 'user1')
+        'bucket-name'
+        """
+        bucket_tenant = bucket_name[:bucket_name.find('/')] if bucket_name.find('/') >= 0 else None
+        uid_tenant = uid[:uid.find('$')] if uid.find('$') >= 0 else None
+        if bucket_tenant and uid_tenant and bucket_tenant == uid_tenant:
+            return bucket_name[bucket_name.find('/') + 1:]
+
+        return bucket_name
+
+    def list(self, stats=False):
+        query_params = '?stats' if stats else ''
+        result = self.proxy('GET', 'bucket{}'.format(query_params))
+
+        if stats:
+            result = [self._append_bid(bucket) for bucket in result]
+
+        return result
 
     def get(self, bucket):
         result = self.proxy('GET', 'bucket', {'bucket': bucket})
         return self._append_bid(result)
 
+    @allow_empty_body
     def create(self, bucket, uid):
         try:
             rgw_client = RgwClient.instance(uid)
@@ -135,9 +189,10 @@ class RgwBucket(RgwRESTController):
         except RequestException as e:
             raise DashboardException(e, http_status_code=500, component='rgw')
 
+    @allow_empty_body
     def set(self, bucket, bucket_id, uid):
         result = self.proxy('PUT', 'bucket', {
-            'bucket': bucket,
+            'bucket': RgwBucket.strip_tenant_from_bucket_name(bucket, uid),
             'bucket-id': bucket_id,
             'uid': uid
         }, json_response=False)
@@ -168,6 +223,13 @@ class RgwUser(RgwRESTController):
                 if user['tenant'] else user['user_id']
         return user
 
+    @staticmethod
+    def _keys_allowed():
+        permissions = AuthManager.get_user(JwtManager.get_username()).permissions_dict()
+        edit_permissions = [Permission.CREATE, Permission.UPDATE, Permission.DELETE]
+        return Scope.RGW in permissions and Permission.READ in permissions[Scope.RGW] \
+            and len(set(edit_permissions).intersection(set(permissions[Scope.RGW]))) > 0
+
     def list(self):
         users = []
         marker = None
@@ -188,6 +250,9 @@ class RgwUser(RgwRESTController):
 
     def get(self, uid):
         result = self.proxy('GET', 'user', {'uid': uid})
+        if not self._keys_allowed():
+            del result['keys']
+            del result['swift_keys']
         return self._append_uid(result)
 
     @Endpoint()
@@ -200,6 +265,7 @@ class RgwUser(RgwRESTController):
                 emails.append(user["email"])
         return emails
 
+    @allow_empty_body
     def create(self, uid, display_name, email=None, max_buckets=None,
                suspended=None, generate_key=None, access_key=None,
                secret_key=None):
@@ -221,6 +287,7 @@ class RgwUser(RgwRESTController):
         result = self.proxy('PUT', 'user', params)
         return self._append_uid(result)
 
+    @allow_empty_body
     def set(self, uid, display_name=None, email=None, max_buckets=None,
             suspended=None):
         params = {'uid': uid}
@@ -250,6 +317,7 @@ class RgwUser(RgwRESTController):
 
     # pylint: disable=redefined-builtin
     @RESTController.Resource(method='POST', path='/capability', status=201)
+    @allow_empty_body
     def create_cap(self, uid, type, perm):
         return self.proxy('PUT', 'user?caps', {
             'uid': uid,
@@ -265,6 +333,7 @@ class RgwUser(RgwRESTController):
         })
 
     @RESTController.Resource(method='POST', path='/key', status=201)
+    @allow_empty_body
     def create_key(self, uid, key_type='s3', subuser=None, generate_key='true',
                    access_key=None, secret_key=None):
         params = {'uid': uid, 'key-type': key_type, 'generate-key': generate_key}
@@ -290,6 +359,7 @@ class RgwUser(RgwRESTController):
         return self.proxy('GET', 'user?quota', {'uid': uid})
 
     @RESTController.Resource(method='PUT', path='/quota')
+    @allow_empty_body
     def set_quota(self, uid, quota_type, enabled, max_size_kb, max_objects):
         return self.proxy('PUT', 'user?quota', {
             'uid': uid,
@@ -300,6 +370,7 @@ class RgwUser(RgwRESTController):
         }, json_response=False)
 
     @RESTController.Resource(method='POST', path='/subuser', status=201)
+    @allow_empty_body
     def create_subuser(self, uid, subuser, access, key_type='s3',
                        generate_secret='true', access_key=None,
                        secret_key=None):

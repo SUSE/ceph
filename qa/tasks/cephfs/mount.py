@@ -1,13 +1,16 @@
 from contextlib import contextmanager
+from io import BytesIO
 import json
 import logging
 import datetime
+import six
 import time
+from six import StringIO
 from textwrap import dedent
 import os
-from StringIO import StringIO
+from teuthology.misc import sudo_write_file
 from teuthology.orchestra import run
-from teuthology.orchestra.run import CommandFailedError, ConnectionLostError
+from teuthology.orchestra.run import CommandFailedError, ConnectionLostError, Raw
 from tasks.cephfs.filesystem import Filesystem
 
 log = logging.getLogger(__name__)
@@ -26,6 +29,7 @@ class CephFSMount(object):
         self.client_id = client_id
         self.client_remote = client_remote
         self.mountpoint_dir_name = 'mnt.{id}'.format(id=self.client_id)
+        self._mountpoint = None
         self.fs = None
 
         self.test_files = ['a', 'b', 'c']
@@ -34,8 +38,16 @@ class CephFSMount(object):
 
     @property
     def mountpoint(self):
-        return os.path.join(
-            self.test_dir, '{dir_name}'.format(dir_name=self.mountpoint_dir_name))
+        if self._mountpoint == None:
+            self._mountpoint= os.path.join(
+                self.test_dir, '{dir_name}'.format(dir_name=self.mountpoint_dir_name))
+        return self._mountpoint
+
+    @mountpoint.setter
+    def mountpoint(self, path):
+        if not isinstance(path, str):
+            raise RuntimeError('path should be of str type.')
+        self._mountpoint = path
 
     def is_mounted(self):
         raise NotImplementedError()
@@ -49,7 +61,7 @@ class CephFSMount(object):
         self.fs.wait_for_daemons()
         log.info('Ready to start {}...'.format(type(self).__name__))
 
-    def mount(self, mount_path=None, mount_fs_name=None):
+    def mount(self, mount_path=None, mount_fs_name=None, mountpoint=None):
         raise NotImplementedError()
 
     def umount(self):
@@ -131,6 +143,29 @@ class CephFSMount(object):
             if r.exitstatus != 0:
                 raise RuntimeError("Expected file {0} not found".format(suffix))
 
+    def write_file(self, path, data, perms=None):
+        """
+        Write the given data at the given path and set the given perms to the
+        file on the path.
+        """
+        if path.find(self.mountpoint) == -1:
+            path = os.path.join(self.mountpoint, path)
+
+        sudo_write_file(self.client_remote, path, data)
+
+        if perms:
+            self.run_shell(args=f'chmod {perms} {path}')
+
+    def read_file(self, path):
+        """
+        Return the data from the file on given path.
+        """
+        if path.find(self.mountpoint) == -1:
+            path = os.path.join(self.mountpoint, path)
+
+        return self.run_shell(args=['sudo', 'cat', path], omit_sudo=False).\
+            stdout.getvalue().strip()
+
     def create_destroy(self):
         assert(self.is_mounted())
 
@@ -144,21 +179,29 @@ class CephFSMount(object):
             'sudo', 'rm', '-f', os.path.join(self.mountpoint, filename)
         ])
 
-    def _run_python(self, pyscript, py_version='python'):
+    def _run_python(self, pyscript, py_version='python3'):
         return self.client_remote.run(
                args=['sudo', 'adjust-ulimits', 'daemon-helper', 'kill',
                      py_version, '-c', pyscript], wait=False, stdin=run.PIPE,
                stdout=StringIO())
 
-    def run_python(self, pyscript, py_version='python'):
+    def run_python(self, pyscript, py_version='python3'):
         p = self._run_python(pyscript, py_version)
         p.wait()
-        return p.stdout.getvalue().strip()
+        return six.ensure_str(p.stdout.getvalue().strip())
 
-    def run_shell(self, args, wait=True):
+    def run_shell(self, args, wait=True, check_status=True, omit_sudo=True):
+        if isinstance(args, str):
+            args = args.split()
+
         args = ["cd", self.mountpoint, run.Raw('&&'), "sudo"] + args
         return self.client_remote.run(args=args, stdout=StringIO(),
-                                      stderr=StringIO(), wait=wait)
+                                      stderr=StringIO(), wait=wait,
+                                      check_status=check_status,
+                                      omit_sudo=omit_sudo)
+
+    def run_shell_payload(self, payload, **kwargs):
+        return self.run_shell(["bash", "-c", Raw(f"'{payload}'")], **kwargs)
 
     def open_no_data(self, basename):
         """
@@ -191,20 +234,20 @@ class CephFSMount(object):
             pyscript = dedent("""
                 import time
 
-                f = open("{path}", 'w')
-                f.write('content')
-                f.flush()
-                f.write('content2')
-                while True:
-                    time.sleep(1)
+                with open("{path}", 'w') as f:
+                    f.write('content')
+                    f.flush()
+                    f.write('content2')
+                    while True:
+                        time.sleep(1)
                 """).format(path=path)
         else:
             pyscript = dedent("""
                 import time
 
-                f = open("{path}", 'r')
-                while True:
-                    time.sleep(1)
+                with open("{path}", 'r') as f:
+                    while True:
+                        time.sleep(1)
                 """).format(path=path)
 
         rproc = self._run_python(pyscript)
@@ -315,7 +358,7 @@ class CephFSMount(object):
             f1 = open("{path}-1", 'r')
             try:
                 fcntl.flock(f1, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except IOError, e:
+            except IOError as e:
                 if e.errno == errno.EAGAIN:
                     pass
             else:
@@ -325,7 +368,7 @@ class CephFSMount(object):
             try:
                 lockdata = struct.pack('hhllhh', fcntl.F_WRLCK, 0, 0, 0, 0, 0)
                 fcntl.fcntl(f2, fcntl.F_SETLK, lockdata)
-            except IOError, e:
+            except IOError as e:
                 if e.errno == errno.EAGAIN:
                     pass
             else:
@@ -335,7 +378,7 @@ class CephFSMount(object):
 
         log.info("check lock on file {0}".format(basename))
         self.client_remote.run(args=[
-            'sudo', 'python', '-c', pyscript
+            'sudo', 'python3', '-c', pyscript
         ])
 
     def write_background(self, basename="background_file", loop=False):
@@ -352,14 +395,14 @@ class CephFSMount(object):
             import os
             import time
 
-            fd = os.open("{path}", os.O_RDWR | os.O_CREAT, 0644)
+            fd = os.open("{path}", os.O_RDWR | os.O_CREAT, 0o644)
             try:
                 while True:
-                    os.write(fd, 'content')
+                    os.write(fd, b'content')
                     time.sleep(1)
                     if not {loop}:
                         break
-            except IOError, e:
+            except IOError as e:
                 pass
             os.close(fd)
             """).format(path=path, loop=str(loop))
@@ -376,8 +419,8 @@ class CephFSMount(object):
 
         return self.run_shell(["dd", "if=/dev/urandom", "of={0}".format(filename),
                                "bs=1M", "conv=fdatasync",
-                               "count={0}".format(n_mb),
-                               "seek={0}".format(seek)
+                               "count={0}".format(int(n_mb)),
+                               "seek={0}".format(int(seek))
                                ], wait=wait)
 
     def write_test_pattern(self, filename, size):
@@ -385,11 +428,10 @@ class CephFSMount(object):
         return self.run_python(dedent("""
             import zlib
             path = "{path}"
-            f = open(path, 'w')
-            for i in range(0, {size}):
-                val = zlib.crc32("%s" % i) & 7
-                f.write(chr(val))
-            f.close()
+            with open(path, 'w') as f:
+                for i in range(0, {size}):
+                    val = zlib.crc32(str(i).encode('utf-8')) & 7
+                    f.write(chr(val))
         """.format(
             path=os.path.join(self.mountpoint, filename),
             size=size
@@ -400,15 +442,14 @@ class CephFSMount(object):
         return self.run_python(dedent("""
             import zlib
             path = "{path}"
-            f = open(path, 'r')
-            bytes = f.read()
-            f.close()
+            with open(path, 'r') as f:
+                bytes = f.read()
             if len(bytes) != {size}:
                 raise RuntimeError("Bad length {{0}} vs. expected {{1}}".format(
                     len(bytes), {size}
                 ))
             for i, b in enumerate(bytes):
-                val = zlib.crc32("%s" % i) & 7
+                val = zlib.crc32(str(i).encode('utf-8')) & 7
                 if b != chr(val):
                     raise RuntimeError("Bad data at offset {{0}}".format(i))
         """.format(
@@ -435,13 +476,14 @@ class CephFSMount(object):
             n = {count}
             abs_path = "{abs_path}"
 
-            if not os.path.exists(os.path.dirname(abs_path)):
-                os.makedirs(os.path.dirname(abs_path))
+            if not os.path.exists(abs_path):
+                os.makedirs(abs_path)
 
             handles = []
             for i in range(0, n):
-                fname = "{{0}}_{{1}}".format(abs_path, i)
-                handles.append(open(fname, 'w'))
+                fname = "file_"+str(i)
+                path = os.path.join(abs_path, fname)
+                handles.append(open(path, 'w'))
 
             while True:
                 time.sleep(1)
@@ -469,12 +511,11 @@ class CephFSMount(object):
 
             for i in range(0, n):
                 fname = "{{0}}_{{1}}".format(abs_path, i)
-                h = open(fname, 'w')
-                h.write('content')
-                if {sync}:
-                    h.flush()
-                    os.fsync(h.fileno())
-                h.close()
+                with open(fname, 'w') as f:
+                    f.write('content')
+                    if {sync}:
+                        f.flush()
+                        os.fsync(f.fileno())
             """).format(abs_path=abs_path, count=count, sync=str(sync))
 
         self.run_python(pyscript)
@@ -501,6 +542,14 @@ class CephFSMount(object):
         """
         self._kill_background(p)
         self.background_procs.remove(p)
+
+    def send_signal(self, signal):
+        signal = signal.lower()
+        if signal.lower() not in ['sigstop', 'sigcont', 'sigterm', 'sigkill']:
+            raise NotImplementedError
+
+        self.client_remote.run(args=['sudo', 'kill', '-{0}'.format(signal),
+                                self.client_pid], omit_sudo=False)
 
     def get_global_id(self):
         raise NotImplementedError()
@@ -546,9 +595,9 @@ class CephFSMount(object):
                 sys.exit(e.errno)
 
             attrs = ["st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid", "st_size", "st_atime", "st_mtime", "st_ctime"]
-            print json.dumps(
+            print(json.dumps(
                 dict([(a, getattr(s, a)) for a in attrs]),
-                indent=2)
+                indent=2))
             """).format(path=abs_path)
         proc = self._run_python(pyscript)
         if wait:
@@ -588,14 +637,14 @@ class CephFSMount(object):
                 import os
                 import stat
 
-                print os.stat("{path}").st_ino
+                print(os.stat("{path}").st_ino)
                 """).format(path=abs_path)
         else:
             pyscript = dedent("""
                 import os
                 import stat
 
-                print os.lstat("{path}").st_ino
+                print(os.lstat("{path}").st_ino)
                 """).format(path=abs_path)
 
         proc = self._run_python(pyscript)
@@ -609,7 +658,7 @@ class CephFSMount(object):
             import os
             import stat
 
-            print os.stat("{path}").st_nlink
+            print(os.stat("{path}").st_nlink)
             """).format(path=abs_path)
 
         proc = self._run_python(pyscript)
@@ -660,7 +709,7 @@ class CephFSMount(object):
             else:
                 raise
 
-        return p.stdout.getvalue()
+        return str(p.stdout.getvalue())
 
     def df(self):
         """
@@ -670,7 +719,7 @@ class CephFSMount(object):
         p = self.run_shell(["df", "-B1", "."])
         lines = p.stdout.getvalue().strip().split("\n")
         fs, total, used, avail = lines[1].split()[:4]
-        log.warn(lines)
+        log.warning(lines)
 
         return {
             "total": int(total),

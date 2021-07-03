@@ -105,7 +105,7 @@ int CrushLocation::init_on_startup()
 
   // start with a sane default
   char hostname[HOST_NAME_MAX + 1];
-  int r = gethostname(hostname, sizeof(hostname)-1);
+  int r = gethostname(hostname, sizeof(hostname));
   if (r < 0)
     strcpy(hostname, "unknown_host");
   // use short hostname
@@ -119,6 +119,5 @@ int CrushLocation::init_on_startup()
   loc.clear();
   loc.insert(make_pair<std::string,std::string>("host", hostname));
   loc.insert(make_pair<std::string,std::string>("root", "default"));
-  lgeneric_dout(cct, 10) << "crush_location is (default) " << loc << dendl;
   return 0;
 }

@@ -1,0 +1,10 @@
+tasks:
+- exec:
+    client.0:
+      - "chmod a+r /etc/ceph/ceph.client.admin.keyring"
+- workunit:
+    clients:
+      client.0:
+        - rbd/journal.sh
+        - rbd/map-unmap.sh
+        - rbd/qemu-img.sh

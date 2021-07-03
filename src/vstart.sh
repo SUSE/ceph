@@ -40,7 +40,7 @@ if [ -e CMakeCache.txt ]; then
   fi
 fi
 
-# use CEPH_BUILD_ROOT to vstart from a 'make install' 
+# use CEPH_BUILD_ROOT to vstart from a 'make install'
 if [ -n "$CEPH_BUILD_ROOT" ]; then
         [ -z "$CEPH_BIN" ] && CEPH_BIN=$CEPH_BUILD_ROOT/bin
         [ -z "$CEPH_LIB" ] && CEPH_LIB=$CEPH_BUILD_ROOT/lib
@@ -67,7 +67,7 @@ export PYTHONPATH=$PYBIND:$CEPH_LIB/cython_modules/lib.${CEPH_PY_VERSION_MAJOR}:
 export LD_LIBRARY_PATH=$CEPH_LIB:$LD_LIBRARY_PATH
 export DYLD_LIBRARY_PATH=$CEPH_LIB:$DYLD_LIBRARY_PATH
 # Suppress logging for regular use that indicated that we are using a
-# development version. vstart.sh is only used during testing and 
+# development version. vstart.sh is only used during testing and
 # development
 export CEPH_DEV=1
 
@@ -307,12 +307,12 @@ case $1 in
     -X )
 	    cephx=0
 	    ;;
-    
+
     -g | --gssapi)
-	    gssapi_authx=1 
+	    gssapi_authx=1
 	    ;;
     -G)
-	    gssapi_authx=0 
+	    gssapi_authx=0
 	    ;;
 
     -k )
@@ -539,7 +539,7 @@ EOF
 	auth client required = gss
 	gss ktab client file = $CEPH_DEV_DIR/gss_\$name.keytab
 EOF
-	else 
+	else
 		wconf <<EOF
 	auth cluster required = none
 	auth service required = none
@@ -609,6 +609,7 @@ $DAEMONOPTS
         osd class dir = $OBJCLASS_PATH
         osd class load list = *
         osd class default list = *
+        osd fast shutdown = false
 
         filestore wbthrottle xfs ios start flusher = 10
         filestore wbthrottle xfs ios hard limit = 20
@@ -632,6 +633,7 @@ $CMONDEBUG
 $extra_conf
         mon cluster log file = $CEPH_OUT_DIR/cluster.mon.\$id.log
         osd pool default erasure code profile = plugin=jerasure technique=reed_sol_van k=2 m=1 crush-failure-domain=osd
+        auth allow insecure global id reclaim = false
 EOF
 }
 
@@ -774,6 +776,7 @@ start_mgr() {
     local ssl=${DASHBOARD_SSL:-1}
     # avoid monitors on nearby ports (which test/*.sh use extensively)
     MGR_PORT=$(($CEPH_PORT + 1000))
+    PROMETHEUS_PORT=9283
     for name in x y z a b c d e f g h i j k l m n o p
     do
         [ $mgr -eq $CEPH_NUM_MGR ] && break
@@ -805,6 +808,8 @@ EOF
                 fi
             fi
 	    MGR_PORT=$(($MGR_PORT + 1000))
+	    ceph_adm config set mgr mgr/prometheus/$name/server_port $PROMETHEUS_PORT --force
+	    PROMETHEUS_PORT=$(($PROMETHEUS_PORT + 1000))
 
 	    ceph_adm config set mgr mgr/restful/$name/server_port $MGR_PORT --force
             if [ $mgr -eq 1 ]; then
@@ -824,7 +829,10 @@ EOF
     if [ "$new" -eq 1 ]; then
         # setting login credentials for dashboard
         if $with_mgr_dashboard; then
-            ceph_adm tell mgr dashboard ac-user-create admin admin administrator
+            DASHBOARD_ADMIN_SECRET_FILE="${CEPH_CONF_PATH}/dashboard-admin-secret.txt"
+            printf 'admin' > "${DASHBOARD_ADMIN_SECRET_FILE}"
+            ceph_adm tell mgr dashboard ac-user-create admin -i "${DASHBOARD_ADMIN_SECRET_FILE}" \
+                administrator
             if [ "$ssl" != "0" ]; then
                 if ! ceph_adm tell mgr dashboard create-self-signed-cert;  then
                     echo dashboard module not working correctly!
@@ -993,7 +1001,6 @@ if [ $CEPH_NUM_MON -gt 0 ]; then
 [global]
 osd_pool_default_size = $OSD_POOL_DEFAULT_SIZE
 osd_pool_default_min_size = 1
-mon_pg_warn_min_per_osd = 3
 
 [mon]
 mon_osd_reporter_subtree_level = osd
@@ -1082,7 +1089,7 @@ do
     [ $fs -eq $CEPH_NUM_FS ] && break
     fs=$(($fs + 1))
     if [ "$CEPH_MAX_MDS" -gt 1 ]; then
-        ceph_adm fs set "cephfs_${name}" max_mds "$CEPH_MAX_MDS"
+        ceph_adm fs set "${name}" max_mds "$CEPH_MAX_MDS"
     fi
 done
 

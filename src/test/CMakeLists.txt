@@ -1,6 +1,6 @@
 include(AddCephTest)
 
-set(UNITTEST_LIBS GMock::Main GMock::GMock GTest::GTest ${CMAKE_THREAD_LIBS_INIT} 
+set(UNITTEST_LIBS GMock::Main GMock::GMock GTest::GTest ${CMAKE_THREAD_LIBS_INIT}
     ${GSSAPI_LIBRARIES} ${OPENLDAP_LIBRARIES} ${CMAKE_DL_LIBS})
 
 add_library(unit-main OBJECT unit.cc)
@@ -55,6 +55,9 @@ if(WITH_RADOSGW)
   set(rgw_libs rgw_a)
   if(WITH_RADOSGW_AMQP_ENDPOINT)
     list(APPEND rgw_libs amqp_mock)
+  endif()
+  if(WITH_RADOSGW_KAFKA_ENDPOINT)
+    list(APPEND rgw_libs kafka_stub)
   endif()
   add_subdirectory(rgw)
 endif(WITH_RADOSGW)
@@ -138,7 +141,7 @@ target_link_libraries(ceph_bench_log global pthread rt ${BLKID_LIBRARIES} ${CMAK
 add_executable(ceph_test_mutate
   test_mutate.cc
   )
-target_link_libraries(ceph_test_mutate global librados ${BLKID_LIBRARIES} 
+target_link_libraries(ceph_test_mutate global librados ${BLKID_LIBRARIES}
   ${CMAKE_DL_LIBS})
 
 # test_trans
@@ -298,6 +301,10 @@ target_link_libraries(ceph_test_librgw_file_nfsns
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+if(WITH_BOOST_CONTEXT)
+  target_link_libraries(ceph_test_librgw_file_nfsns spawn)
+endif()
+
 
 # ceph_test_librgw_file_aw (nfs write transaction [atomic write] tests)
 add_executable(ceph_test_librgw_file_aw
@@ -322,6 +329,9 @@ target_link_libraries(ceph_test_librgw_file_marker
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+if(WITH_BOOST_CONTEXT)
+  target_link_libraries(ceph_test_librgw_file_marker spawn)
+endif()
 
 # ceph_test_rgw_token
 add_executable(ceph_test_rgw_token
@@ -528,7 +538,14 @@ if(WITH_FIO OR WITH_SYSTEM_FIO)
 endif()
 
 if(WITH_RBD)
-  add_ceph_test(run-rbd-unit-tests.sh ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh)
+  # Run rbd-unit-tests separate so they an run in parallel
+  # For values see: src/include/rbd/features.h
+  add_ceph_test(run-rbd-unit-tests-N.sh   ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh N)
+  add_ceph_test(run-rbd-unit-tests-0.sh   ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh 0)
+  add_ceph_test(run-rbd-unit-tests-1.sh   ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh 1)
+  add_ceph_test(run-rbd-unit-tests-61.sh  ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh 61)
+  add_ceph_test(run-rbd-unit-tests-109.sh ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh 109)
+  add_ceph_test(run-rbd-unit-tests-127.sh ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh 127)
   if(FREEBSD)
     add_ceph_test(rbd-ggate.sh ${CMAKE_CURRENT_SOURCE_DIR}/rbd-ggate.sh)
   endif(FREEBSD)
@@ -574,6 +591,24 @@ if(WITH_MGR)
   list(APPEND tox_tests run-tox-mgr-orchestrator_cli)
   set(MGR_ORCHESTRATOR_CLI_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-orchestrator_cli-virtualenv)
   list(APPEND env_vars_for_tox_tests MGR_ORCHESTRATOR_CLI_VIRTUALENV=${MGR_ORCHESTRATOR_CLI_VIRTUALENV})
+endif()
+
+find_program(PROMTOOL_EXECUTABLE promtool)
+if(PROMTOOL_EXECUTABLE)
+  execute_process(
+    COMMAND ${PROMTOOL_EXECUTABLE} test rules /dev/null
+    RESULT_VARIABLE rc
+    OUTPUT_QUIET)
+  if(NOT rc)
+    add_ceph_test(run-promtool-unittests
+      ${PROMTOOL_EXECUTABLE} test rules ${CMAKE_SOURCE_DIR}/monitoring/prometheus/alerts/test_alerts.yml)
+  else()
+    message(WARNING "'${PROMTOOL_EXECUTABLE} test rules' does not work, "
+      "please use a newer prometheus")
+  endif()
+else()
+  add_ceph_test(run-promtool-unittests
+    {CMAKE_CURRENT_SOURCE_DIR}/run-promtool-unittests.sh)
 endif()
 
 set_property(
@@ -888,6 +923,10 @@ target_link_libraries(unittest_subprocess global)
 add_executable(unittest_pageset test_pageset.cc)
 add_ceph_unittest(unittest_pageset)
 target_link_libraries(unittest_pageset global)
+
+add_executable(unittest_random_string test_random_string.cc $<TARGET_OBJECTS:unit-main>)
+add_ceph_unittest(unittest_random_string)
+target_link_libraries(unittest_random_string global)
 
 # unittest_any_
 add_executable(unittest_any test_any.cc)

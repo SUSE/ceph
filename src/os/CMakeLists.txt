@@ -32,6 +32,8 @@ if(WITH_BLUESTORE)
     bluestore/FreelistManager.cc
     bluestore/StupidAllocator.cc
     bluestore/BitmapAllocator.cc
+    bluestore/AvlAllocator.cc
+    bluestore/HybridAllocator.cc
   )
 endif(WITH_BLUESTORE)
 
@@ -71,10 +73,9 @@ if(WITH_SPDK)
     bluestore/NVMEDevice.cc)
 endif()
 
-add_library(os STATIC ${libos_srcs}
-  $<TARGET_OBJECTS:kv_objs>)
+add_library(os STATIC ${libos_srcs})
 
-target_link_libraries(os heap_profiler)
+target_link_libraries(os heap_profiler kv)
 
 if(WITH_BLUEFS)
   add_library(bluefs SHARED 
@@ -90,8 +91,7 @@ if(HAVE_LIBAIO)
 endif(HAVE_LIBAIO)
 
 if(WITH_FUSE)
-  target_include_directories(os SYSTEM PRIVATE ${FUSE_INCLUDE_DIRS})
-  target_link_libraries(os ${FUSE_LIBRARIES})
+  target_link_libraries(os FUSE::FUSE)
 endif()
 
 if(HAVE_LIBZFS)

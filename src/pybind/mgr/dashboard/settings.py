@@ -5,6 +5,8 @@ import errno
 import inspect
 from six import add_metaclass
 
+from mgr_module import CLICheckNonemptyFileInput
+
 from . import mgr
 
 
@@ -37,8 +39,10 @@ class Options(object):
 
     # Grafana settings
     GRAFANA_API_URL = ('', str)
+    GRAFANA_FRONTEND_API_URL = ('', str)
     GRAFANA_API_USERNAME = ('admin', str)
     GRAFANA_API_PASSWORD = ('admin', str)
+    GRAFANA_API_SSL_VERIFY = (True, bool)
     GRAFANA_UPDATE_DASHBOARDS = (False, bool)
 
     # NFS Ganesha settings
@@ -126,12 +130,16 @@ def options_command_list():
                 'perm': 'r'
             })
         elif cmd.startswith('dashboard set'):
-            cmd_list.append({
+            cmd_entry = {
                 'cmd': '{} name=value,type={}'
                        .format(cmd, py2ceph(opt['type'])),
                 'desc': 'Set the {} option value'.format(opt['name']),
                 'perm': 'w'
-            })
+            }
+            if handles_secret(cmd):
+                cmd_entry['cmd'] = cmd
+                cmd_entry['desc'] = '{} read from -i <file>'.format(cmd_entry['desc'])
+            cmd_list.append(cmd_entry)
         elif cmd.startswith('dashboard reset'):
             desc = 'Reset the {} option to its default value'.format(
                 opt['name'])
@@ -152,12 +160,13 @@ def options_schema_list():
     for option, value in inspect.getmembers(Options, filter_attr):
         if option.startswith('_'):
             continue
-        result.append({'name': option, 'default': value[0]})
+        result.append({'name': option, 'default': value[0],
+                       'type': value[1].__name__})
 
     return result
 
 
-def handle_option_command(cmd):
+def handle_option_command(cmd, inbuf):
     if cmd['prefix'] not in _OPTIONS_COMMAND_MAP:
         return -errno.ENOSYS, '', "Command not found '{}'".format(cmd['prefix'])
 
@@ -170,8 +179,23 @@ def handle_option_command(cmd):
     elif cmd['prefix'].startswith('dashboard get'):
         return 0, str(getattr(Settings, opt['name'])), ''
     elif cmd['prefix'].startswith('dashboard set'):
-        value = opt['type'](cmd['value'])
+        if handles_secret(cmd['prefix']):
+            value, stdout, stderr = get_secret(inbuf=inbuf)
+            if stderr:
+                return value, stdout, stderr
+        else:
+            value = cmd['value']
+        value = opt['type'](value)
         if opt['type'] == bool and cmd['value'].lower() == 'false':
             value = False
         setattr(Settings, opt['name'], value)
         return 0, 'Option {} updated'.format(opt['name']), ''
+
+
+def handles_secret(cmd):
+    return bool([cmd for secret_word in ['password', 'key'] if (secret_word in cmd)])
+
+
+@CLICheckNonemptyFileInput
+def get_secret(inbuf=None):
+    return inbuf, None, None

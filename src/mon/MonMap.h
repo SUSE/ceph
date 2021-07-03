@@ -433,9 +433,21 @@ public:
   void print(ostream& out) const;
   void print_summary(ostream& out) const;
   void dump(ceph::Formatter *f) const;
+  void dump_summary(ceph::Formatter *f) const;
 
   static void generate_test_instances(list<MonMap*>& o);
 protected:
+  /**
+   * build a monmap from a list of entity_addrvec_t's
+   *
+   * Give mons dummy names.
+   *
+   * @param addrs  list of entity_addrvec_t's
+   * @param prefix prefix to prepend to generated mon names
+   */
+  void init_with_addrs(const std::vector<entity_addrvec_t>& addrs,
+                       bool for_mkfs,
+                       std::string_view prefix);
   /**
    * build a monmap from a list of ips
    *
@@ -447,7 +459,7 @@ protected:
    */
   int init_with_ips(const std::string& ips,
 		    bool for_mkfs,
-		    const std::string &prefix);
+		    std::string_view prefix);
   /**
    * build a monmap from a list of hostnames
    *
@@ -459,7 +471,7 @@ protected:
    */
   int init_with_hosts(const std::string& hostlist,
 		      bool for_mkfs,
-		      const std::string& prefix);
+		      std::string_view prefix);
   int init_with_config_file(const ConfigProxy& conf, std::ostream& errout);
 #if WITH_SEASTAR
   seastar::future<> read_monmap(const std::string& monmap);

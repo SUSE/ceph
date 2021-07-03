@@ -743,6 +743,7 @@ static void dump_user_info(Formatter *f, RGWUserInfo &info,
   op_type_to_str(info.op_mask, buf, sizeof(buf));
   encode_json("op_mask", (const char *)buf, f);
   encode_json("system", (bool)info.system, f);
+  encode_json("admin", (bool)info.admin, f);
   encode_json("default_placement", info.default_placement.name, f);
   encode_json("default_storage_class", info.default_placement.storage_class, f);
   encode_json("placement_tags", info.placement_tags, f);
@@ -1997,7 +1998,8 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, std::string *err_msg)
   if (op_state.max_buckets_specified) {
     user_info.max_buckets = op_state.get_max_buckets();
   } else {
-    user_info.max_buckets = cct->_conf->rgw_user_max_buckets;
+    user_info.max_buckets =
+      cct->_conf.get_val<int64_t>("rgw_user_max_buckets");
   }
 
   user_info.suspended = op_state.get_suspension_status();
@@ -2317,7 +2319,14 @@ int RGWUser::modify(RGWUserAdminOpState& op_state, std::string *err_msg)
 
   ret = check_op(op_state, &subprocess_msg);
   if (ret < 0) {
-    set_err_msg(err_msg, "unable to parse parameters, " + subprocess_msg);
+    if (is_populated() && (user_id.compare(op_state.get_user_id()) != 0)) {
+      set_err_msg(err_msg, "unable to create user " + user_id.to_str()
+		  + " because user id " + op_state.get_user_id().to_str()
+		  + " already exists with email "
+		  + op_state.get_user_email());
+    } else {
+      set_err_msg(err_msg, "unable to parse parameters, " + subprocess_msg);
+    }
     return ret;
   }
 

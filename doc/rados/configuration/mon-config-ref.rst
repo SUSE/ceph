@@ -34,8 +34,7 @@ Monitors can query the most recent version of the cluster map during sync
 operations. Ceph Monitors leverage the key/value store's snapshots and iterators
 (using leveldb) to perform store-wide synchronization.
 
-.. ditaa:: 
-
+.. ditaa::
  /-------------\               /-------------\
  |   Monitor   | Write Changes |    Paxos    |
  |   cCCC      +-------------->+   cCCC      |
@@ -393,6 +392,33 @@ by setting it in the ``[mon]`` section of the configuration file.
 :Default: True
 
 
+``mon warn on slow ping ratio``
+
+:Description: Issue a ``HEALTH_WARN`` in cluster log if any heartbeat
+              between OSDs exceeds ``mon warn on slow ping ratio``
+              of ``osd heartbeat grace``.  The default is 5%.
+:Type: Float
+:Default: ``0.05``
+
+
+``mon warn on slow ping time``
+
+:Description: Override ``mon warn on slow ping ratio`` with a specific value.
+              Issue a ``HEALTH_WARN`` in cluster log if any heartbeat
+              between OSDs exceeds ``mon warn on slow ping time``
+              milliseconds.  The default is 0 (disabled).
+:Type: Integer
+:Default: ``0``
+
+
+``mon warn on pool no redundancy``
+
+:Description: Issue a ``HEALTH_WARN`` in cluster log if any pool is
+              configured with no replicas.
+:Type: Boolean
+:Default: ``True``
+
+
 ``mon cache target full warn ratio``
 
 :Description: Position between pool's ``cache_target_full`` and
@@ -422,8 +448,8 @@ by setting it in the ``[mon]`` section of the configuration file.
               log (a non-positive number disables it). If current health summary
               is empty or identical to the last time, monitor will not send it
               to cluster log.
-:Type: Integer
-:Default: 3600
+:Type: Float
+:Default: 60.000000
 
 
 ``mon health to clog interval``
@@ -433,7 +459,7 @@ by setting it in the ``[mon]`` section of the configuration file.
               send the summary to cluster log no matter if the summary changes
               or not.
 :Type: Integer
-:Default: 60
+:Default: 3600
 
 
 
@@ -475,7 +501,6 @@ Ceph Clients to read and write data. So the Ceph Storage Cluster's operating
 capacity is 95TB, not 99TB.
 
 .. ditaa::
-
  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+
  | Rack 1 |  | Rack 2 |  | Rack 3 |  | Rack 4 |  | Rack 5 |  | Rack 6 |
  | cCCC   |  | cF00   |  | cCCC   |  | cCCC   |  | cCCC   |  | cCCC   |
@@ -606,7 +631,8 @@ fallen behind the other monitors. The requester asks the leader to synchronize,
 and the leader tells the requester to synchronize with a provider.
 
 
-.. ditaa:: +-----------+          +---------+          +----------+
+.. ditaa::
+           +-----------+          +---------+          +----------+
            | Requester |          | Leader  |          | Provider |
            +-----------+          +---------+          +----------+
                   |                    |                     |
@@ -763,6 +789,14 @@ Trimming requires that the placement groups are ``active + clean``.
 :Description: The maximum amount of versions to trim during a single proposal (0 disables it)
 :Type: Integer
 :Default: 500
+
+
+``paxos service trim max multiplier``
+
+:Description: The factor by which paxos service trim max will be multiplied
+              to get a new upper bound when trim sizes are high (0 disables it)
+:Type: Integer
+:Default: ``20``
 
 
 ``mon max log epochs``
@@ -1196,6 +1230,26 @@ Miscellaneous
 :Type: Integer
 :Default: 300
 
+``mon osd cache size min``
+
+:Description: The minimum amount of bytes to be kept mapped in memory for osd
+               monitor caches.
+:Type: 64-bit Integer
+:Default: 134217728
+
+``mon memory target``
+
+:Description: The amount of bytes pertaining to osd monitor caches and kv cache
+              to be kept mapped in memory with cache auto-tuning enabled.
+:Type: 64-bit Integer
+:Default: 2147483648
+
+``mon memory autotune``
+
+:Description: Autotune the cache memory being used for osd monitors and kv
+              database.
+:Type: Boolean
+:Default: True
 
 
 .. _Paxos: https://en.wikipedia.org/wiki/Paxos_(computer_science)

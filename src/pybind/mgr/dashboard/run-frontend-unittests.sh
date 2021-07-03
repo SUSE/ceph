@@ -33,13 +33,18 @@ Some errors might need a manual fix."
 fi
 
 # I18N
-npm run i18n
-i18n_lint=`grep -En "<source> |<source>$| </source>" src/locale/messages.xlf`
-if [[ ! -z $i18n_lint ]]; then
-  echo -e "The following source translations in 'messages.xlf' need to be \
-fixed, please check the I18N suggestions in 'HACKING.rst':\n"
-  echo "${i18n_lint}"
+npm run i18n:extract
+if [ $? -gt 0 ]; then
   failed=true
+  echo -e "\nTranslations extraction has failed."
+else
+  i18n_lint=`awk '/<source> |<source>$| <\/source>/,/<\/context-group>/ {printf "%-4s ", NR; print}' src/locale/messages.xlf`
+  if [ "$i18n_lint" ]; then
+    echo -e "The following source translations in 'messages.xlf' need to be \
+  fixed, please check the I18N suggestions in 'HACKING.rst':\n"
+    echo "${i18n_lint}"
+    failed=true
+  fi
 fi
 
 if [ `uname` != "FreeBSD" ]; then

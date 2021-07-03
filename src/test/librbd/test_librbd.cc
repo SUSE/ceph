@@ -7890,6 +7890,160 @@ TEST_F(TestLibRBD, ImageSpec) {
   ASSERT_EQ(expected_children, children);
 }
 
+TEST_F(TestLibRBD, SnapRemoveWithChildMissing)
+{
+  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+  ASSERT_EQ(0, rados_conf_set(_cluster, "rbd_default_clone_format", "2"));
+  BOOST_SCOPE_EXIT_ALL(&) {
+    ASSERT_EQ(0, rados_conf_set(_cluster, "rbd_default_clone_format", "auto"));
+  };
+
+  librbd::RBD rbd;
+  rados_ioctx_t ioctx1, ioctx2;
+  string pool_name1 = create_pool(true);
+  rados_ioctx_create(_cluster, pool_name1.c_str(), &ioctx1);
+  ASSERT_EQ(0, rados_ioctx_create(_cluster, m_pool_name.c_str(), &ioctx2));
+
+  bool old_format;
+  uint64_t features;
+  rbd_image_t parent, child1, child2, child3;
+  int order = 0;
+  char child_id1[4096];
+  char child_id2[4096];
+  char child_id3[4096];
+
+  ASSERT_EQ(0, get_features(&old_format, &features));
+  ASSERT_FALSE(old_format);
+  std::string parent_name = get_temp_image_name();
+  std::string child_name1 = get_temp_image_name();
+  std::string child_name2 = get_temp_image_name();
+  std::string child_name3 = get_temp_image_name();
+  ASSERT_EQ(0, create_image_full(ioctx1, parent_name.c_str(), 4<<20, &order,
+            false, features));
+  ASSERT_EQ(0, rbd_open(ioctx1, parent_name.c_str(), &parent, NULL));
+  ASSERT_EQ(0, rbd_snap_create(parent, "snap1"));
+  ASSERT_EQ(0, rbd_snap_create(parent, "snap2"));
+
+  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "snap1",
+                           ioctx2, child_name1.c_str(), features, &order));
+  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "snap2",
+                           ioctx1, child_name2.c_str(), features, &order));
+  ASSERT_EQ(0, clone_image(ioctx1, parent, parent_name.c_str(), "snap2",
+                           ioctx2, child_name3.c_str(), features, &order));
+
+  ASSERT_EQ(0, rbd_open(ioctx2, child_name1.c_str(), &child1, NULL));
+  ASSERT_EQ(0, rbd_open(ioctx1, child_name2.c_str(), &child2, NULL));
+  ASSERT_EQ(0, rbd_open(ioctx2, child_name3.c_str(), &child3, NULL));
+  ASSERT_EQ(0, rbd_get_id(child1, child_id1, sizeof(child_id1)));
+  ASSERT_EQ(0, rbd_get_id(child2, child_id2, sizeof(child_id2)));
+  ASSERT_EQ(0, rbd_get_id(child3, child_id3, sizeof(child_id3)));
+  test_list_children2(parent, 3,
+                      child_id1, m_pool_name.c_str(), child_name1.c_str(), false,
+                      child_id2, pool_name1.c_str(), child_name2.c_str(), false,
+                      child_id3, m_pool_name.c_str(), child_name3.c_str(), false);
+
+  size_t max_size = 10;
+  rbd_linked_image_spec_t children[max_size];
+  ASSERT_EQ(0, rbd_list_children3(parent, children, &max_size));
+  ASSERT_EQ(3, static_cast<int>(max_size));
+  rbd_linked_image_spec_list_cleanup(children, max_size);
+
+  ASSERT_EQ(0, rbd_close(child1));
+  ASSERT_EQ(0, rbd_close(child2));
+  ASSERT_EQ(0, rbd_close(child3));
+  rados_ioctx_destroy(ioctx2);
+  ASSERT_EQ(0, rados_pool_delete(_cluster, m_pool_name.c_str()));
+  _pool_names.erase(std::remove(_pool_names.begin(),
+                                _pool_names.end(), m_pool_name),
+                    _pool_names.end());
+  EXPECT_EQ(0, rados_wait_for_latest_osdmap(_cluster));
+
+  ASSERT_EQ(0, rbd_list_children3(parent, children, &max_size));
+  ASSERT_EQ(3, static_cast<int>(max_size));
+  rbd_linked_image_spec_list_cleanup(children, max_size);
+  ASSERT_EQ(0, rbd_snap_remove(parent, "snap1"));
+  ASSERT_EQ(0, rbd_list_children3(parent, children, &max_size));
+  ASSERT_EQ(2, static_cast<int>(max_size));
+  rbd_linked_image_spec_list_cleanup(children, max_size);
+
+  ASSERT_EQ(0, rbd_remove(ioctx1, child_name2.c_str()));
+  ASSERT_EQ(0, rbd_list_children3(parent, children, &max_size));
+  ASSERT_EQ(1, static_cast<int>(max_size));
+  rbd_linked_image_spec_list_cleanup(children, max_size);
+
+  ASSERT_EQ(0, rbd_snap_remove(parent, "snap2"));
+  ASSERT_EQ(0, rbd_list_children3(parent, children, &max_size));
+  ASSERT_EQ(0, static_cast<int>(max_size));
+  rbd_linked_image_spec_list_cleanup(children, max_size);
+  test_list_children2(parent, 0);
+  ASSERT_EQ(0, test_ls_snaps(parent, 0));
+
+  ASSERT_EQ(0, rbd_close(parent));
+  rados_ioctx_destroy(ioctx1);
+}
+
+TEST_F(TestLibRBD, WriteZeroes) {
+  librbd::RBD rbd;
+  librados::IoCtx ioctx;
+  ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
+  std::string name = get_temp_image_name();
+  int order = 0;
+  uint64_t size = 2 << 20;
+  ASSERT_EQ(0, create_image_pp(rbd, ioctx, name.c_str(), size, &order));
+
+  librbd::Image image;
+  ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
+
+  // 1s from [0, 256) / length 256
+  char data[256];
+  memset(data, 1, sizeof(data));
+  bufferlist bl;
+  bl.append(data, 256);
+  ASSERT_EQ(256, image.write(0, 256, bl));
+
+  interval_set<uint64_t> diff;
+  ASSERT_EQ(0, image.diff_iterate2(nullptr, 0, size, false, false,
+                                   iterate_cb, (void *)&diff));
+  interval_set<uint64_t> expected_diff;
+  expected_diff.insert(0, 256);
+  ASSERT_EQ(expected_diff, diff);
+
+  // writes zero passed the current end extents.
+  // Now 1s from [0, 192) / length 192
+  ASSERT_EQ(static_cast<int64_t>(size - 192),
+            image.write_zeroes(192, size - 192, 0U, 0));
+  diff.clear();
+  ASSERT_EQ(0, image.diff_iterate2(nullptr, 0, size, false, false,
+                                   iterate_cb, (void *)&diff));
+  expected_diff.clear();
+  expected_diff.insert(0, 192);
+  ASSERT_EQ(expected_diff, diff);
+
+  // zero an existing extent and truncate some off the end
+  // Now 1s from [64, 192) / length 192
+  ASSERT_EQ(64, image.write_zeroes(0, 64, 0U, 0));
+
+  diff.clear();
+  ASSERT_EQ(0, image.diff_iterate2(nullptr, 0, size, false, false,
+                                   iterate_cb, (void *)&diff));
+  expected_diff.clear();
+  expected_diff.insert(0, 192);
+  ASSERT_EQ(expected_diff, diff);
+
+  bufferlist expected_bl;
+  expected_bl.append_zero(64);
+  bufferlist sub_bl;
+  sub_bl.substr_of(bl, 0, 128);
+  expected_bl.claim_append(sub_bl);
+  expected_bl.append_zero(size - 192);
+
+  bufferlist read_bl;
+  EXPECT_EQ(static_cast<int64_t>(size), image.read(0, size, read_bl));
+  EXPECT_EQ(expected_bl, read_bl);
+
+  ASSERT_EQ(0, image.close());
+}
+
 // poorman's ceph_assert()
 namespace ceph {
   void __ceph_assert_fail(const char *assertion, const char *file, int line,

@@ -5,6 +5,7 @@
 #define CEPH_RGWRADOS_H
 
 #include <functional>
+#include <iomanip>
 
 #include "include/rados/librados.hpp"
 #include "include/Context.h"
@@ -726,18 +727,23 @@ public:
     void seek(uint64_t ofs);
 
     void operator++();
-    bool operator==(const obj_iterator& rhs) {
+    bool operator==(const obj_iterator& rhs) const {
       return (ofs == rhs.ofs);
     }
-    bool operator!=(const obj_iterator& rhs) {
+    bool operator!=(const obj_iterator& rhs) const {
       return (ofs != rhs.ofs);
     }
-    const rgw_obj_select& get_location() {
+    const rgw_obj_select& get_location() const {
       return location;
     }
 
+    /* where current part starts */
+    uint64_t get_part_ofs() const {
+      return part_ofs;
+    }
+
     /* start of current stripe */
-    uint64_t get_stripe_ofs() {
+    uint64_t get_stripe_ofs() const {
       if (manifest->explicit_objs) {
         return explicit_iter->first;
       }
@@ -755,7 +761,7 @@ public:
     }
 
     /* current stripe size */
-    uint64_t get_stripe_size() {
+    uint64_t get_stripe_size() const {
       if (manifest->explicit_objs) {
         return explicit_iter->second.size;
       }
@@ -763,7 +769,7 @@ public:
     }
 
     /* offset where data starts within current stripe */
-    uint64_t location_ofs() {
+    uint64_t location_ofs() const {
       if (manifest->explicit_objs) {
         return explicit_iter->second.loc_ofs;
       }
@@ -1567,8 +1573,10 @@ public:
         ceph::real_time *lastmod;
         uint64_t *obj_size;
         map<string, bufferlist> *attrs;
+        rgw_obj *target_obj;
 
-        Params() : lastmod(NULL), obj_size(NULL), attrs(NULL) {}
+        Params() : lastmod(nullptr), obj_size(nullptr), attrs(nullptr),
+		 target_obj(nullptr) {}
       } params;
 
       explicit Read(RGWRados::Object *_source) : source(_source) {}
@@ -1641,8 +1649,10 @@ public:
         ceph::real_time mtime; /* for setting delete marker mtime */
         bool high_precision_time;
         rgw_zone_set *zones_trace;
+	bool abortmp;
+	uint64_t parts_accounted_size;
 
-        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL), high_precision_time(false), zones_trace(nullptr) {}
+        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL), high_precision_time(false), zones_trace(nullptr), abortmp(false), parts_accounted_size(0) {}
       } params;
 
       struct DeleteResult {
@@ -1781,6 +1791,9 @@ public:
 
     class List {
     protected:
+      // absolute maximum number of objects that
+      // list_objects_(un)ordered can return
+      static constexpr int64_t bucket_list_objects_absolute_max = 25000;
 
       RGWRados::Bucket *target;
       rgw_obj_key next_marker;
@@ -2198,10 +2211,13 @@ public:
                            ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_cancel(BucketShard& bs, string& tag, rgw_obj& obj, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_set_bucket_tag_timeout(RGWBucketInfo& bucket_info, uint64_t timeout);
-  int cls_bucket_list_ordered(RGWBucketInfo& bucket_info, int shard_id,
-			      const rgw_obj_index_key& start,
+  int cls_bucket_list_ordered(RGWBucketInfo& bucket_info,
+			      const int shard_id,
+			      const rgw_obj_index_key& start_after,
 			      const string& prefix,
-			      uint32_t num_entries, bool list_versions,
+			      const uint32_t num_entries,
+			      const bool list_versions,
+			      const uint16_t exp_factor, // 0 means ignore
 			      map<string, rgw_bucket_dir_entry>& m,
 			      bool *is_truncated,
 			      rgw_obj_index_key *last_entry,
@@ -2458,6 +2474,12 @@ public:
                    bool *is_truncated, RGWAccessListFilter *filter);
 
   uint64_t next_bucket_id();
+
+  /**
+   * This is broken out to facilitate unit testing.
+   */
+  static uint32_t calc_ordered_bucket_list_per_shard(uint32_t num_entries,
+						     uint32_t num_shards);
 };
 
 class RGWStoreManager {
@@ -2523,7 +2545,7 @@ public:
   const string& get_key() const {
     return oid;
   }
-  bool from_meta(string& meta) {
+  bool from_meta(const string& meta) {
     int end_pos = meta.rfind('.'); // search for ".meta"
     if (end_pos < 0)
       return false;
@@ -2540,6 +2562,10 @@ public:
     prefix = "";
     meta = "";
     upload_id = "";
+  }
+  friend std::ostream& operator<<(std::ostream& out, const RGWMPObj& obj) {
+    return out << "RGWMPObj:{ prefix=" << std::quoted(obj.prefix) <<
+      ", meta=" << std::quoted(obj.meta) << " }";
   }
 }; // class RGWMPObj
 

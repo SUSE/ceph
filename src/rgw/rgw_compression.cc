@@ -5,6 +5,38 @@
 
 #define dout_subsys ceph_subsys_rgw
 
+int rgw_compression_info_from_attr(const bufferlist& attr,
+                                   bool& need_decompress,
+                                   RGWCompressionInfo& cs_info)
+{
+  auto bliter = attr.cbegin();
+  try {
+    decode(cs_info, bliter);
+  } catch (buffer::error& err) {
+    return -EIO;
+  }
+  if (cs_info.blocks.size() == 0) {
+    return -EIO;
+  }
+  if (cs_info.compression_type != "none")
+    need_decompress = true;
+  else
+    need_decompress = false;
+  return 0;
+}
+
+int rgw_compression_info_from_attrset(const map<string, bufferlist>& attrs,
+                                      bool& need_decompress,
+                                      RGWCompressionInfo& cs_info)
+{
+  auto value = attrs.find(RGW_ATTR_COMPRESSION);
+  if (value == attrs.end()) {
+    need_decompress = false;
+    return 0;
+  }
+  return rgw_compression_info_from_attr(value->second, need_decompress, cs_info);
+}
+
 //------------RGWPutObj_Compress---------------
 
 int RGWPutObj_Compress::process(bufferlist&& in, uint64_t logical_offset)
@@ -98,7 +130,7 @@ int RGWGetObj_Decompress::handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len
     in_bl.copy(ofs_in_bl, first_block->len, tmp);
     int cr = compressor->decompress(tmp, out_bl);
     if (cr < 0) {
-      lderr(cct) << "Compression failed with exit code " << cr << dendl;
+      lderr(cct) << "Decompression failed with exit code " << cr << dendl;
       return cr;
     }
     ++first_block;

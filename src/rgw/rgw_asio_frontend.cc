@@ -6,12 +6,14 @@
 #include <vector>
 
 #include <boost/asio.hpp>
-#define BOOST_COROUTINES_NO_DEPRECATION_WARNING
-#include <boost/asio/spawn.hpp>
 #include <boost/intrusive/list.hpp>
+
+#include <boost/context/protected_fixedsize_stack.hpp>
+#include <spawn/spawn.hpp>
 
 #include "common/async/shared_mutex.h"
 #include "common/errno.h"
+#include "common/strtol.h"
 
 #include "rgw_asio_client.h"
 #include "rgw_asio_frontend.h"
@@ -32,14 +34,21 @@ namespace http = boost::beast::http;
 namespace ssl = boost::asio::ssl;
 #endif
 
+using parse_buffer = boost::beast::flat_static_buffer<65536>;
+
+// use mmap/mprotect to allocate 512k coroutine stacks
+auto make_stack_allocator() {
+  return boost::context::protected_fixedsize_stack{512*1024};
+}
+
 template <typename Stream>
 class StreamIO : public rgw::asio::ClientIO {
   CephContext* const cct;
   Stream& stream;
-  boost::beast::flat_buffer& buffer;
+  parse_buffer& buffer;
  public:
   StreamIO(CephContext *cct, Stream& stream, rgw::asio::parser_type& parser,
-           boost::beast::flat_buffer& buffer, bool is_ssl,
+           parse_buffer& buffer, bool is_ssl,
            const tcp::endpoint& local_endpoint,
            const tcp::endpoint& remote_endpoint)
       : ClientIO(parser, is_ssl, local_endpoint, remote_endpoint),
@@ -51,6 +60,10 @@ class StreamIO : public rgw::asio::ClientIO {
     auto bytes = boost::asio::write(stream, boost::asio::buffer(buf, len), ec);
     if (ec) {
       ldout(cct, 4) << "write_data failed: " << ec.message() << dendl;
+      if (ec==boost::asio::error::broken_pipe) {
+        boost::system::error_code ec_ignored;
+        stream.lowest_layer().shutdown(tcp::socket::shutdown_both, ec_ignored);
+      }
       throw rgw::io::Exception(ec.value(), std::system_category());
     }
     return bytes;
@@ -65,8 +78,7 @@ class StreamIO : public rgw::asio::ClientIO {
     while (body_remaining.size && !parser.is_done()) {
       boost::system::error_code ec;
       http::read_some(stream, buffer, parser, ec);
-      if (ec == http::error::partial_message ||
-          ec == http::error::need_buffer) {
+      if (ec == http::error::need_buffer) {
         break;
       }
       if (ec) {
@@ -78,15 +90,44 @@ class StreamIO : public rgw::asio::ClientIO {
   }
 };
 
+// output the http version as a string, ie 'HTTP/1.1'
+struct http_version {
+  unsigned major_ver;
+  unsigned minor_ver;
+  explicit http_version(unsigned version)
+    : major_ver(version / 10), minor_ver(version % 10) {}
+};
+std::ostream& operator<<(std::ostream& out, const http_version& v) {
+  return out << "HTTP/" << v.major_ver << '.' << v.minor_ver;
+}
+
+// log an http header value or '-' if it's missing
+struct log_header {
+  const http::fields& fields;
+  http::field field;
+  std::string_view quote;
+  log_header(const http::fields& fields, http::field field,
+             std::string_view quote = "")
+    : fields(fields), field(field), quote(quote) {}
+};
+std::ostream& operator<<(std::ostream& out, const log_header& h) {
+  auto p = h.fields.find(h.field);
+  if (p == h.fields.end()) {
+    return out << '-';
+  }
+  return out << h.quote << p->value() << h.quote;
+}
+
 using SharedMutex = ceph::async::SharedMutex<boost::asio::io_context::executor_type>;
 
 template <typename Stream>
-void handle_connection(RGWProcessEnv& env, Stream& stream,
-                       boost::beast::flat_buffer& buffer, bool is_ssl,
+void handle_connection(boost::asio::io_context& context,
+                       RGWProcessEnv& env, Stream& stream,
+                       parse_buffer& buffer, bool is_ssl,
                        SharedMutex& pause_mutex,
                        rgw::dmclock::Scheduler *scheduler,
                        boost::system::error_code& ec,
-                       boost::asio::yield_context yield)
+                       spawn::yield_context yield)
 {
   // limit header to 4k, since we read it all into a single flat_buffer
   static constexpr size_t header_limit = 4096;
@@ -114,9 +155,9 @@ void handle_connection(RGWProcessEnv& env, Stream& stream,
       ldout(cct, 20) << "failed to read header: " << ec.message() << dendl;
       return;
     }
+    auto& message = parser.get();
     if (ec) {
       ldout(cct, 1) << "failed to read header: " << ec.message() << dendl;
-      auto& message = parser.get();
       http::response<http::empty_body> response;
       response.result(http::status::bad_request);
       response.version(message.version() == 10 ? 10 : 11);
@@ -158,9 +199,25 @@ void handle_connection(RGWProcessEnv& env, Stream& stream,
                                   rgw::io::add_conlen_controlling(
                                     &real_client))));
       RGWRestfulIO client(cct, &real_client_io);
-      auto y = optional_yield{socket.get_io_context(), yield};
+      auto y = optional_yield{context, yield};
+      int http_ret = 0;
       process_request(env.store, env.rest, &req, env.uri_prefix,
-                      *env.auth_registry, &client, env.olog, y, scheduler);
+                      *env.auth_registry, &client, env.olog, y,
+                      scheduler, &http_ret);
+
+      if (cct->_conf->subsys.should_gather(dout_subsys, 1)) {
+        // access log line elements begin per Apache Combined Log Format with additions following
+        const auto now = ceph::coarse_real_clock::now();
+        using ceph::operator<<; // for coarse_real_time
+        ldout(cct, 1) << "beast: " << hex << &req << dec << ": "
+            << remote_endpoint.address() << " - - [" << now << "] \""
+            << message.method_string() << ' ' << message.target() << ' '
+            << http_version{message.version()} << "\" " << http_ret << ' '
+            << client.get_bytes_sent() + client.get_bytes_received() << ' '
+            << log_header{message, http::field::referer, "\""} << ' '
+            << log_header{message, http::field::user_agent, "\""} << ' '
+            << log_header{message, http::field::range} << dendl;
+      }
     }
 
     if (!parser.keep_alive()) {
@@ -177,6 +234,9 @@ void handle_connection(RGWProcessEnv& env, Stream& stream,
       body.data = discard_buffer.data();
 
       http::async_read_some(stream, buffer, parser, yield[ec]);
+      if (ec == http::error::need_buffer) {
+        continue;
+      }
       if (ec == boost::asio::error::connection_reset) {
         return;
       }
@@ -459,7 +519,17 @@ int AsioFrontend::init()
       return -ec.value();
     }
 
-    l.acceptor.listen(boost::asio::socket_base::max_connections);
+    auto it = config.find("max_connection_backlog");
+    auto max_connection_backlog = boost::asio::socket_base::max_listen_connections;
+    if (it != config.end()) {
+      string err;
+      max_connection_backlog = strict_strtol(it->second.c_str(), 10, &err);
+      if (!err.empty()) {
+        ldout(ctx(), 0) << "WARNING: invalid value for max_connection_backlog=" << it->second << dendl;
+        max_connection_backlog = boost::asio::socket_base::max_listen_connections;
+      }
+    }
+    l.acceptor.listen(max_connection_backlog);
     l.acceptor.async_accept(l.socket,
                             [this, &l] (boost::system::error_code ec) {
                               accept(l, ec);
@@ -569,7 +639,8 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
   } else if (ec == boost::asio::error::operation_aborted) {
     return;
   } else if (ec) {
-    throw ec;
+    ldout(ctx(), 1) << "accept failed: " << ec.message() << dendl;
+    return;
   }
   auto socket = std::move(l.socket);
   tcp::no_delay options(l.use_nodelay);
@@ -582,44 +653,44 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
   // spawn a coroutine to handle the connection
 #ifdef WITH_RADOSGW_BEAST_OPENSSL
   if (l.use_ssl) {
-    boost::asio::spawn(context,
-      [this, s=std::move(socket)] (boost::asio::yield_context yield) mutable {
+    spawn::spawn(context,
+      [this, s=std::move(socket)] (spawn::yield_context yield) mutable {
         Connection conn{s};
         auto c = connections.add(conn);
         // wrap the socket in an ssl stream
         ssl::stream<tcp::socket&> stream{s, *ssl_context};
-        boost::beast::flat_buffer buffer;
+        auto buffer = std::make_unique<parse_buffer>();
         // do ssl handshake
         boost::system::error_code ec;
         auto bytes = stream.async_handshake(ssl::stream_base::server,
-                                            buffer.data(), yield[ec]);
+                                            buffer->data(), yield[ec]);
         if (ec) {
           ldout(ctx(), 1) << "ssl handshake failed: " << ec.message() << dendl;
           return;
         }
-        buffer.consume(bytes);
-        handle_connection(env, stream, buffer, true, pause_mutex,
+        buffer->consume(bytes);
+        handle_connection(context, env, stream, *buffer, true, pause_mutex,
                           scheduler.get(), ec, yield);
         if (!ec) {
           // ssl shutdown (ignoring errors)
           stream.async_shutdown(yield[ec]);
         }
         s.shutdown(tcp::socket::shutdown_both, ec);
-      });
+      }, make_stack_allocator());
   } else {
 #else
   {
 #endif // WITH_RADOSGW_BEAST_OPENSSL
-    boost::asio::spawn(context,
-      [this, s=std::move(socket)] (boost::asio::yield_context yield) mutable {
+    spawn::spawn(context,
+      [this, s=std::move(socket)] (spawn::yield_context yield) mutable {
         Connection conn{s};
         auto c = connections.add(conn);
-        boost::beast::flat_buffer buffer;
+        auto buffer = std::make_unique<parse_buffer>();
         boost::system::error_code ec;
-        handle_connection(env, s, buffer, false, pause_mutex,
+        handle_connection(context, env, s, *buffer, false, pause_mutex,
                           scheduler.get(), ec, yield);
         s.shutdown(tcp::socket::shutdown_both, ec);
-      });
+      }, make_stack_allocator());
   }
 }
 

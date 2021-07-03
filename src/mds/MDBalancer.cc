@@ -82,9 +82,7 @@ MDBalancer::MDBalancer(MDSRank *m, Messenger *msgr, MonClient *monc) :
   bal_fragment_interval = g_conf().get_val<int64_t>("mds_bal_fragment_interval");
 }
 
-void MDBalancer::handle_conf_change(const ConfigProxy& conf,
-				    const std::set <std::string> &changed,
-				    const MDSMap &mds_map)
+void MDBalancer::handle_conf_change(const std::set<std::string>& changed, const MDSMap& mds_map)
 {
   if (changed.count("mds_bal_fragment_dirs"))
     bal_fragment_dirs = g_conf().get_val<bool>("mds_bal_fragment_dirs");
@@ -102,6 +100,15 @@ void MDBalancer::handle_export_pins(void)
     CInode *in = *cur;
     ceph_assert(in->is_dir());
     mds_rank_t export_pin = in->get_export_pin(false);
+    if (export_pin >= mds->mdsmap->get_max_mds()) {
+      dout(20) << " delay export pin on " << *in << dendl;
+      in->state_clear(CInode::STATE_QUEUEDEXPORTPIN);
+      q.erase(cur);
+
+      in->state_set(CInode::STATE_DELAYEDEXPORTPIN);
+      mds->mdcache->export_pin_delayed_queue.insert(in);
+      continue;
+    }
 
     bool remove = true;
     list<CDir*> dfls;
@@ -166,7 +173,8 @@ void MDBalancer::handle_export_pins(void)
 		  dendl;
     }
 
-    if (export_pin >= 0 && export_pin != mds->get_nodeid()) {
+    if (export_pin >= 0 && export_pin < mds->mdsmap->get_max_mds() 
+	&& export_pin != mds->get_nodeid()) {
       mds->mdcache->migrator->export_dir(cd, export_pin);
     }
   }

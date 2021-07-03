@@ -4,7 +4,9 @@ Cram tests
 import logging
 import os
 
-from util.workunit import get_refspec_after_overrides
+import six
+
+from tasks.util.workunit import get_refspec_after_overrides
 
 from teuthology import misc as teuthology
 from teuthology.parallel import parallel
@@ -60,14 +62,14 @@ def task(ctx, config):
     log.info('Pulling tests from %s ref %s', git_url, refspec)
 
     try:
-        for client, tests in clients.iteritems():
-            (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+        for client, tests in clients.items():
+            (remote,) = ctx.cluster.only(client).remotes.keys()
             client_dir = '{tdir}/archive/cram.{role}'.format(tdir=testdir, role=client)
             remote.run(
                 args=[
                     'mkdir', '--', client_dir,
                     run.Raw('&&'),
-                    'virtualenv', '{tdir}/virtualenv'.format(tdir=testdir),
+                    'virtualenv', '--python=python3', '{tdir}/virtualenv'.format(tdir=testdir),
                     run.Raw('&&'),
                     '{tdir}/virtualenv/bin/pip'.format(tdir=testdir),
                     'install', 'cram==0.6',
@@ -85,11 +87,11 @@ def task(ctx, config):
                     )
 
         with parallel() as p:
-            for role in clients.iterkeys():
+            for role in clients.keys():
                 p.spawn(_run_tests, ctx, role)
     finally:
-        for client, tests in clients.iteritems():
-            (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+        for client, tests in clients.items():
+            (remote,) = ctx.cluster.only(client).remotes.keys()
             client_dir = '{tdir}/archive/cram.{role}'.format(tdir=testdir, role=client)
             test_files = set([test.rsplit('/', 1)[1] for test in tests])
 
@@ -124,11 +126,11 @@ def _run_tests(ctx, role):
     :param ctx: Context
     :param role: Roles
     """
-    assert isinstance(role, basestring)
+    assert isinstance(role, six.string_types)
     PREFIX = 'client.'
     assert role.startswith(PREFIX)
     id_ = role[len(PREFIX):]
-    (remote,) = ctx.cluster.only(role).remotes.iterkeys()
+    (remote,) = ctx.cluster.only(role).remotes.keys()
     ceph_ref = ctx.summary.get('ceph-sha1', 'master')
 
     testdir = teuthology.get_testdir(ctx)
@@ -137,6 +139,7 @@ def _run_tests(ctx, role):
         args=[
             run.Raw('CEPH_REF={ref}'.format(ref=ceph_ref)),
             run.Raw('CEPH_ID="{id}"'.format(id=id_)),
+            run.Raw('PYTHON="/usr/bin/python3"'),
             run.Raw('PATH=$PATH:/usr/sbin'),
             'adjust-ulimits',
             'ceph-coverage',

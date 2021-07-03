@@ -98,6 +98,7 @@ struct MockImageCtx {
       non_blocking_aio(image_ctx.non_blocking_aio),
       blkin_trace_all(image_ctx.blkin_trace_all),
       enable_alloc_hint(image_ctx.enable_alloc_hint),
+      alloc_hint_flags(image_ctx.alloc_hint_flags),
       ignore_migrating(image_ctx.ignore_migrating),
       mtime_update_interval(image_ctx.mtime_update_interval),
       atime_update_interval(image_ctx.atime_update_interval),
@@ -139,7 +140,7 @@ struct MockImageCtx {
     ctx.wait();
   }
 
-  MOCK_METHOD0(init_layout, void());
+  MOCK_METHOD1(init_layout, void(int64_t));
 
   MOCK_CONST_METHOD1(get_object_name, std::string(uint64_t));
   MOCK_CONST_METHOD0(get_object_size, uint64_t());
@@ -304,12 +305,14 @@ struct MockImageCtx {
   bool non_blocking_aio;
   bool blkin_trace_all;
   bool enable_alloc_hint;
+  uint32_t alloc_hint_flags;
   bool ignore_migrating;
   uint64_t mtime_update_interval;
   uint64_t atime_update_interval;
   bool cache;
 
   ConfigProxy config;
+  std::set<std::string> config_overrides;
 };
 
 } // namespace librbd

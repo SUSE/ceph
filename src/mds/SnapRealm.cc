@@ -68,7 +68,7 @@ SnapRealm::SnapRealm(MDCache *c, CInode *in) :
     mdcache(c), inode(in), parent(nullptr),
     num_open_past_parents(0), inodes_with_caps(0)
 {
-  global = (inode->ino() == MDS_INO_GLOBAL_SNAPREALM);
+  global = (inode->ino() == CEPH_INO_GLOBAL_SNAPREALM);
 }
 
 void SnapRealm::add_open_past_parent(SnapRealm *parent, snapid_t last)
@@ -333,6 +333,13 @@ void SnapRealm::check_cache() const
   cached_seq = seq;
   cached_last_created = last_created;
   cached_last_destroyed = last_destroyed;
+
+  cached_subvolume_ino = 0;
+  if (parent)
+    cached_subvolume_ino = parent->get_subvolume_ino();
+  if (!cached_subvolume_ino && srnode.is_subvolume())
+    cached_subvolume_ino = inode->ino();
+
   build_snap_set();
 
   build_snap_trace();

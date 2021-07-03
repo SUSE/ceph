@@ -62,6 +62,14 @@ void entity_inst_t::generate_test_instances(list<entity_inst_t*>& o)
   o.push_back(a);
 }
 
+bool entity_addr_t::parse(const std::string_view s)
+{
+  const char* start = s.data();
+  const char* end = nullptr;
+  bool got = parse(start, &end);
+  return got && end == start + s.size();
+}
+
 bool entity_addr_t::parse(const char *s, const char **end, int default_type)
 {
   *this = entity_addr_t();
@@ -317,7 +325,21 @@ void entity_addrvec_t::decode(bufferlist::const_iterator& bl)
     __u32 elen;
     decode(elen, bl);
     if (elen) {
-      bl.copy(elen, (char*)addr.get_sockaddr());
+      struct sockaddr *sa = (struct sockaddr *)addr.get_sockaddr();
+#if defined(__FreeBSD__) || defined(__APPLE__)
+      sa->sa_len = 0;
+#endif
+      uint16_t ss_family;
+      if (elen < sizeof(ss_family)) {
+        throw ceph::buffer::malformed_input("elen smaller than family len");
+      }
+      decode(ss_family, bl);
+      sa->sa_family = ss_family;
+      elen -= sizeof(ss_family);
+      if (elen > addr.get_sockaddr_len() - sizeof(sa->sa_family)) {
+        throw ceph::buffer::malformed_input("elen exceeds sockaddr len");
+      }
+      bl.copy(elen, sa->sa_data);
     }
     DECODE_FINISH(bl);
     v.clear();

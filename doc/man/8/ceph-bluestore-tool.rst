@@ -22,6 +22,7 @@ Synopsis
 | **ceph-bluestore-tool** bluefs-bdev-new-wal --path *osd path* --dev-target *new-device*
 | **ceph-bluestore-tool** bluefs-bdev-new-db --path *osd path* --dev-target *new-device*
 | **ceph-bluestore-tool** bluefs-bdev-migrate --path *osd path* --dev-target *new-device* --devs-source *device1* [--devs-source *device2*]
+| **ceph-bluestore-tool** free-dump|free-score --path *osd path* [ --allocator block/bluefs-wal/bluefs-db/bluefs-slow ]
 
 
 Description
@@ -81,6 +82,15 @@ Commands
 
    Show device label(s).	   
 
+:command:`free-dump` --path *osd path* [ --allocator block/bluefs-wal/bluefs-db/bluefs-slow ]
+
+   Dump all free regions in allocator.
+
+:command:`free-score` --path *osd path* [ --allocator block/bluefs-wal/bluefs-db/bluefs-slow ]
+
+   Give a [0-1] number that represents quality of fragmentation in allocator.
+   0 represents case when all free space is in one chunk. 1 represents worst possible fragmentation.
+
 Options
 =======
 
@@ -117,6 +127,10 @@ Options
 
    deep scrub/repair (read and validate object data, not just metadata)
 
+.. option:: --allocator *name*
+
+   Useful for *free-dump* and *free-score* actions. Selects allocator(s).
+
 Device labels
 =============
 
@@ -138,6 +152,21 @@ BlueStore OSD with the *prime-osd-dir* command::
 
   ceph-bluestore-tool prime-osd-dir --dev *main device* --path /var/lib/ceph/osd/ceph-*id*
 
+BlueFS log rescue
+=====================
+
+Some versions of BlueStore were susceptible to BlueFS log growing extremaly large -
+beyond the point of making booting OSD impossible. This state is indicated by
+booting that takes very long and fails in _replay function.
+
+This can be fixed by::
+  ceph-bluestore-tool fsck --path *osd path* --bluefs_replay_recovery=true
+
+It is advised to first check if rescue process would be successfull::
+  ceph-bluestore-tool fsck --path *osd path* \
+  --bluefs_replay_recovery=true --bluefs_replay_recovery_disable_compact=true
+
+If above fsck is successfull fix procedure can be applied.
 
 Availability
 ============

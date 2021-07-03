@@ -101,6 +101,12 @@ class CephFS(RESTController):
 
         return names
 
+    def _append_mds_metadata(self, mds_versions, metadata_key):
+        metadata = mgr.get_metadata('mds', metadata_key)
+        if metadata is None:
+            return
+        mds_versions[metadata.get('ceph_version', 'unknown')].append(metadata_key)
+
     # pylint: disable=too-many-statements,too-many-branches
     def fs_status(self, fs_id):
         mds_versions = defaultdict(list)
@@ -155,9 +161,7 @@ class CephFS(RESTController):
                 else:
                     activity = 0.0
 
-                metadata = mgr.get_metadata('mds', info['name'])
-                mds_versions[metadata.get('ceph_version', 'unknown')].append(
-                    info['name'])
+                self._append_mds_metadata(mds_versions, info['name'])
                 rank_table.append(
                     {
                         "rank": rank,
@@ -218,16 +222,13 @@ class CephFS(RESTController):
             pools_table.append({
                 "pool": pools[pool_id]['pool_name'],
                 "type": pool_type,
-                "used": stats['bytes_used'],
+                "used": stats['stored'],
                 "avail": stats['max_avail']
             })
 
         standby_table = []
         for standby in fsmap['standbys']:
-            metadata = mgr.get_metadata('mds', standby['name'])
-            mds_versions[metadata.get('ceph_version', 'unknown')].append(
-                standby['name'])
-
+            self._append_mds_metadata(mds_versions, standby['name'])
             standby_table.append({
                 'name': standby['name']
             })
@@ -268,10 +269,12 @@ class CephFS(RESTController):
                 client['type'] = "userspace"
                 client['version'] = client['client_metadata']['ceph_version']
                 client['hostname'] = client['client_metadata']['hostname']
+                client['root'] = client['client_metadata']['root']
             elif "kernel_version" in client['client_metadata']:
                 client['type'] = "kernel"
                 client['version'] = client['client_metadata']['kernel_version']
                 client['hostname'] = client['client_metadata']['hostname']
+                client['root'] = client['client_metadata']['root']
             else:
                 client['type'] = "unknown"
                 client['version'] = ""

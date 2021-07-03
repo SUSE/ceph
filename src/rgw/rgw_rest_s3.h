@@ -107,12 +107,33 @@ public:
 };
 
 class RGWListBucket_ObjStore_S3 : public RGWListBucket_ObjStore {
+protected:
   bool objs_container;
-public:
+  bool encode_key {false};
+  int get_common_params();
+  void send_common_response();
+  void send_common_versioned_response();
+  public:
   RGWListBucket_ObjStore_S3() : objs_container(false) {
     default_max = 1000;
   }
   ~RGWListBucket_ObjStore_S3() override {}
+
+  int get_params() override;
+  void send_response() override;
+  void send_versioned_response();
+};
+
+class RGWListBucket_ObjStore_S3v2 : public RGWListBucket_ObjStore_S3 {
+  bool fetchOwner;
+  bool start_after_exist;
+  bool continuation_token_exist;
+  string startAfter;
+  string continuation_token;
+public:
+  RGWListBucket_ObjStore_S3v2() :  fetchOwner(false) {
+  }
+  ~RGWListBucket_ObjStore_S3v2() override {}
 
   int get_params() override;
   void send_response() override;
@@ -434,6 +455,49 @@ public:
   void end_response() override;
 };
 
+class RGWPutBucketObjectLock_ObjStore_S3 : public RGWPutBucketObjectLock_ObjStore {
+public:
+  RGWPutBucketObjectLock_ObjStore_S3() {}
+  ~RGWPutBucketObjectLock_ObjStore_S3() override {}
+  void send_response() override;
+};
+
+class RGWGetBucketObjectLock_ObjStore_S3 : public RGWGetBucketObjectLock_ObjStore {
+public:
+  RGWGetBucketObjectLock_ObjStore_S3() {}
+  ~RGWGetBucketObjectLock_ObjStore_S3() {}
+  void send_response() override;
+};
+
+class RGWPutObjRetention_ObjStore_S3 : public RGWPutObjRetention_ObjStore {
+public:
+  RGWPutObjRetention_ObjStore_S3() {}
+  ~RGWPutObjRetention_ObjStore_S3() {}
+  int get_params() override;
+  void send_response() override;
+};
+
+class RGWGetObjRetention_ObjStore_S3 : public RGWGetObjRetention_ObjStore {
+public:
+  RGWGetObjRetention_ObjStore_S3() {}
+  ~RGWGetObjRetention_ObjStore_S3() {}
+  void send_response() override;
+};
+
+class RGWPutObjLegalHold_ObjStore_S3 : public RGWPutObjLegalHold_ObjStore {
+public:
+  RGWPutObjLegalHold_ObjStore_S3() {}
+  ~RGWPutObjLegalHold_ObjStore_S3() {}
+  void send_response() override;
+};
+
+class RGWGetObjLegalHold_ObjStore_S3 : public RGWGetObjLegalHold_ObjStore {
+public:
+  RGWGetObjLegalHold_ObjStore_S3() {}
+  ~RGWGetObjLegalHold_ObjStore_S3() {}
+  void send_response() override;
+};
+
 class RGWGetObjLayout_ObjStore_S3 : public RGWGetObjLayout {
 public:
   RGWGetObjLayout_ObjStore_S3() {}
@@ -521,7 +585,9 @@ public:
 
 class RGWHandler_REST_Service_S3 : public RGWHandler_REST_S3 {
 protected:
-    bool isSTSenabled;
+    const bool isSTSenabled;
+    bool isIAMenabled;
+    const bool isPSenabled;
     bool is_usage_op() {
     return s->info.args.exists("usage");
   }
@@ -530,12 +596,13 @@ protected:
   RGWOp *op_post() override;
 public:
    RGWHandler_REST_Service_S3(const rgw::auth::StrategyRegistry& auth_registry,
-                              bool isSTSenabled) :
-      RGWHandler_REST_S3(auth_registry), isSTSenabled(isSTSenabled) {}
+                              bool _isSTSenabled, bool _isIAMenabled, bool _isPSenabled) :
+      RGWHandler_REST_S3(auth_registry), isSTSenabled(_isSTSenabled), isIAMenabled(_isIAMenabled), isPSenabled(_isPSenabled) {}
   ~RGWHandler_REST_Service_S3() override = default;
 };
 
 class RGWHandler_REST_Bucket_S3 : public RGWHandler_REST_S3 {
+  const bool enable_pubsub;
 protected:
   bool is_acl_op() {
     return s->info.args.exists("acl");
@@ -555,6 +622,15 @@ protected:
   bool is_policy_op() {
     return s->info.args.exists("policy");
   }
+  bool is_object_lock_op() {
+    return s->info.args.exists("object-lock");
+  }
+  bool is_notification_op() const {
+    if (enable_pubsub) {
+        return s->info.args.exists("notification");
+    }
+    return false;
+  }
   RGWOp *get_obj_op(bool get_data);
 
   RGWOp *op_get() override;
@@ -564,7 +640,8 @@ protected:
   RGWOp *op_post() override;
   RGWOp *op_options() override;
 public:
-  using RGWHandler_REST_S3::RGWHandler_REST_S3;
+  RGWHandler_REST_Bucket_S3(const rgw::auth::StrategyRegistry& auth_registry, bool _enable_pubsub) :
+      RGWHandler_REST_S3(auth_registry), enable_pubsub(_enable_pubsub) {}
   ~RGWHandler_REST_Bucket_S3() override = default;
 };
 
@@ -576,8 +653,15 @@ protected:
   bool is_tagging_op() {
     return s->info.args.exists("tagging");
   }
+  bool is_obj_retention_op() {
+    return s->info.args.exists("retention");
+  }
+  bool is_obj_legal_hold_op() {
+    return s->info.args.exists("legal-hold");
+  }
+
   bool is_obj_update_op() override {
-    return is_acl_op() || is_tagging_op() ;
+    return is_acl_op() || is_tagging_op() || is_obj_retention_op() || is_obj_legal_hold_op();
   }
   RGWOp *get_obj_op(bool get_data);
 
@@ -596,10 +680,14 @@ class RGWRESTMgr_S3 : public RGWRESTMgr {
 private:
   bool enable_s3website;
   bool enable_sts;
+  bool enable_iam;
+  const bool enable_pubsub;
 public:
-  explicit RGWRESTMgr_S3(bool enable_s3website = false, bool enable_sts = false)
+  explicit RGWRESTMgr_S3(bool enable_s3website = false, bool enable_sts = false, bool enable_iam = false, bool _enable_pubsub = false)
     : enable_s3website(enable_s3website),
-      enable_sts(enable_sts) {
+      enable_sts(enable_sts),
+      enable_iam(enable_iam),
+      enable_pubsub(_enable_pubsub) {
   }
 
   ~RGWRESTMgr_S3() override = default;
@@ -613,6 +701,10 @@ class RGWHandler_REST_Obj_S3Website;
 
 static inline bool looks_like_ip_address(const char *bucket)
 {
+  struct in6_addr a;
+  if (inet_pton(AF_INET6, bucket, static_cast<void*>(&a)) == 1) {
+    return true;
+  }
   int num_periods = 0;
   bool expect_period = false;
   for (const char *b = bucket; *b; ++b) {
@@ -941,37 +1033,6 @@ public:
 
   const char* get_name() const noexcept override {
     return "rgw::auth::s3::S3AnonymousEngine";
-  }
-};
-
-
-class S3AuthFactory : public rgw::auth::RemoteApplier::Factory,
-                      public rgw::auth::LocalApplier::Factory {
-  typedef rgw::auth::IdentityApplier::aplptr_t aplptr_t;
-  RGWRados* const store;
-
-public:
-  explicit S3AuthFactory(RGWRados* const store)
-    : store(store) {
-  }
-
-  aplptr_t create_apl_remote(CephContext* const cct,
-                             const req_state* const s,
-                             rgw::auth::RemoteApplier::acl_strategy_t&& acl_alg,
-                             const rgw::auth::RemoteApplier::AuthInfo &info
-                            ) const override {
-    return aplptr_t(
-      new rgw::auth::RemoteApplier(cct, store, std::move(acl_alg), info,
-                                   cct->_conf->rgw_keystone_implicit_tenants));
-  }
-
-  aplptr_t create_apl_local(CephContext* const cct,
-                            const req_state* const s,
-                            const RGWUserInfo& user_info,
-                            const std::string& subuser,
-                            const boost::optional<uint32_t>& perm_mask) const override {
-      return aplptr_t(
-        new rgw::auth::LocalApplier(cct, user_info, subuser, perm_mask));
   }
 };
 

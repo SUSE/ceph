@@ -1321,6 +1321,7 @@ public:
       crush->max_devices = name_map.rbegin()->first + 1;
     }
     have_uniform_rules = !has_legacy_rule_ids();
+    build_rmaps();
   }
   int bucket_set_alg(int id, int alg);
 
@@ -1566,8 +1567,9 @@ public:
     crush_init_workspace(crush, work);
     crush_choose_arg_map arg_map = choose_args_get_with_fallback(
       choose_args_index);
-    int numrep = crush_do_rule(crush, rule, x, rawout, maxout, &weight[0],
-			       weight.size(), work, arg_map.args);
+    int numrep = crush_do_rule(crush, rule, x, rawout, maxout,
+			       std::data(weight), std::size(weight),
+			       work, arg_map.args);
     if (numrep < 0)
       numrep = 0;
     out.resize(numrep);
@@ -1580,11 +1582,13 @@ public:
     const vector<pair<int,int>>& stack,
     const set<int>& overfull,
     const vector<int>& underfull,
+    const vector<int>& more_underfull,
     const vector<int>& orig,
     vector<int>::const_iterator& i,
     set<int>& used,
     vector<int> *pw,
-    int root_bucket) const;
+    int root_bucket,
+    int rule) const;
 
   int try_remap_rule(
     CephContext *cct,
@@ -1592,6 +1596,7 @@ public:
     int maxout,
     const set<int>& overfull,
     const vector<int>& underfull,
+    const vector<int>& more_underfull,
     const vector<int>& orig,
     vector<int> *out) const;
 

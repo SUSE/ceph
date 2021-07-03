@@ -27,7 +27,7 @@
 #include <stdbool.h>
 #include <fcntl.h>
 
-#include "ceph_statx.h"
+#include "ceph_ll_client.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,27 +73,6 @@ struct ceph_file_layout {
 	uint32_t fl_pg_preferred; /* preferred primary for pg (-1 for none) */
 	uint32_t fl_pg_pool;      /* namespace, crush ruleset, rep level */
 } __attribute__ ((packed));
-
-
-typedef struct inodeno_t {
-  uint64_t val;
-} inodeno_t;
-
-typedef struct _snapid_t {
-  uint64_t val;
-} snapid_t;
-
-typedef struct vinodeno_t {
-  inodeno_t ino;
-  snapid_t snapid;
-} vinodeno_t;
-
-typedef struct Fh Fh;
-#else /* _cplusplus */
-
-struct inodeno_t;
-struct vinodeno_t;
-typedef struct vinodeno_t vinodeno;
 
 #endif /* ! __cplusplus */
 
@@ -811,6 +790,17 @@ int ceph_fsetattrx(struct ceph_mount_info *cmount, int fd, struct ceph_statx *st
 int ceph_chmod(struct ceph_mount_info *cmount, const char *path, mode_t mode);
 
 /**
+ * Change the mode bits (permissions) of a file/directory. If the path is a
+ * symbolic link, it's not de-referenced.
+ *
+ * @param cmount the ceph mount handle to use for performing the chmod.
+ * @param path the path of file/directory to change the mode bits on.
+ * @param mode the new permissions to set.
+ * @returns 0 on success or a negative error code on failure.
+ */
+int ceph_lchmod(struct ceph_mount_info *cmount, const char *path, mode_t mode);
+
+/**
  * Change the mode bits (permissions) of an open file.
  *
  * @param cmount the ceph mount handle to use for performing the chmod.
@@ -1109,6 +1099,28 @@ int ceph_fallocate(struct ceph_mount_info *cmount, int fd, int mode,
  * @returns 0 on success or a negative error code on failure.
  */
 int ceph_lazyio(struct ceph_mount_info *cmount, int fd, int enable);
+
+
+/**
+ * Flushes the write buffer for the file thereby propogating the buffered write to the file.
+ *
+ * @param cmount the ceph mount handle to use for performing the fsync.
+ * @param fd the file descriptor of the file to sync.
+ * @param offset a boolean to enable lazyio or disable lazyio.
+ * @returns 0 on success or a negative error code on failure.
+ */
+int ceph_lazyio_propagate(struct ceph_mount_info *cmount, int fd, int64_t offset, size_t count);
+
+
+/**
+ * Flushes the write buffer for the file and invalidate the read cache. This allows a subsequent read operation to read and cache data directly from the file and hence everyone's propagated writes would be visible. 
+ *
+ * @param cmount the ceph mount handle to use for performing the fsync.
+ * @param fd the file descriptor of the file to sync.
+ * @param offset a boolean to enable lazyio or disable lazyio.
+ * @returns 0 on success or a negative error code on failure.
+ */
+int ceph_lazyio_synchronize(struct ceph_mount_info *cmount, int fd, int64_t offset, size_t count);
 
 /** @} file */
 
@@ -1589,6 +1601,10 @@ int ceph_debug_get_file_caps(struct ceph_mount_info *cmount, const char *path);
 /* Low Level */
 struct Inode *ceph_ll_get_inode(struct ceph_mount_info *cmount,
 				vinodeno_t vino);
+
+int ceph_ll_lookup_vino(struct ceph_mount_info *cmount, vinodeno_t vino,
+			Inode **inode);
+
 int ceph_ll_lookup_inode(
     struct ceph_mount_info *cmount,
     struct inodeno_t ino,
@@ -1753,7 +1769,6 @@ int ceph_ll_lazyio(struct ceph_mount_info *cmount, Fh *fh, int enable);
  * needs, but it should take care to choose a value that allows it to avoid
  * forcible eviction from the cluster in the event of an application bug.
  */
-typedef void (*ceph_deleg_cb_t)(struct Fh *fh, void *priv);
 
 /* Commands for manipulating delegation state */
 #ifndef CEPH_DELEGATION_NONE
@@ -1852,6 +1867,16 @@ int ceph_start_reclaim(struct ceph_mount_info *cmount,
  */
 void ceph_finish_reclaim(struct ceph_mount_info *cmount);
 
+/**
+ * Register a set of callbacks to be used with this cmount
+ * @param cmount the ceph mount handle on which the cb's should be registerd
+ * @param args   callback arguments to register with the cmount
+ *
+ * Any fields set to NULL will be ignored. There currently is no way to
+ * unregister these callbacks, so this is a one-way change.
+ */
+void ceph_ll_register_callbacks(struct ceph_mount_info *cmount,
+				struct ceph_client_callback_args *args);
 #ifdef __cplusplus
 }
 #endif

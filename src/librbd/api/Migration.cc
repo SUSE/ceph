@@ -17,8 +17,10 @@
 #include "librbd/api/Image.h"
 #include "librbd/api/Snapshot.h"
 #include "librbd/api/Trash.h"
+#include "librbd/deep_copy/ImageCopyRequest.h"
 #include "librbd/deep_copy/MetadataCopyRequest.h"
 #include "librbd/deep_copy/SnapshotCopyRequest.h"
+#include "librbd/exclusive_lock/Policy.h"
 #include "librbd/image/AttachChildRequest.h"
 #include "librbd/image/AttachParentRequest.h"
 #include "librbd/image/CloneRequest.h"
@@ -334,6 +336,30 @@ int open_source_image(librados::IoCtx& io_ctx, const std::string &image_name,
   return 0;
 }
 
+class SteppedProgressContext : public ProgressContext {
+public:
+  SteppedProgressContext(ProgressContext* progress_ctx, size_t total_steps)
+    : m_progress_ctx(progress_ctx), m_total_steps(total_steps) {
+  }
+
+  void next_step() {
+    ceph_assert(m_current_step < m_total_steps);
+    ++m_current_step;
+  }
+
+  int update_progress(uint64_t object_number,
+                      uint64_t object_count) override {
+    return m_progress_ctx->update_progress(
+      object_number + (object_count * (m_current_step - 1)),
+      object_count * m_total_steps);
+  }
+
+private:
+  ProgressContext* m_progress_ctx;
+  size_t m_total_steps;
+  size_t m_current_step = 1;
+};
+
 } // anonymous namespace
 
 template <typename I>
@@ -398,7 +424,6 @@ int Migration<I>::prepare(librados::IoCtx& io_ctx,
     return -ENOSYS;
   }
   features &= ~RBD_FEATURES_INTERNAL;
-  features |= RBD_FEATURE_MIGRATING;
   opts.set(RBD_IMAGE_OPTION_FEATURES, features);
 
   uint64_t order = image_ctx->order;
@@ -429,9 +454,6 @@ int Migration<I>::prepare(librados::IoCtx& io_ctx,
   Migration migration(image_ctx, dest_io_ctx, dest_image_name, "", opts, flatten > 0,
                       false, cls::rbd::MIGRATION_STATE_PREPARING, "", nullptr);
   r = migration.prepare();
-
-  features &= ~RBD_FEATURE_MIGRATING;
-  opts.set(RBD_IMAGE_OPTION_FEATURES, features);
 
   return r;
 }
@@ -776,20 +798,47 @@ int Migration<I>::abort() {
     ldout(m_cct, 1) << "failed to open destination image: " << cpp_strerror(r)
                     << dendl;
   } else {
-    ldout(m_cct, 10) << "relinking children" << dendl;
+    BOOST_SCOPE_EXIT_TPL(&dst_image_ctx) {
+      if (dst_image_ctx != nullptr) {
+        dst_image_ctx->state->close();
+      }
+    } BOOST_SCOPE_EXIT_END;
 
+    std::list<obj_watch_t> watchers;
+    int flags = librbd::image::LIST_WATCHERS_FILTER_OUT_MY_INSTANCE |
+                librbd::image::LIST_WATCHERS_FILTER_OUT_MIRROR_INSTANCES;
+    C_SaferCond on_list_watchers;
+    auto list_watchers_request = librbd::image::ListWatchersRequest<I>::create(
+        *dst_image_ctx, flags, &watchers, &on_list_watchers);
+    list_watchers_request->send();
+    r = on_list_watchers.wait();
+    if (r < 0) {
+      lderr(m_cct) << "failed listing watchers:" << cpp_strerror(r) << dendl;
+      return r;
+    }
+    if (!watchers.empty()) {
+      lderr(m_cct) << "image has watchers - cannot abort migration" << dendl;
+      return -EBUSY;
+    }
+
+    // ensure destination image is now read-only
+    r = set_state(cls::rbd::MIGRATION_STATE_ABORTING, "");
+    if (r < 0) {
+      return r;
+    }
+
+    // copy dst HEAD -> src HEAD
+    SteppedProgressContext progress_ctx(m_prog_ctx, 2);
+    revert_data(dst_image_ctx, m_src_image_ctx, &progress_ctx);
+    progress_ctx.next_step();
+
+    ldout(m_cct, 10) << "relinking children" << dendl;
     r = relink_children(dst_image_ctx, m_src_image_ctx);
     if (r < 0) {
       return r;
     }
 
     ldout(m_cct, 10) << "removing dst image snapshots" << dendl;
-
-    BOOST_SCOPE_EXIT_TPL(&dst_image_ctx) {
-      if (dst_image_ctx != nullptr) {
-        dst_image_ctx->state->close();
-      }
-    } BOOST_SCOPE_EXIT_END;
 
     std::vector<librbd::snap_info_t> snaps;
     r = snap_list(dst_image_ctx, snaps);
@@ -826,7 +875,7 @@ int Migration<I>::abort() {
     ImageCtx::get_thread_pool_instance(m_cct, &thread_pool, &op_work_queue);
     C_SaferCond on_remove;
     auto req = librbd::image::RemoveRequest<>::create(
-      m_dst_io_ctx, dst_image_ctx, false, false, *m_prog_ctx, op_work_queue,
+      m_dst_io_ctx, dst_image_ctx, false, false, progress_ctx, op_work_queue,
       &on_remove);
     req->send();
     r = on_remove.wait();
@@ -838,7 +887,7 @@ int Migration<I>::abort() {
                    << m_dst_io_ctx.get_pool_name() << "/" << m_dst_image_name
                    << " (" << m_dst_image_id << ")': " << cpp_strerror(r)
                    << dendl;
-      // not fatal
+      return r;
     }
   }
 
@@ -1175,7 +1224,8 @@ template <typename I>
 int Migration<I>::v2_relink_src_image() {
   ldout(m_cct, 10) << dendl;
 
-  int r = Trash<I>::restore(m_src_io_ctx, RBD_TRASH_IMAGE_SOURCE_MIGRATION,
+  int r = Trash<I>::restore(m_src_io_ctx,
+                            {cls::rbd::TRASH_IMAGE_SOURCE_MIGRATION},
                             m_src_image_ctx->id, m_src_image_ctx->name);
   if (r < 0) {
     lderr(m_cct) << "failed restoring image from trash: " << cpp_strerror(r)
@@ -1258,7 +1308,8 @@ int Migration<I>::create_dst_image() {
 
   {
     RWLock::RLocker owner_locker(dst_image_ctx->owner_lock);
-    r = dst_image_ctx->operations->prepare_image_update(true);
+    r = dst_image_ctx->operations->prepare_image_update(
+      exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL, true);
     if (r < 0) {
       lderr(m_cct) << "cannot obtain exclusive lock" << dendl;
       return r;
@@ -1272,7 +1323,7 @@ int Migration<I>::create_dst_image() {
 
   C_SaferCond on_snapshot_copy;
   auto snapshot_copy_req = librbd::deep_copy::SnapshotCopyRequest<I>::create(
-      m_src_image_ctx, dst_image_ctx, CEPH_NOSNAP, m_flatten,
+      m_src_image_ctx, dst_image_ctx, 0, CEPH_NOSNAP, 0, m_flatten,
       m_src_image_ctx->op_work_queue, &snap_seqs, &on_snapshot_copy);
   snapshot_copy_req->send();
   r = on_snapshot_copy.wait();
@@ -1769,6 +1820,60 @@ int Migration<I>::remove_src_image() {
       lderr(m_cct) << "error removing image " << m_src_image_id
                    << " from rbd_trash object" << dendl;
     }
+  }
+
+  return 0;
+}
+
+template <typename I>
+int Migration<I>::revert_data(I* src_image_ctx, I* dst_image_ctx,
+                              ProgressContext* prog_ctx) {
+  ldout(m_cct, 10) << dendl;
+
+  cls::rbd::MigrationSpec migration_spec;
+  int r = cls_client::migration_get(&src_image_ctx->md_ctx,
+                                    src_image_ctx->header_oid,
+                                    &migration_spec);
+
+  if (r < 0) {
+    lderr(m_cct) << "failed retrieving migration header: " << cpp_strerror(r)
+                 << dendl;
+    return r;
+  }
+
+  if (migration_spec.header_type != cls::rbd::MIGRATION_HEADER_TYPE_DST) {
+    lderr(m_cct) << "unexpected migration header type: "
+                 << migration_spec.header_type << dendl;
+    return -EINVAL;
+  }
+
+  uint64_t src_snap_id_start = 0;
+  uint64_t src_snap_id_end = CEPH_NOSNAP;
+  uint64_t dst_snap_id_start = 0;
+  if (!migration_spec.snap_seqs.empty()) {
+    src_snap_id_start = migration_spec.snap_seqs.rbegin()->second;
+  }
+
+  // we only care about the HEAD revision so only add a single mapping to
+  // represent the most recent state
+  SnapSeqs snap_seqs;
+  snap_seqs[CEPH_NOSNAP] = CEPH_NOSNAP;
+
+  ldout(m_cct, 20) << "src_snap_id_start=" << src_snap_id_start << ", "
+                   << "src_snap_id_end=" << src_snap_id_end << ", "
+                   << "snap_seqs=" << snap_seqs << dendl;
+
+  C_SaferCond ctx;
+  auto request = deep_copy::ImageCopyRequest<I>::create(
+    src_image_ctx, dst_image_ctx, src_snap_id_start, src_snap_id_end,
+    dst_snap_id_start, false, {}, snap_seqs, prog_ctx, &ctx);
+  request->send();
+
+  r = ctx.wait();
+  if (r < 0) {
+    lderr(m_cct) << "error reverting destination image data blocks back to "
+                 << "source image: " << cpp_strerror(r) << dendl;
+    return r;
   }
 
   return 0;

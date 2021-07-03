@@ -49,6 +49,7 @@ extern "C" {
 
 #define LIBRADOS_SUPPORTS_WATCH 1
 #define LIBRADOS_SUPPORTS_SERVICES 1
+#define LIBRADOS_SUPPORTS_GETADDRS 1
 #define LIBRADOS_SUPPORTS_APP_METADATA 1
 
 /* RADOS lock flags
@@ -219,7 +220,7 @@ typedef void *rados_ioctx_t;
  *
  * An iterator for listing the objects in a pool.
  * Used with rados_nobjects_list_open(),
- * rados_nobjects_list_next(), and
+ * rados_nobjects_list_next(), rados_nobjects_list_next2(), and
  * rados_nobjects_list_close().
  */
 typedef void *rados_list_ctx_t;
@@ -1133,6 +1134,32 @@ CEPH_RADOS_API int rados_nobjects_list_next(rados_list_ctx_t ctx,
                                             const char **entry,
 	                                    const char **key,
                                             const char **nspace);
+
+/**
+ * Get the next object name, locator and their sizes in the pool
+ *
+ * The sizes allow to list objects with \0 (the NUL character)
+ * in .e.g *entry. Is is unusual see such object names but a bug
+ * in a client has risen the need to handle them as well.
+ * *entry and *key are valid until next call to rados_nobjects_list_*
+ *
+ * @param ctx iterator marking where you are in the listing
+ * @param entry where to store the name of the entry
+ * @param key where to store the object locator (set to NULL to ignore)
+ * @param nspace where to store the object namespace (set to NULL to ignore)
+ * @param entry_size where to store the size of name of the entry
+ * @param key_size where to store the size of object locator (set to NULL to ignore)
+ * @param nspace_size where to store the size of object namespace (set to NULL to ignore)
+ * @returns 0 on success, negative error code on failure
+ * @returns -ENOENT when there are no more objects to list
+ */
+CEPH_RADOS_API int rados_nobjects_list_next2(rados_list_ctx_t ctx,
+                                             const char **entry,
+                                             const char **key,
+                                             const char **nspace,
+                                             size_t *entry_size,
+                                             size_t *key_size,
+                                             size_t *nspace_size);
 
 /**
  * Close the object listing handle.
@@ -3627,6 +3654,15 @@ CEPH_RADOS_API int rados_break_lock(rados_ioctx_t io, const char *o,
 CEPH_RADOS_API int rados_blacklist_add(rados_t cluster,
 				       char *client_address,
 				       uint32_t expire_seconds);
+
+/**
+ * Gets addresses of the RADOS session, suitable for blacklisting.
+ *
+ * @param cluster cluster handle
+ * @param addrs the output string.
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_getaddrs(rados_t cluster, char** addrs);
 
 CEPH_RADOS_API void rados_set_osdmap_full_try(rados_ioctx_t io);
 

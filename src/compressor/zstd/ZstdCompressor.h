@@ -22,15 +22,13 @@
 #include "include/encoding.h"
 #include "compressor/Compressor.h"
 
-#define COMPRESSION_LEVEL 5
-
 class ZstdCompressor : public Compressor {
  public:
-  ZstdCompressor() : Compressor(COMP_ALG_ZSTD, "zstd") {}
+  ZstdCompressor(CephContext *cct) : Compressor(COMP_ALG_ZSTD, "zstd"), cct(cct) {}
 
   int compress(const bufferlist &src, bufferlist &dst) override {
     ZSTD_CStream *s = ZSTD_createCStream();
-    ZSTD_initCStream_srcSize(s, COMPRESSION_LEVEL, src.length());
+    ZSTD_initCStream_srcSize(s, cct->_conf->compressor_zstd_level, src.length());
     auto p = src.begin();
     size_t left = src.length();
 
@@ -48,7 +46,7 @@ class ZstdCompressor : public Compressor {
       inbuf.size = p.get_ptr_and_advance(left, (const char**)&inbuf.src);
       left -= inbuf.size;
       ZSTD_EndDirective const zed = (left==0) ? ZSTD_e_end : ZSTD_e_continue;
-      size_t r = ZSTD_compress_generic(s, &outbuf, &inbuf, zed);
+      size_t r = ZSTD_compressStream2(s, &outbuf, &inbuf, zed);
       if (ZSTD_isError(r)) {
 	return -EINVAL;
       }
@@ -101,6 +99,8 @@ class ZstdCompressor : public Compressor {
     dst.append(dstptr, 0, outbuf.pos);
     return 0;
   }
+ private:
+  CephContext *const cct;
 };
 
 #endif

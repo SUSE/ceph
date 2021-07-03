@@ -1,11 +1,13 @@
 import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
 
 import { I18n } from '@ngx-translate/i18n-polyfill';
+import * as _ from 'lodash';
 import { BsModalRef, BsModalService } from 'ngx-bootstrap/modal';
 import { Subscription } from 'rxjs';
 
 import { IscsiService } from '../../../shared/api/iscsi.service';
 import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
 import { TableComponent } from '../../../shared/datatable/table/table.component';
 import { CellTemplate } from '../../../shared/enum/cell-template.enum';
 import { CdTableAction } from '../../../shared/models/cd-table-action';
@@ -14,6 +16,8 @@ import { CdTableSelection } from '../../../shared/models/cd-table-selection';
 import { FinishedTask } from '../../../shared/models/finished-task';
 import { Permissions } from '../../../shared/models/permissions';
 import { CephReleaseNamePipe } from '../../../shared/pipes/ceph-release-name.pipe';
+import { ListPipe } from '../../../shared/pipes/list.pipe';
+import { NotAvailablePipe } from '../../../shared/pipes/not-available.pipe';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskListService } from '../../../shared/services/task-list.service';
@@ -36,6 +40,7 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
   modalRef: BsModalRef;
   permissions: Permissions;
   selection = new CdTableSelection();
+  cephIscsiConfigVersion: number;
   settings: any;
   status: string;
   summaryDataSubscription: Subscription;
@@ -54,11 +59,14 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
     private authStorageService: AuthStorageService,
     private i18n: I18n,
     private iscsiService: IscsiService,
+    private listPipe: ListPipe,
     private taskListService: TaskListService,
     private cephReleaseNamePipe: CephReleaseNamePipe,
+    private notAvailablePipe: NotAvailablePipe,
     private summaryservice: SummaryService,
     private modalService: BsModalService,
-    private taskWrapper: TaskWrapperService
+    private taskWrapper: TaskWrapperService,
+    public actionLabels: ActionLabelsI18n
   ) {
     this.permissions = this.authStorageService.getPermissions();
 
@@ -66,20 +74,24 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
       {
         permission: 'create',
         icon: 'fa-plus',
-        routerLink: () => '/block/iscsi/targets/add',
-        name: this.i18n('Add')
+        routerLink: () => '/block/iscsi/targets/create',
+        name: this.actionLabels.CREATE
       },
       {
         permission: 'update',
         icon: 'fa-pencil',
         routerLink: () => `/block/iscsi/targets/edit/${this.selection.first().target_iqn}`,
-        name: this.i18n('Edit')
+        name: this.actionLabels.EDIT,
+        disable: () => !this.selection.first() || !_.isUndefined(this.getEditDisableDesc()),
+        disableDesc: () => this.getEditDisableDesc()
       },
       {
         permission: 'delete',
         icon: 'fa-times',
         click: () => this.deleteIscsiTargetModal(),
-        name: this.i18n('Delete')
+        name: this.actionLabels.DELETE,
+        disable: () => !this.selection.first() || !_.isUndefined(this.getDeleteDisableDesc()),
+        disableDesc: () => this.getDeleteDisableDesc()
       }
     ];
   }
@@ -95,16 +107,19 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
       {
         name: this.i18n('Portals'),
         prop: 'cdPortals',
+        pipe: this.listPipe,
         flexGrow: 2
       },
       {
         name: this.i18n('Images'),
         prop: 'cdImages',
+        pipe: this.listPipe,
         flexGrow: 2
       },
       {
         name: this.i18n('# Sessions'),
         prop: 'info.num_sessions',
+        pipe: this.notAvailablePipe,
         flexGrow: 1
       }
     ];
@@ -113,15 +128,18 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
       this.available = result.available;
 
       if (result.available) {
-        this.taskListService.init(
-          () => this.iscsiService.listTargets(),
-          (resp) => this.prepareResponse(resp),
-          (targets) => (this.targets = targets),
-          () => this.onFetchError(),
-          this.taskFilter,
-          this.itemFilter,
-          this.builders
-        );
+        this.iscsiService.version().subscribe((res: any) => {
+          this.cephIscsiConfigVersion = res['ceph_iscsi_config_version'];
+          this.taskListService.init(
+            () => this.iscsiService.listTargets(),
+            (resp) => this.prepareResponse(resp),
+            (targets) => (this.targets = targets),
+            () => this.onFetchError(),
+            this.taskFilter,
+            this.itemFilter,
+            this.builders
+          );
+        });
 
         this.iscsiService.settings().subscribe((settings: any) => {
           this.settings = settings;
@@ -138,6 +156,29 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
   ngOnDestroy() {
     if (this.summaryDataSubscription) {
       this.summaryDataSubscription.unsubscribe();
+    }
+  }
+
+  getEditDisableDesc(): string | undefined {
+    const first = this.selection.first();
+    if (first && first.cdExecuting) {
+      return first.cdExecuting;
+    }
+    if (first && _.isUndefined(first['info'])) {
+      return this.i18n('Unavailable gateway(s)');
+    }
+  }
+
+  getDeleteDisableDesc(): string | undefined {
+    const first = this.selection.first();
+    if (first && first.cdExecuting) {
+      return first.cdExecuting;
+    }
+    if (first && _.isUndefined(first['info'])) {
+      return this.i18n('Unavailable gateway(s)');
+    }
+    if (first && first['info'] && first['info']['num_sessions']) {
+      return this.i18n('Target has active sessions');
     }
   }
 
@@ -171,7 +212,8 @@ export class IscsiTargetListComponent implements OnInit, OnDestroy {
 
     this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
       initialState: {
-        itemDescription: this.i18n('iSCSI'),
+        itemDescription: this.i18n('iSCSI target'),
+        itemNames: [target_iqn],
         submitActionObservable: () =>
           this.taskWrapper.wrapTaskAroundCall({
             task: new FinishedTask('iscsi/target/delete', {

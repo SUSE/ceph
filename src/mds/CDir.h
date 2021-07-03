@@ -554,7 +554,7 @@ private:
 
   // for giving to clients
   void get_dist_spec(std::set<mds_rank_t>& ls, mds_rank_t auth) {
-    if (is_rep()) {
+    if (is_auth()) {
       list_replicas(ls);
       if (!ls.empty()) 
 	ls.insert(auth);
@@ -612,9 +612,8 @@ protected:
   mempool::mds_co::compact_set<mempool::mds_co::string> wanted_items;
 
   void _omap_fetch(MDSContext *fin, const std::set<dentry_key_t>& keys);
-  void _omap_fetch_more(
-    bufferlist& hdrbl, std::map<std::string, bufferlist>& omap,
-    MDSContext *fin);
+  void _omap_fetch_more(version_t omap_version, bufferlist& hdrbl,
+                        map<string, bufferlist>& omap, MDSContext *fin);
   CDentry *_load_dentry(
       std::string_view key,
       std::string_view dname,
@@ -623,11 +622,6 @@ protected:
       int pos,
       const std::set<snapid_t> *snaps,
       bool *force_dirty);
-
-  /**
-   * Mark this fragment as BADFRAG (common part of go_bad and go_bad_dentry)
-   */
-  void _go_bad();
 
   /**
    * Go bad due to a damaged dentry (register with damagetable and go BADFRAG)

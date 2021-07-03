@@ -74,6 +74,8 @@ namespace librbd {
     std::string address;
   } locker_t;
 
+  typedef rbd_mirror_peer_direction_t mirror_peer_direction_t;
+
   typedef struct {
     std::string uuid;
     std::string cluster_name;
@@ -263,8 +265,18 @@ public:
                        image_migration_status_t *status, size_t status_size);
 
   // RBD pool mirroring support functions
+  int mirror_site_name_get(librados::Rados& rados, std::string* site_name);
+  int mirror_site_name_set(librados::Rados& rados,
+                           const std::string& site_name);
+
   int mirror_mode_get(IoCtx& io_ctx, rbd_mirror_mode_t *mirror_mode);
   int mirror_mode_set(IoCtx& io_ctx, rbd_mirror_mode_t mirror_mode);
+
+  int mirror_peer_bootstrap_create(IoCtx& io_ctx, std::string* token);
+  int mirror_peer_bootstrap_import(IoCtx& io_ctx,
+                                   mirror_peer_direction_t direction,
+                                   const std::string &token);
+
   int mirror_peer_add(IoCtx& io_ctx, std::string *uuid,
                       const std::string &cluster_name,
                       const std::string &client_name);
@@ -562,8 +574,11 @@ public:
   ssize_t write(uint64_t ofs, size_t len, ceph::bufferlist& bl);
   /* @param op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
   ssize_t write2(uint64_t ofs, size_t len, ceph::bufferlist& bl, int op_flags);
+
   int discard(uint64_t ofs, uint64_t len);
   ssize_t writesame(uint64_t ofs, size_t len, ceph::bufferlist &bl, int op_flags);
+  ssize_t write_zeroes(uint64_t ofs, size_t len, int zero_flags, int op_flags);
+
   ssize_t compare_and_write(uint64_t ofs, size_t len, ceph::bufferlist &cmp_bl,
                             ceph::bufferlist& bl, uint64_t *mismatch_off, int op_flags);
 
@@ -571,11 +586,17 @@ public:
   /* @param op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
   int aio_write2(uint64_t off, size_t len, ceph::bufferlist& bl,
 		  RBD::AioCompletion *c, int op_flags);
+
+  int aio_discard(uint64_t off, uint64_t len, RBD::AioCompletion *c);
   int aio_writesame(uint64_t off, size_t len, ceph::bufferlist& bl,
                     RBD::AioCompletion *c, int op_flags);
+  int aio_write_zeroes(uint64_t ofs, size_t len, RBD::AioCompletion *c,
+                       int zero_flags, int op_flags);
+
   int aio_compare_and_write(uint64_t off, size_t len, ceph::bufferlist& cmp_bl,
                             ceph::bufferlist& bl, RBD::AioCompletion *c,
                             uint64_t *mismatch_off, int op_flags);
+
   /**
    * read async from image
    *
@@ -597,7 +618,6 @@ public:
   /* @param op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
   int aio_read2(uint64_t off, size_t len, ceph::bufferlist& bl,
 		  RBD::AioCompletion *c, int op_flags);
-  int aio_discard(uint64_t off, uint64_t len, RBD::AioCompletion *c);
 
   int flush();
   /**

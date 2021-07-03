@@ -62,10 +62,9 @@ aspects of your Ceph cluster:
 * **Overall cluster health**: Display overall cluster status, performance
   and capacity metrics.
 * **Embedded Grafana Dashboards**: Ceph Dashboard is capable of embedding
-  `Grafana <https://grafana.com>`_ dashboards in many locations, to display
-  additional information and performance metrics gathered by the
-  :ref:`mgr-prometheus`. See :ref:`dashboard-grafana` for details on how to
-  configure this functionality.
+  `Grafana`_ dashboards in many locations, to display additional information
+  and performance metrics gathered by the :ref:`mgr-prometheus`. See
+  :ref:`dashboard-grafana` for details on how to configure this functionality.
 * **Cluster logs**: Display the latest updates to the cluster's event and
   audit log files. Log entries can be filtered by priority, date or keyword.
 * **Hosts**: Display a list of all hosts associated to the cluster, which
@@ -73,6 +72,10 @@ aspects of your Ceph cluster:
 * **Performance counters**: Display detailed service-specific statistics for
   each running service.
 * **Monitors**: List all MONs, their quorum status, open sessions.
+* **Monitoring**: Enables creation, re-creation, editing and expiration of
+  Prometheus' Silences, lists the alerting configuration of Prometheus and
+  currently firing alerts. Also shows notifications for firing alerts. Needs
+  configuration.
 * **Configuration Editor**: Display all available configuration options,
   their description, type and default values and edit the current values.
 * **Pools**: List all Ceph pools and their details (e.g. applications,
@@ -253,7 +256,7 @@ section.
 To create a user with the administrator role you can use the following
 commands::
 
-  $ ceph dashboard ac-user-create <username> <password> administrator
+  $ ceph dashboard ac-user-create <username> -i <file-containing-password> administrator
 
 .. _dashboard-enabling-object-gateway:
 
@@ -280,8 +283,8 @@ The credentials of an existing user can also be obtained by using
 
 Finally, provide the credentials to the dashboard::
 
-  $ ceph dashboard set-rgw-api-access-key <access_key>
-  $ ceph dashboard set-rgw-api-secret-key <secret_key>
+  $ ceph dashboard set-rgw-api-access-key -i <file-containing-access-key>
+  $ ceph dashboard set-rgw-api-secret-key -i <file-containing-secret-key>
 
 In a typical default configuration with a single RGW endpoint, this is all you
 have to do to get the Object Gateway management functionality working. The
@@ -341,15 +344,41 @@ To disable API SSL verification run the following commmand::
 
 The available iSCSI gateways must be defined using the following commands::
 
-    $ ceph dashboard iscsi-gateway-list
-    $ ceph dashboard iscsi-gateway-add <scheme>://<username>:<password>@<host>[:port]
-    $ ceph dashboard iscsi-gateway-rm <gateway_name>
+  $ ceph dashboard iscsi-gateway-list
+  $ # Gateway URL format for a new gateway: <scheme>://<username>:<password>@<host>[:port]
+  $ ceph dashboard iscsi-gateway-add -i <file-containing-gateway-url> [<gateway_name>]
+  $ ceph dashboard iscsi-gateway-rm <gateway_name>
 
 
 .. _dashboard-grafana:
 
 Enabling the Embedding of Grafana Dashboards
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+`Grafana`_ requires data from `Prometheus <https://prometheus.io/>`_. Although
+Grafana can use other data sources, the Grafana dashboards we provide contain
+queries that are specific to Prometheus. Our Grafana dashboards therefore
+require Prometheus as the data source. The Ceph :ref:`mgr-prometheus` also only
+exports its data in the Prometheus' common format. The Grafana dashboards rely
+on metric names from the Prometheus module and `Node exporter
+<https://prometheus.io/docs/guides/node-exporter/>`_. The Node exporter is a
+separate application that provides machine metrics.
+
+.. note::
+
+  Prometheus' security model presumes that untrusted users have access to the
+  Prometheus HTTP endpoint and logs. Untrusted users have access to all the
+  (meta)data Prometheus collects that is contained in the database, plus a
+  variety of operational and debugging information.
+
+  However, Prometheus' HTTP API is limited to read-only operations.
+  Configurations can *not* be changed using the API and secrets are not
+  exposed. Moreover, Prometheus has some built-in measures to mitigate the
+  impact of denial of service attacks.
+
+  Please see `Prometheus' Security model
+  <https://prometheus.io/docs/operating/security/>` for more detailed
+  information.
 
 Grafana and Prometheus are likely going to be bundled and installed by some
 orchestration tools along Ceph in the near future, but currently, you will have
@@ -410,7 +439,8 @@ More details can be found in the documentation of the :ref:`mgr-prometheus`.
 After you have set up Grafana and Prometheus, you will need to configure the
 connection information that the Ceph Dashboard will use to access Grafana.
 
-You need to tell the dashboard on which url Grafana instance is running/deployed::
+You need to tell the dashboard on which URL the Grafana instance is
+running/deployed::
 
   $ ceph dashboard set-grafana-api-url <grafana-server-url>  # default: ''
 
@@ -425,7 +455,42 @@ The format of url is : `<protocol>:<IP-address>:<port>`
   above, check your browser's documentation on how to unblock mixed content.
   Alternatively, consider enabling SSL/TLS support in Grafana.
 
+If you are using a self-signed certificate in your Grafana setup, then you should
+disable certificate verification in the dashboard to avoid refused connections,
+e.g. caused by certificates signed by unknown CA or not matching the host name::
+
+  $ ceph dashboard set-grafana-api-ssl-verify False
+
 You can directly access Grafana Instance as well to monitor your cluster.
+
+Alternative URL for Browsers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The Ceph Dashboard backend requires the Grafana URL to be able to verify the
+existence of Grafana Dashboards before the frontend even loads them. Due to the
+nature of how Grafana is implemented in Ceph Dashboard, this means that two
+working connections are required in order to be able to see Grafana graphs in
+Ceph Dashboard:
+
+- The backend (Ceph Mgr module) needs to verify the existence of the requested
+  graph. If this request succeeds, it lets the frontend know that it can safely
+  access Grafana.
+- The frontend then requests the Grafana graphs directly from the user's
+  browser using an iframe. The Grafana instance is accessed directly without any
+  detour through Ceph Dashboard.
+
+Now, it might be the case that your environment makes it difficult for the
+user's browser to directly access the URL configured in Ceph Dashboard. To solve
+this issue, a separate URL can be configured which will solely be used to tell
+the frontend (the user's browser) which URL it should use to access Grafana.
+
+To change the URL that is returned to the frontend issue the following command::
+
+  $ ceph dashboard set-grafana-frontend-api-url <grafana-server-url>
+
+If no value is set for that option, it will simply fall back to the value of the
+GRAFANA_API_URL option. If set, it will instruct the browser to use this URL to
+access Grafana.
 
 .. _dashboard-sso-support:
 
@@ -528,9 +593,9 @@ in order to manage silences.
 
 #. Use the API of Prometheus and the Alertmanager
 
-   This allows you to manage alerts and silences. You will see all alerts and silences
-   the Alertmanager currently knows of in the corresponding listing.
-   Both can be found in the *Cluster* submenu.
+   This allows you to manage alerts and silences. This will enable the "Active
+   Alerts", "All Alerts" as well as the "Silences" tabs in the "Monitoring"
+   section of the "Cluster" menu entry.
 
    Alerts can be sorted by name, job, severity, state and start time.
    Unfortunately it's not possible to know when an alert
@@ -557,8 +622,11 @@ in order to manage silences.
 
      $ ceph dashboard set-alertmanager-api-host 'http://localhost:9093'
 
-   To be able to show what a silence will match beforehand, you have to add the host
-   and port of the Prometheus server::
+   To be able to see all configured alerts, you will need to configure the URL
+   to the Prometheus API. Using this API, the UI will also help you in verifying
+   that a new silence will match a corresponding alert.
+
+   ::
 
      $ ceph dashboard set-prometheus-api-host <prometheus-host:port>  # default: ''
 
@@ -566,7 +634,7 @@ in order to manage silences.
 
      $ ceph dashboard set-prometheus-api-host 'http://localhost:9090'
 
-   After setting up the hosts, you have to refresh your the dashboard in your browser window.
+   After setting up the hosts, you have to refresh the dashboard in your browser window.
 
 #. Use both methods
 
@@ -609,7 +677,7 @@ We provide a set of CLI commands to manage user accounts:
 
 - *Create User*::
 
-  $ ceph dashboard ac-user-create <username> [<password>] [<rolename>] [<name>] [<email>]
+  $ ceph dashboard ac-user-create <username> -i <file-containing-password> [<rolename>] [<name>] [<email>]
 
 - *Delete User*::
 
@@ -617,7 +685,7 @@ We provide a set of CLI commands to manage user accounts:
 
 - *Change Password*::
 
-  $ ceph dashboard ac-user-set-password <username> <password>
+  $ ceph dashboard ac-user-set-password <username> -i <file-containing-password>
 
 - *Modify User (name, and email)*::
 
@@ -744,7 +812,7 @@ view and create Ceph pools, and have read-only access to any other scopes.
 
 1. *Create the user*::
 
-   $ ceph dashboard ac-user-create bob mypassword
+   $ ceph dashboard ac-user-create bob -i <file-containing-password>
 
 2. *Create role and specify scope permissions*::
 
@@ -772,13 +840,6 @@ to allow direct connections to the manager nodes, you could set up a proxy that
 automatically forwards incoming requests to the currently active ceph-mgr
 instance.
 
-.. note::
-  Note that putting the dashboard behind a load-balancing proxy like `HAProxy
-  <https://www.haproxy.org/>`_ currently has some limitations, particularly if
-  you require the traffic between the proxy and the dashboard to be encrypted
-  via SSL/TLS. See `BUG#24662 <https://tracker.ceph.com/issues/24662>`_ for
-  details.
-
 Configuring a URL Prefix
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -793,6 +854,71 @@ to use hyperlinks that include your prefix, you can set the
 
 so you can access the dashboard at ``http://$IP:$PORT/$PREFIX/``.
 
+Disable the redirection
+^^^^^^^^^^^^^^^^^^^^^^^
+
+If the dashboard is behind a load-balancing proxy like `HAProxy <https://www.haproxy.org/>`_
+you might want to disable the redirection behaviour to prevent situations that
+internal (unresolvable) URL's are published to the frontend client. Use the
+following command to get the dashboard to respond with a HTTP error (500 by default)
+instead of redirecting to the active dashboard::
+
+  $ ceph config set mgr mgr/dashboard/standby_behaviour "error"
+
+To reset the setting to the default redirection behaviour, use the following command::
+
+  $ ceph config set mgr mgr/dashboard/standby_behaviour "redirect"
+
+Configure the error status code
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When the redirection behaviour is disabled, then you want to customize the HTTP status
+code of standby dashboards. To do so you need to run the command::
+
+  $ ceph config set mgr mgr/dashboard/standby_error_status_code 503
+
+HAProxy example configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Below you will find an example configuration for SSL/TLS pass through using
+`HAProxy <https://www.haproxy.org/>`_.
+
+Please note that the configuration works under the following conditions.
+If the dashboard fails over, the front-end client might receive a HTTP redirect
+(303) response and will be redirected to an unresolvable host. This happens when
+the failover occurs during two HAProxy health checks. In this situation the
+previously active dashboard node will now respond with a 303 which points to
+the new active node. To prevent that situation you should consider to disable
+the redirection behaviour on standby nodes.
+
+::
+
+  defaults
+    log global
+    option log-health-checks
+    timeout connect 5s
+    timeout client 50s
+    timeout server 450s
+
+  frontend dashboard_front
+    mode http
+    bind *:80
+    option httplog
+    redirect scheme https code 301 if !{ ssl_fc }
+
+  frontend dashboard_front_ssl
+    mode tcp
+    bind *:443
+    option tcplog
+    default_backend dashboard_back_ssl
+
+  backend dashboard_back_ssl
+    mode tcp
+    option httpchk GET /
+    http-check expect status 200
+    server x <HOST>:<PORT> check-ssl check verify none
+    server y <HOST>:<PORT> check-ssl check verify none
+    server z <HOST>:<PORT> check-ssl check verify none
 
 .. _dashboard-auditing:
 
@@ -898,5 +1024,7 @@ Plug-ins
 
 Dashboard Plug-ins allow to extend the functionality of the dashboard in a modular
 and loosely coupled approach.
+
+.. _Grafana: https://grafana.com/
 
 .. include:: dashboard_plugins/feature_toggles.inc.rst

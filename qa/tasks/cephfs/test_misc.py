@@ -7,7 +7,6 @@ import errno
 import time
 import json
 import logging
-import time
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ class TestMisc(CephFSTestCase):
         t = time.time()
         rctime = self.mount_a.getfattr(".", "ceph.dir.rctime")
         log.info("rctime = {}".format(rctime))
-        self.assertGreaterEqual(rctime, t-10)
+        self.assertGreaterEqual(float(rctime), t - 10)
 
     def test_fs_new(self):
         self.mount_a.umount_wait()
@@ -69,7 +68,7 @@ class TestMisc(CephFSTestCase):
                                             '--yes-i-really-really-mean-it')
         self.fs.mon_manager.raw_cluster_cmd('osd', 'pool', 'create',
                                             self.fs.metadata_pool_name,
-                                            self.fs.get_pgs_per_fs_pool().__str__())
+                                            self.fs.pgs_per_fs_pool.__str__())
 
         dummyfile = '/etc/fstab'
 
@@ -78,7 +77,7 @@ class TestMisc(CephFSTestCase):
         def get_pool_df(fs, name):
             try:
                 return fs.get_pool_df(name)['objects'] > 0
-            except RuntimeError as e:
+            except RuntimeError:
                 return False
 
         self.wait_until_true(lambda: get_pool_df(self.fs, self.fs.metadata_pool_name), timeout=30)
@@ -106,7 +105,7 @@ class TestMisc(CephFSTestCase):
                                             '--yes-i-really-really-mean-it')
         self.fs.mon_manager.raw_cluster_cmd('osd', 'pool', 'create',
                                             self.fs.metadata_pool_name,
-                                            self.fs.get_pgs_per_fs_pool().__str__())
+                                            self.fs.pgs_per_fs_pool.__str__())
         self.fs.mon_manager.raw_cluster_cmd('fs', 'new', self.fs.name,
                                             self.fs.metadata_pool_name,
                                             data_pool_name)
@@ -172,8 +171,7 @@ class TestMisc(CephFSTestCase):
         out = self.fs.mon_manager.raw_cluster_cmd('osd', 'pool', 'get',
                                                   pool_name, 'size',
                                                   '-f', 'json-pretty')
-        j = json.loads(out)
-        pool_size = int(j['size'])
+        _ = json.loads(out)
 
         proc = self.mount_a.run_shell(['df', '.'])
         output = proc.stdout.getvalue()
@@ -226,10 +224,10 @@ class TestCacheDrop(CephFSTestCase):
         mds_min_caps_per_client = int(self.fs.get_config("mds_min_caps_per_client"))
         self._setup()
         result = self._run_drop_cache_cmd()
-        self.assertTrue(result['client_recall']['return_code'] == 0)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
+        self.assertEqual(result['client_recall']['return_code'], 0)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
         # It should take at least 1 second
-        self.assertTrue(result['duration'] > 1)
+        self.assertGreater(result['duration'], 1)
         self.assertGreaterEqual(result['trim_cache']['trimmed'], 1000-2*mds_min_caps_per_client)
 
     def test_drop_cache_command_timeout(self):
@@ -240,9 +238,9 @@ class TestCacheDrop(CephFSTestCase):
         """
         self._setup()
         result = self._run_drop_cache_cmd(timeout=10)
-        self.assertTrue(result['client_recall']['return_code'] == -errno.ETIMEDOUT)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 10)
+        self.assertEqual(result['client_recall']['return_code'], -errno.ETIMEDOUT)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 10)
         self.assertGreaterEqual(result['trim_cache']['trimmed'], 100) # we did something, right?
 
     def test_drop_cache_command_dead_timeout(self):
@@ -256,11 +254,16 @@ class TestCacheDrop(CephFSTestCase):
         # Note: recall is subject to the timeout. The journal flush will
         # be delayed due to the client being dead.
         result = self._run_drop_cache_cmd(timeout=5)
-        self.assertTrue(result['client_recall']['return_code'] == -errno.ETIMEDOUT)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 5)
-        self.assertTrue(result['duration'] < 120)
-        self.assertEqual(0, result['trim_cache']['trimmed'])
+        self.assertEqual(result['client_recall']['return_code'], -errno.ETIMEDOUT)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 5)
+        self.assertLess(result['duration'], 120)
+        # Note: result['trim_cache']['trimmed'] may be >0 because dropping the
+        # cache now causes the Locker to drive eviction of stale clients (a
+        # stale session will be autoclosed at mdsmap['session_timeout']). The
+        # particular operation causing this is journal flush which causes the
+        # MDS to wait wait for cap revoke.
+        #self.assertEqual(0, result['trim_cache']['trimmed'])
         self.mount_a.kill_cleanup()
         self.mount_a.mount()
         self.mount_a.wait_until_mounted()
@@ -274,11 +277,15 @@ class TestCacheDrop(CephFSTestCase):
         self._setup()
         self.mount_a.kill()
         result = self._run_drop_cache_cmd()
-        self.assertTrue(result['client_recall']['return_code'] == 0)
-        self.assertTrue(result['flush_journal']['return_code'] == 0)
-        self.assertTrue(result['duration'] > 5)
-        self.assertTrue(result['duration'] < 120)
-        self.assertEqual(0, result['trim_cache']['trimmed'])
+        self.assertEqual(result['client_recall']['return_code'], 0)
+        self.assertEqual(result['flush_journal']['return_code'], 0)
+        self.assertGreater(result['duration'], 5)
+        self.assertLess(result['duration'], 120)
+        # Note: result['trim_cache']['trimmed'] may be >0 because dropping the
+        # cache now causes the Locker to drive eviction of stale clients (a
+        # stale session will be autoclosed at mdsmap['session_timeout']). The
+        # particular operation causing this is journal flush which causes the
+        # MDS to wait wait for cap revoke.
         self.mount_a.kill_cleanup()
         self.mount_a.mount()
         self.mount_a.wait_until_mounted()

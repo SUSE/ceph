@@ -92,7 +92,15 @@ TEST_F(LibRadosWatchNotify, WatchNotify) {
   uint64_t handle;
   ASSERT_EQ(0,
       rados_watch(ioctx, "foo", 0, &handle, watch_notify_test_cb, NULL));
-  ASSERT_EQ(0, rados_notify(ioctx, "foo", 0, NULL, 0));
+  for (unsigned i=0; i<10; ++i) {
+    int r = rados_notify(ioctx, "foo", 0, NULL, 0);
+    if (r == 0) {
+      break;
+    }
+    if (!getenv("ALLOW_TIMEOUTS")) {
+      ASSERT_EQ(0, r);
+    }
+  }
   TestAlarm alarm;
   sem_wait(sem);
   rados_unwatch(ioctx, "foo", handle);
@@ -112,7 +120,15 @@ TEST_F(LibRadosWatchNotifyEC, WatchNotify) {
   uint64_t handle;
   ASSERT_EQ(0,
       rados_watch(ioctx, "foo", 0, &handle, watch_notify_test_cb, NULL));
-  ASSERT_EQ(0, rados_notify(ioctx, "foo", 0, NULL, 0));
+  for (unsigned i=0; i<10; ++i) {
+    int r = rados_notify(ioctx, "foo", 0, NULL, 0);
+    if (r == 0) {
+      break;
+    }
+    if (!getenv("ALLOW_TIMEOUTS")) {
+      ASSERT_EQ(0, r);
+    }
+  }
   TestAlarm alarm;
   sem_wait(sem);
   rados_unwatch(ioctx, "foo", handle);
@@ -574,7 +590,10 @@ TEST_F(LibRadosWatchNotify, AioWatchDelete2) {
   }
   ASSERT_TRUE(left > 0);
   ASSERT_EQ(-ENOTCONN, notify_err);
-  ASSERT_EQ(-ENOTCONN, rados_watch_check(ioctx, handle));
+  int rados_watch_check_err = rados_watch_check(ioctx, handle);
+  // We may hit ENOENT due to socket failure injection and a forced reconnect
+  EXPECT_TRUE(rados_watch_check_err == -ENOTCONN || rados_watch_check_err == -ENOENT)
+    << "Where rados_watch_check_err = " << rados_watch_check_err;
   ASSERT_EQ(0, rados_aio_create_completion(NULL, NULL, NULL, &comp));
   rados_aio_unwatch(ioctx, handle, comp);
   ASSERT_EQ(0, rados_aio_wait_for_complete(comp));

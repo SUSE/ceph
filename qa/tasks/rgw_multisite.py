@@ -2,15 +2,15 @@
 rgw multisite configuration routines
 """
 import argparse
-import contextlib
 import logging
 import random
 import string
 from copy import deepcopy
-from util.rgw import rgwadmin, wait_for_radosgw
-from util.rados import create_ec_pool, create_replicated_pool
-from rgw_multi import multisite
-from rgw_multi.zone_rados import RadosZone as RadosZone
+from tasks.util.rgw import rgwadmin, wait_for_radosgw
+from tasks.util.rados import create_ec_pool, create_replicated_pool
+from tasks.rgw_multi import multisite
+from tasks.rgw_multi.zone_rados import RadosZone as RadosZone
+from tasks.rgw_multi.zone_ps import PSZone as PSZone
 
 from teuthology.orchestra import run
 from teuthology import misc
@@ -33,6 +33,7 @@ class RGWMultisite(Task):
 
     * 'is_master' is passed on the command line as --master
     * 'is_default' is passed on the command line as --default
+    * 'is_pubsub' is used to create a zone with tier-type=pubsub
     * 'endpoints' given as client names are replaced with actual endpoints
 
             zonegroups:
@@ -78,6 +79,9 @@ class RGWMultisite(Task):
                   - name: test-zone2
                     is_default: true
                     endpoints: [c2.client.0]
+                  - name: test-zone3
+                    is_pubsub: true
+                    endpoints: [c1.client.1]
 
     """
     def __init__(self, ctx, config):
@@ -218,7 +222,7 @@ class Gateway(multisite.Gateway):
             # insert zone args before the first |
             pipe = args.index(run.Raw('|'))
             args = args[0:pipe] + zone.zone_args() + args[pipe:]
-        except ValueError, e:
+        except ValueError:
             args += zone.zone_args()
         self.daemon.command_kwargs['args'] = args
 
@@ -236,7 +240,7 @@ def extract_clusters_and_gateways(ctx, role_endpoints):
     """ create cluster and gateway instances for all of the radosgw roles """
     clusters = {}
     gateways = {}
-    for role, endpoint in role_endpoints.iteritems():
+    for role, endpoint in role_endpoints.items():
         cluster_name, daemon_type, client_id = misc.split_role(role)
         # find or create the cluster by name
         cluster = clusters.get(cluster_name)
@@ -369,7 +373,10 @@ def create_zonegroup(cluster, gateways, period, config):
 def create_zone(ctx, cluster, gateways, creds, zonegroup, config):
     """ create a zone with the given configuration """
     zone = multisite.Zone(config['name'], zonegroup, cluster)
-    zone = RadosZone(config['name'], zonegroup, cluster)
+    if config.pop('is_pubsub', False):
+        zone = PSZone(config['name'], zonegroup, cluster)
+    else:
+        zone = RadosZone(config['name'], zonegroup, cluster)
 
     # collect Gateways for the zone's endpoints
     endpoints = config.get('endpoints')

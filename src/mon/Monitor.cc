@@ -347,7 +347,7 @@ void Monitor::do_admin_command(std::string_view command, const cmdmap_t& cmdmap,
     if (f) {
       f->open_array_section("sessions");
       for (auto p : session_map.sessions) {
-        f->dump_stream("session") << *p;
+        f->dump_object("session", *p);
       }
       f->close_section();
       f->flush(ss);
@@ -1149,6 +1149,19 @@ void Monitor::bootstrap()
 	    << messenger->get_myaddrs()
 	    << ", monmap is " << monmap->get_addrs(newrank) << ", respawning"
 	    << dendl;
+
+    if (monmap->get_epoch()) {
+      // store this map in temp mon_sync location so that we use it on
+      // our next startup
+      derr << " stashing newest monmap " << monmap->get_epoch()
+	   << " for next startup" << dendl;
+      bufferlist bl;
+      monmap->encode(bl, -1);
+      auto t(std::make_shared<MonitorDBStore::Transaction>());
+      t->put("mon_sync", "temp_newer_monmap", bl);
+      store->apply_transaction(t);
+    }
+
     respawn();
   }
   if (newrank != rank) {
@@ -1628,8 +1641,11 @@ void Monitor::handle_sync_get_chunk(MonOpRequestRef op)
   MMonSync *reply = new MMonSync(MMonSync::OP_CHUNK, sp.cookie);
   auto tx(std::make_shared<MonitorDBStore::Transaction>());
 
-  int left = g_conf()->mon_sync_max_payload_size;
-  while (sp.last_committed < paxos->get_version() && left > 0) {
+  int bytes_left = g_conf()->mon_sync_max_payload_size;
+  int keys_left = g_conf()->mon_sync_max_payload_keys;
+  while (sp.last_committed < paxos->get_version() &&
+	 bytes_left > 0 &&
+	 keys_left > 0) {
     bufferlist bl;
     sp.last_committed++;
 
@@ -1637,14 +1653,15 @@ void Monitor::handle_sync_get_chunk(MonOpRequestRef op)
     ceph_assert(err == 0);
 
     tx->put(paxos->get_name(), sp.last_committed, bl);
-    left -= bl.length();
+    bytes_left -= bl.length();
+    --keys_left;
     dout(20) << __func__ << " including paxos state " << sp.last_committed
 	     << dendl;
   }
   reply->last_committed = sp.last_committed;
 
-  if (sp.full && left > 0) {
-    sp.synchronizer->get_chunk_tx(tx, left);
+  if (sp.full && bytes_left > 0 && keys_left > 0) {
+    sp.synchronizer->get_chunk_tx(tx, bytes_left, keys_left);
     sp.last_key = sp.synchronizer->get_last_key();
     reply->last_key = sp.last_key;
   }
@@ -2287,21 +2304,11 @@ void Monitor::collect_metadata(Metadata *m)
   string devname = store->get_devname();
   set<string> devnames;
   get_raw_devices(devname, &devnames);
-  (*m)["devices"] = stringify(devnames);
-  string devids;
-  for (auto& devname : devnames) {
-    string err;
-    string id = get_device_id(devname, &err);
-    if (id.size()) {
-      if (!devids.empty()) {
-	devids += ",";
-      }
-      devids += devname + "=" + id;
-    } else {
-      derr << "failed to get devid for " << devname << ": " << err << dendl;
-    }
+  map<string,string> errs;
+  get_device_metadata(devnames, m, &errs);
+  for (auto& i : errs) {
+    dout(1) << __func__ << " " << i.first << ": " << i.second << dendl;
   }
-  (*m)["device_ids"] = devids;
 }
 
 void Monitor::finish_election()
@@ -2770,7 +2777,16 @@ void Monitor::do_health_to_clog(bool force)
       summary == health_status_cache.summary &&
       level == health_status_cache.overall)
     return;
-  clog->health(level) << "overall " << summary;
+
+  if (g_conf()->mon_health_detail_to_clog &&
+      summary != health_status_cache.summary &&
+      level != HEALTH_OK) {
+    string details;
+    level = get_health_status(true, nullptr, &details);
+    clog->health(level) << "Health detail: " << details;
+  } else {
+    clog->health(level) << "overall " << summary;
+  }
   health_status_cache.summary = summary;
   health_status_cache.overall = level;
 }
@@ -2948,7 +2964,7 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
 	  mono_clock::now() - quorum_since).count());
     }
     f->open_object_section("monmap");
-    monmap->dump(f);
+    monmap->dump_summary(f);
     f->close_section();
     f->open_object_section("osdmap");
     osdmon()->osdmap.print_summary(f, cout, string(12, ' '));
@@ -3009,15 +3025,32 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
 	mgrmon()->get_map().print_summary(nullptr, &ss);
 	ss << "\n";
       }
-      if (mdsmon()->get_fsmap().filesystem_count() > 0) {
-	ss << "    mds: " << spacing << mdsmon()->get_fsmap() << "\n";
+      if (mdsmon()->should_print_status()) {
+        ss << "    mds: " << spacing << mdsmon()->get_fsmap() << "\n";
       }
       ss << "    osd: " << spacing;
       osdmon()->osdmap.print_summary(NULL, ss, string(maxlen + 6, ' '));
       ss << "\n";
       for (auto& p : service_map.services) {
+        const std::string &service = p.first;
+        // filter out normal ceph entity types
+        if (ServiceMap::is_normal_ceph_entity(service)) {
+          continue;
+        }
 	ss << "    " << p.first << ": " << string(maxlen - p.first.size(), ' ')
 	   << p.second.get_summary() << "\n";
+      }
+    }
+
+    {
+      auto& service_map = mgrstatmon()->get_service_map();
+      if (!service_map.services.empty()) {
+        ss << "\n \n  task status:\n";
+        {
+          for (auto &p : service_map.services) {
+            ss << p.second.get_task_summary(p.first);
+          }
+        }
       }
     }
 
@@ -3030,8 +3063,14 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f)
       for (auto& i : pem) {
 	ss << "    " << i.second.message << "\n";
 	ss << "      [";
+	unsigned p;
+	if (i.second.progress >= 0.0 && i.second.progress <= 1.0) {
+	  p = (unsigned)(i.second.progress * 30.0);
+	} else {
+	  p = 0;
+	}
 	unsigned j;
-	for (j = 0; j < (unsigned)(i.second.progress * 30.0); ++j) {
+	for (j = 0; j < p; ++j) {
 	  ss << '=';
 	}
 	for (; j < 30; ++j) {
@@ -3088,7 +3127,6 @@ bool Monitor::_allowed_command(MonSession *s, const string &module,
 
   bool capable = s->caps.is_capable(
     g_ceph_context,
-    CEPH_ENTITY_TYPE_MON,
     s->entity_name,
     module, prefix, param_str_map,
     cmd_r, cmd_w, cmd_x,
@@ -3314,18 +3352,20 @@ void Monitor::handle_command(MonOpRequestRef op)
   if (!_allowed_command(session, service, prefix, cmdmap,
                         param_str_map, mon_cmd)) {
     dout(1) << __func__ << " access denied" << dendl;
-    (cmd_is_rw ? audit_clog->info() : audit_clog->debug())
-      << "from='" << session->name << " " << session->addrs << "' "
-      << "entity='" << session->entity_name << "' "
-      << "cmd=" << m->cmd << ":  access denied";
+    if (prefix != "config set" && prefix != "config-key set")
+      (cmd_is_rw ? audit_clog->info() : audit_clog->debug())
+        << "from='" << session->name << " " << session->addrs << "' "
+        << "entity='" << session->entity_name << "' "
+        << "cmd=" << m->cmd << ":  access denied";
     reply_command(op, -EACCES, "access denied", 0);
     return;
   }
 
-  (cmd_is_rw ? audit_clog->info() : audit_clog->debug())
-      << "from='" << session->name << " " << session->addrs << "' "
-      << "entity='" << session->entity_name << "' "
-      << "cmd=" << m->cmd << ": dispatch";
+  if (prefix != "config set" && prefix != "config-key set")
+    (cmd_is_rw ? audit_clog->info() : audit_clog->debug())
+        << "from='" << session->name << " " << session->addrs << "' "
+        << "entity='" << session->entity_name << "' "
+        << "cmd=" << m->cmd << ": dispatch";
 
   if (mon_cmd->is_mgr()) {
     const auto& hdr = m->get_header();
@@ -3874,7 +3914,11 @@ void Monitor::handle_command(MonOpRequestRef op)
     f->close_section();
 
     for (auto& p : mgrstatmon()->get_service_map().services) {
-      f->open_object_section(p.first.c_str());
+      auto &service = p.first;
+      if (ServiceMap::is_normal_ceph_entity(service)) {
+        continue;
+      }
+      f->open_object_section(service.c_str());
       map<string,int> m;
       p.second.count_metadata("ceph_version", &m);
       for (auto& q : m) {
@@ -4341,9 +4385,9 @@ void Monitor::_ms_dispatch(Message *m)
       if (s->item.is_on_list()) {
         // forwarded messages' sessions are not in the sessions map and
         // exist only while the op is being handled.
+        std::lock_guard l(session_map_lock);
         remove_session(s);
       }
-      s->put();
       s = nullptr;
     }
   }
@@ -4398,8 +4442,13 @@ void Monitor::_ms_dispatch(Message *m)
 
   if (s->auth_handler) {
     s->entity_name = s->auth_handler->get_entity_name();
+    s->global_id = s->auth_handler->get_global_id();
+    s->global_id_status = s->auth_handler->get_global_id_status();
   }
-  dout(20) << " caps " << s->caps.get_str() << dendl;
+  dout(20) << " entity_name " << s->entity_name
+	   << " global_id " << s->global_id
+	   << " (" << s->global_id_status
+	   << ") caps " << s->caps.get_str() << dendl;
 
   if ((is_synchronizing() ||
        (!s->authenticated && !exited_quorum.is_zero())) &&
@@ -4443,6 +4492,34 @@ void Monitor::dispatch_op(MonOpRequestRef op)
     dout(5) << __func__ << " " << op->get_req()->get_source_inst()
             << " is not authenticated, dropping " << *(op->get_req())
             << dendl;
+    return;
+  }
+
+  // global_id_status == NONE: all sessions for auth_none and krb,
+  // mon <-> mon sessions (including proxied sessions) for cephx
+  ceph_assert(s->global_id_status == global_id_status_t::NONE ||
+              s->global_id_status == global_id_status_t::NEW_OK ||
+              s->global_id_status == global_id_status_t::NEW_NOT_EXPOSED ||
+              s->global_id_status == global_id_status_t::RECLAIM_OK ||
+              s->global_id_status == global_id_status_t::RECLAIM_INSECURE);
+
+  // let mon_getmap through for "ping" (which doesn't reconnect)
+  // and "tell" (which reconnects but doesn't attempt to preserve
+  // its global_id and stays in NEW_NOT_EXPOSED, retrying until
+  // ->send_attempts reaches 0)
+  if (cct->_conf->auth_expose_insecure_global_id_reclaim &&
+      s->global_id_status == global_id_status_t::NEW_NOT_EXPOSED &&
+      op->get_req()->get_type() != CEPH_MSG_MON_GET_MAP) {
+    dout(5) << __func__ << " " << op->get_req()->get_source_inst()
+            << " may omit old_ticket on reconnects, discarding "
+            << *op->get_req() << " and forcing reconnect" << dendl;
+    ceph_assert(s->con && !s->proxy_con);
+    s->con->mark_down();
+    {
+      std::lock_guard l(session_map_lock);
+      remove_session(s);
+    }
+    op->mark_zap();
     return;
   }
 
@@ -6132,7 +6209,7 @@ bool Monitor::ms_get_authorizer(int service_id, AuthAuthorizer **authorizer)
     }
 
     ret = key_server.build_session_auth_info(
-      service_id, auth_ticket_info.ticket, info, secret, (uint64_t)-1);
+      service_id, auth_ticket_info.ticket, secret, (uint64_t)-1, info);
     if (ret < 0) {
       dout(0) << __func__ << " failed to build mon session_auth_info "
 	      << cpp_strerror(ret) << dendl;
@@ -6227,7 +6304,7 @@ int Monitor::handle_auth_request(
     }
     dout(10) << __func__ << " bad authorizer on " << con << dendl;
     return -EACCES;
-  } else if (auth_meta->auth_mode < AUTH_MODE_MON &&
+  } else if (auth_meta->auth_mode < AUTH_MODE_MON ||
 	     auth_meta->auth_mode > AUTH_MODE_MON_MAX) {
     derr << __func__ << " unrecognized auth mode " << auth_meta->auth_mode
 	 << dendl;
@@ -6301,14 +6378,14 @@ int Monitor::handle_auth_request(
     // are supported by the client if we require it.  for msgr2 that
     // is not necessary.
 
+    bool is_new_global_id = false;
     if (!con->peer_global_id) {
       con->peer_global_id = authmon()->_assign_global_id();
       if (!con->peer_global_id) {
 	dout(1) << __func__ << " failed to assign global_id" << dendl;
 	return -EBUSY;
       }
-      dout(10) << __func__ << "  assigned global_id " << con->peer_global_id
-	       << dendl;
+      is_new_global_id = true;
     }
 
     // set up partial session
@@ -6318,11 +6395,10 @@ int Monitor::handle_auth_request(
 
     r = s->auth_handler->start_session(
       entity_name,
-      auth_meta->get_connection_secret_length(),
+      con->peer_global_id,
+      is_new_global_id,
       reply,
-      &con->peer_caps_info,
-      &auth_meta->session_key,
-      &auth_meta->connection_secret);
+      &con->peer_caps_info);
   } else {
     priv = con->get_priv();
     if (!priv) {
@@ -6335,7 +6411,6 @@ int Monitor::handle_auth_request(
       p,
       auth_meta->get_connection_secret_length(),
       reply,
-      &con->peer_global_id,
       &con->peer_caps_info,
       &auth_meta->session_key,
       &auth_meta->connection_secret);

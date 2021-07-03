@@ -226,14 +226,8 @@ int RGWMetadataLog::trim(int shard_id, const real_time& from_time, const real_ti
   string oid;
   get_shard_oid(shard_id, oid);
 
-  int ret;
-
-  ret = store->time_log_trim(oid, from_time, end_time, start_marker, end_marker);
-
-  if (ret == -ENOENT || ret == -ENODATA)
-    ret = 0;
-
-  return ret;
+  return store->time_log_trim(oid, from_time, end_time, start_marker,
+                              end_marker, nullptr);
 }
   
 int RGWMetadataLog::lock_exclusive(int shard_id, timespan duration, string& zone_id, string& owner_id) {
@@ -547,7 +541,7 @@ Cursor find_oldest_period(RGWRados *store)
       RGWPeriod period;
       int r = store->period_puller->pull(predecessor, period);
       if (r < 0) {
-        return Cursor{r};
+        return cursor;
       }
       auto prev = store->period_history->insert(std::move(period));
       if (!prev) {
@@ -602,7 +596,20 @@ Cursor RGWMetadataManager::init_oldest_log_period()
   auto cursor = store->period_history->lookup(state.oldest_realm_epoch);
   if (cursor) {
     return cursor;
+  } else {
+    cursor = find_oldest_period(store);
+    state.oldest_realm_epoch = cursor.get_epoch();
+    state.oldest_period_id = cursor.get_period().get_id();
+    ldout(cct, 10) << "rewriting mdlog history" << dendl;
+    ret = write_history(store, state, &objv);
+    if (ret < 0 && ret != -ECANCELED) {
+    ldout(cct, 1) << "failed to write mdlog history: "
+          << cpp_strerror(ret) << dendl;
+    return Cursor{ret};
+    }
+    return cursor;
   }
+
   // pull the oldest period by id
   RGWPeriod period;
   ret = store->period_puller->pull(state.oldest_period_id, period);

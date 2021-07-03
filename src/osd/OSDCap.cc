@@ -115,7 +115,7 @@ bool OSDCapPoolNamespace::is_match(const std::string& pn,
     }
   }
   if (nspace) {
-    if ((*nspace)[nspace->length() - 1] == '*' &&
+    if (!nspace->empty() && nspace->back() == '*' &&
 	boost::starts_with(ns, nspace->substr(0, nspace->length() - 1))) {
       return true;
     }
@@ -332,6 +332,8 @@ void OSDCapGrant::expand_profile()
 
   if (profile.name == "rbd") {
     // RBD read-write grant
+    profile_grants.emplace_back(OSDCapMatch(string(), "rbd_info"),
+                                OSDCapSpec(osd_rwxa_t(OSD_CAP_R)));
     profile_grants.emplace_back(OSDCapMatch(string(), "rbd_children"),
                                 OSDCapSpec(osd_rwxa_t(OSD_CAP_CLS_R)));
     profile_grants.emplace_back(OSDCapMatch(string(), "rbd_mirroring"),

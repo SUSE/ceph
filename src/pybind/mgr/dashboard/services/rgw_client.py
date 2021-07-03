@@ -6,7 +6,7 @@ from distutils.util import strtobool
 from ..awsauth import S3Auth
 from ..settings import Settings, Options
 from ..rest_client import RestClient, RequestException
-from ..tools import build_url, dict_contains_path, is_valid_ip_address
+from ..tools import build_url, dict_contains_path, is_valid_ip_address, json_str_to_object
 from .. import mgr, logger
 
 
@@ -76,6 +76,9 @@ def _determine_rgw_addr():
     addr = _parse_addr(daemon['addr'])
     port, ssl = _parse_frontend_config(daemon['metadata']['frontend_config#0'])
 
+    logger.info('Auto-detected RGW configuration: addr=%s, port=%d, ssl=%s',
+                addr, port, str(ssl))
+
     return addr, port, ssl
 
 
@@ -136,43 +139,12 @@ def _parse_frontend_config(config):
     Get the port the RGW is running on. Due the complexity of the
     syntax not all variations are supported.
 
+    If there are multiple (ssl_)ports/(ssl_)endpoints options, then
+    the first found option will be returned.
+
     Get more details about the configuration syntax here:
     http://docs.ceph.com/docs/master/radosgw/frontends/
     https://civetweb.github.io/civetweb/UserManual.html
-
-    >>> _parse_frontend_config('beast port=8000')
-    (8000, False)
-
-    >>> _parse_frontend_config('civetweb port=8000s')
-    (8000, True)
-
-    >>> _parse_frontend_config('beast port=192.0.2.3:80')
-    (80, False)
-
-    >>> _parse_frontend_config('civetweb port=172.5.2.51:8080s')
-    (8080, True)
-
-    >>> _parse_frontend_config('civetweb port=[::]:8080')
-    (8080, False)
-
-    >>> _parse_frontend_config('civetweb port=ip6-localhost:80s')
-    (80, True)
-
-    >>> _parse_frontend_config('civetweb port=[2001:0db8::1234]:80')
-    (80, False)
-
-    >>> _parse_frontend_config('civetweb port=[::1]:8443s')
-    (8443, True)
-
-    >>> _parse_frontend_config('civetweb port=xyz')
-    Traceback (most recent call last):
-    ...
-    LookupError: Failed to determine RGW port
-
-    >>> _parse_frontend_config('civetweb')
-    Traceback (most recent call last):
-    ...
-    LookupError: Failed to determine RGW port
 
     :param config: The configuration string to parse.
     :type config: str
@@ -181,12 +153,36 @@ def _parse_frontend_config(config):
              whether SSL is used.
     :rtype: (int, boolean)
     """
-    match = re.search(r'port=(.*:)?(\d+)(s)?', config)
+    match = re.search(r'^(beast|civetweb)\s+.+$', config)
     if match:
-        port = int(match.group(2))
-        ssl = match.group(3) == 's'
-        return port, ssl
-    raise LookupError('Failed to determine RGW port')
+        if match.group(1) == 'beast':
+            match = re.search(r'(port|ssl_port|endpoint|ssl_endpoint)=(.+)',
+                              config)
+            if match:
+                option_name = match.group(1)
+                if option_name in ['port', 'ssl_port']:
+                    match = re.search(r'(\d+)', match.group(2))
+                    if match:
+                        port = int(match.group(1))
+                        ssl = option_name == 'ssl_port'
+                        return port, ssl
+                if option_name in ['endpoint', 'ssl_endpoint']:
+                    match = re.search(r'([\d.]+|\[.+\])(:(\d+))?',
+                                      match.group(2))
+                    if match:
+                        port = int(match.group(3)) if \
+                            match.group(2) is not None else 443 if \
+                            option_name == 'ssl_endpoint' else \
+                            80
+                        ssl = option_name == 'ssl_endpoint'
+                        return port, ssl
+        if match.group(1) == 'civetweb':
+            match = re.search(r'port=(.*:)?(\d+)(s)?', config)
+            if match:
+                port = int(match.group(2))
+                ssl = match.group(3) == 's'
+                return port, ssl
+    raise LookupError('Failed to determine RGW port from "{}"'.format(config))
 
 
 class RgwClient(RestClient):
@@ -231,6 +227,9 @@ class RgwClient(RestClient):
         # Append the instance to the internal map.
         RgwClient._user_instances[RgwClient._SYSTEM_USERID] = instance
 
+    def _get_realms_info(self):  # type: () -> dict
+        return json_str_to_object(self.proxy('GET', 'realm?list', None, None))
+
     @staticmethod
     def _rgw_settings():
         return (Settings.RGW_API_HOST,
@@ -247,7 +246,7 @@ class RgwClient(RestClient):
         # Discard all cached instances if any rgw setting has changed
         if RgwClient._rgw_settings_snapshot != RgwClient._rgw_settings():
             RgwClient._rgw_settings_snapshot = RgwClient._rgw_settings()
-            RgwClient._user_instances.clear()
+            RgwClient.drop_instance()
 
         if not RgwClient._user_instances:
             RgwClient._load_settings()
@@ -273,6 +272,16 @@ class RgwClient(RestClient):
     @staticmethod
     def admin_instance():
         return RgwClient.instance(RgwClient._SYSTEM_USERID)
+
+    @staticmethod
+    def drop_instance(userid=None):
+        """
+        Drop a cached instance by name or all.
+        """
+        if userid:
+            RgwClient._user_instances.pop(userid, None)
+        else:
+            RgwClient._user_instances.clear()
 
     def _reset_login(self):
         if self.userid != RgwClient._SYSTEM_USERID:
@@ -310,7 +319,8 @@ class RgwClient(RestClient):
         # If user ID is not set, then try to get it via the RGW Admin Ops API.
         self.userid = userid if userid else self._get_user_id(self.admin_path)
 
-        logger.info("Created new connection for user: %s", self.userid)
+        logger.info("Created new connection: user=%s, host=%s, port=%s, ssl=%d, sslverify=%d",
+                    self.userid, host, port, ssl, ssl_verify)
 
     @RestClient.api_get('/', resp_structure='[0] > (ID & DisplayName)')
     def is_service_online(self, request=None):
@@ -428,3 +438,10 @@ class RgwClient(RestClient):
     def create_bucket(self, bucket_name, request=None):
         logger.info("Creating bucket: %s", bucket_name)
         return request()
+
+    def get_realms(self):  # type: () -> List
+        realms_info = self._get_realms_info()
+        if 'realms' in realms_info and realms_info['realms']:
+            return realms_info['realms']
+
+        return []

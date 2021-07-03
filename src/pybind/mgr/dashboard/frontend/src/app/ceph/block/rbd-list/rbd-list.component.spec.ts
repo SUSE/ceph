@@ -13,6 +13,7 @@ import { BehaviorSubject, of } from 'rxjs';
 
 import {
   configureTestBed,
+  expectItemTasks,
   i18nProviders,
   PermissionHelper
 } from '../../../../testing/unit-test-helper';
@@ -20,6 +21,7 @@ import { RbdService } from '../../../shared/api/rbd.service';
 import { ActionLabels } from '../../../shared/constants/app.constants';
 import { TableActionsComponent } from '../../../shared/datatable/table-actions/table-actions.component';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
+import { CdTableSelection } from '../../../shared/models/cd-table-selection';
 import { ExecutingTask } from '../../../shared/models/executing-task';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskListService } from '../../../shared/services/task-list.service';
@@ -137,10 +139,6 @@ describe('RbdListComponent', () => {
       summaryService.addRunningTask(task);
     };
 
-    const expectImageTasks = (image: RbdModel, executing: string) => {
-      expect(image.cdExecuting).toEqual(executing);
-    };
-
     beforeEach(() => {
       images = [];
       addImage('a');
@@ -149,7 +147,7 @@ describe('RbdListComponent', () => {
       component.images = images;
       refresh({ executing_tasks: [], finished_tasks: [] });
       spyOn(rbdService, 'list').and.callFake(() =>
-        of([{ poool_name: 'rbd', status: 1, value: images }])
+        of([{ pool_name: 'rbd', status: 1, value: images }])
       );
       fixture.detectChanges();
     });
@@ -162,28 +160,28 @@ describe('RbdListComponent', () => {
     it('should add a new image from a task', () => {
       addTask('rbd/create', 'd');
       expect(component.images.length).toBe(4);
-      expectImageTasks(component.images[0], undefined);
-      expectImageTasks(component.images[1], undefined);
-      expectImageTasks(component.images[2], undefined);
-      expectImageTasks(component.images[3], 'Creating');
+      expectItemTasks(component.images[0], undefined);
+      expectItemTasks(component.images[1], undefined);
+      expectItemTasks(component.images[2], undefined);
+      expectItemTasks(component.images[3], 'Creating');
     });
 
     it('should show when a image is being cloned', () => {
       addTask('rbd/clone', 'd');
       expect(component.images.length).toBe(4);
-      expectImageTasks(component.images[0], undefined);
-      expectImageTasks(component.images[1], undefined);
-      expectImageTasks(component.images[2], undefined);
-      expectImageTasks(component.images[3], 'Cloning');
+      expectItemTasks(component.images[0], undefined);
+      expectItemTasks(component.images[1], undefined);
+      expectItemTasks(component.images[2], undefined);
+      expectItemTasks(component.images[3], 'Cloning');
     });
 
     it('should show when a image is being copied', () => {
       addTask('rbd/copy', 'd');
       expect(component.images.length).toBe(4);
-      expectImageTasks(component.images[0], undefined);
-      expectImageTasks(component.images[1], undefined);
-      expectImageTasks(component.images[2], undefined);
-      expectImageTasks(component.images[3], 'Copying');
+      expectItemTasks(component.images[0], undefined);
+      expectItemTasks(component.images[1], undefined);
+      expectItemTasks(component.images[2], undefined);
+      expectItemTasks(component.images[3], 'Copying');
     });
 
     it('should show when an existing image is being modified', () => {
@@ -191,9 +189,9 @@ describe('RbdListComponent', () => {
       addTask('rbd/delete', 'b');
       addTask('rbd/flatten', 'c');
       expect(component.images.length).toBe(3);
-      expectImageTasks(component.images[0], 'Updating');
-      expectImageTasks(component.images[1], 'Deleting');
-      expectImageTasks(component.images[2], 'Flattening');
+      expectItemTasks(component.images[0], 'Updating');
+      expectItemTasks(component.images[1], 'Deleting');
+      expectItemTasks(component.images[2], 'Flattening');
     });
   });
 
@@ -366,5 +364,30 @@ describe('RbdListComponent', () => {
         expect(tableActions.tableActions).toEqual([]);
       });
     });
+  });
+
+  it('should disable edit, copy, flatten and move action if RBD is in status `Removing`', () => {
+    const checkAction = (name: string) => {
+      const message = `Action not possible for an RBD in status 'Removing'`;
+      const action = component.tableActions.find((o) => o.name === name);
+      expect(action.disable(component.selection)).toBeTruthy();
+      expect(action.disableDesc(undefined)).toBe(message);
+    };
+
+    component.selection = new CdTableSelection();
+    component.selection.selected = [
+      {
+        name: 'foobar',
+        pool_name: 'rbd',
+        snapshots: [],
+        source: 'REMOVING'
+      }
+    ];
+    component.selection.update();
+
+    checkAction('Edit');
+    checkAction('Copy');
+    checkAction('Flatten');
+    checkAction('Move to Trash');
   });
 });

@@ -459,8 +459,7 @@ template <typename I>
 void CreateImageRequest<I>::populate_image_options(
     librbd::ImageOptions* image_options) {
   image_options->set(RBD_IMAGE_OPTION_FEATURES,
-                     (m_remote_image_ctx->features &
-                        ~RBD_FEATURES_IMPLICIT_ENABLE));
+                     m_remote_image_ctx->features);
   image_options->set(RBD_IMAGE_OPTION_ORDER, m_remote_image_ctx->order);
   image_options->set(RBD_IMAGE_OPTION_STRIPE_UNIT,
                      m_remote_image_ctx->stripe_unit);
@@ -488,6 +487,15 @@ void CreateImageRequest<I>::populate_image_options(
 
   if (data_pool != "") {
     image_options->set(RBD_IMAGE_OPTION_DATA_POOL, data_pool);
+  }
+
+  if (m_remote_parent_spec.pool_id != -1) {
+    uint64_t clone_format = 1;
+    if (m_remote_image_ctx->test_op_features(
+            RBD_OPERATION_FEATURE_CLONE_CHILD)) {
+      clone_format = 2;
+    }
+    image_options->set(RBD_IMAGE_OPTION_CLONE_FORMAT, clone_format);
   }
 }
 

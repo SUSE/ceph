@@ -17,7 +17,9 @@
 #ifndef CEPH_MDCACHE_H
 #define CEPH_MDCACHE_H
 
+#include <atomic>
 #include <string_view>
+#include <thread>
 
 #include "common/DecayCounter.h"
 #include "include/types.h"
@@ -135,14 +137,14 @@ class MDCache {
  protected:
   ceph::unordered_map<inodeno_t,CInode*> inode_map;  // map of head inodes by ino
   map<vinodeno_t, CInode*> snap_inode_map;  // map of snap inodes by ino
-  CInode *root;                            // root inode
-  CInode *myin;                            // .ceph/mds%d dir
+  CInode *root = nullptr; // root inode
+  CInode *myin = nullptr; // .ceph/mds%d dir
 
-  bool readonly;
+  bool readonly = false;
   void set_readonly() { readonly = true; }
 
-  CInode *strays[NUM_STRAY];         // my stray dir
-  int stray_index;
+  std::array<CInode *, NUM_STRAY> strays{}; // my stray dir
+  int stray_index = 0;
 
   CInode *get_stray() {
     return strays[stray_index];
@@ -154,17 +156,20 @@ class MDCache {
 
   Filer filer;
 
-  bool exceeded_size_limit;
-
 private:
+  void upkeep_main(void);
   uint64_t cache_inode_limit;
   uint64_t cache_memory_limit;
   double cache_reservation;
   double cache_health_threshold;
+  bool forward_all_requests_to_auth;
 
 public:
   uint64_t cache_limit_inodes(void) {
     return cache_inode_limit;
+  }
+  bool forward_all_reqs_to_auth() const { 
+    return forward_all_requests_to_auth;
   }
   uint64_t cache_limit_memory(void) {
     return cache_memory_limit;
@@ -208,9 +213,9 @@ public:
 
   DecayRate decayrate;
 
-  int num_shadow_inodes;
+  int num_shadow_inodes = 0;
 
-  int num_inodes_with_caps;
+  int num_inodes_with_caps = 0;
 
   unsigned max_dir_commit_size;
 
@@ -224,10 +229,11 @@ public:
 
   // -- client leases --
 public:
-  static const int client_lease_pools = 3;
-  float client_lease_durations[client_lease_pools];
+  static constexpr std::size_t client_lease_pools = 3;
+  std::array<float, client_lease_pools> client_lease_durations{5.0, 30.0, 300.0};
+
 protected:
-  xlist<ClientLease*> client_leases[client_lease_pools];
+  std::array<xlist<ClientLease*>, client_lease_pools> client_leases{};
 public:
   void touch_client_lease(ClientLease *r, int pool, utime_t ttl) {
     client_leases[pool].push_back(&r->item_lease);
@@ -250,9 +256,7 @@ public:
   }
 
   // -- client caps --
-  uint64_t              last_cap_id;
-  
-
+  uint64_t last_cap_id = 0;
 
   // -- discover --
   struct discover_info_t {
@@ -280,7 +284,7 @@ public:
   };
 
   map<ceph_tid_t, discover_info_t> discovers;
-  ceph_tid_t discover_last_tid;
+  ceph_tid_t discover_last_tid = 0;
 
   void _send_discover(discover_info_t& dis);
   discover_info_t& _create_discover(mds_rank_t mds) {
@@ -477,6 +481,12 @@ public:
   void committed_master_slave(metareqid_t r, mds_rank_t from);
   void finish_committed_masters();
 
+  void add_uncommitted_slave(metareqid_t reqid, LogSegment*, mds_rank_t, MDSlaveUpdate *su=nullptr);
+  void wait_for_uncommitted_slave(metareqid_t reqid, MDSContext *c) {
+    uncommitted_slaves.at(reqid).waiters.push_back(c);
+  }
+  void finish_uncommitted_slave(metareqid_t reqid, bool assert_exist=true);
+  MDSlaveUpdate* get_uncommitted_slave(metareqid_t reqid, mds_rank_t master);
   void _logged_slave_commit(mds_rank_t from, metareqid_t reqid);
 
   // -- recovery --
@@ -495,7 +505,6 @@ protected:
   // from MMDSResolves
   map<mds_rank_t, map<dirfrag_t, vector<dirfrag_t> > > other_ambiguous_imports;  
 
-  map<mds_rank_t, map<metareqid_t, MDSlaveUpdate*> > uncommitted_slave_updates;  // slave: for replay.
   map<CInode*, int> uncommitted_slave_rename_olddir;  // slave: preserve the non-auth dir until seeing commit.
   map<CInode*, int> uncommitted_slave_unlink;  // slave: preserve the unlinked inode until seeing commit.
 
@@ -511,13 +520,22 @@ protected:
   };
   map<metareqid_t, umaster>                 uncommitted_masters;         // master: req -> slave set
 
+  struct uslave {
+    uslave() {}
+    mds_rank_t master;
+    LogSegment *ls = nullptr;
+    MDSlaveUpdate *su = nullptr;
+    MDSContext::vec waiters;
+  };
+  map<metareqid_t, uslave> uncommitted_slaves;  // slave: preserve the slave req until seeing commit.
+
   set<metareqid_t>		pending_masters;
   map<int, set<metareqid_t> >	ambiguous_slave_updates;
 
   friend class ESlaveUpdate;
   friend class ECommitted;
 
-  bool resolves_pending;
+  bool resolves_pending = false;
   set<mds_rank_t> resolve_gather;	// nodes i need resolves from
   set<mds_rank_t> resolve_ack_gather;	// nodes i need a resolve_ack from
   set<version_t> resolve_snapclient_commits;
@@ -532,9 +550,6 @@ protected:
   void disambiguate_my_imports();
   void disambiguate_other_imports();
   void trim_unlinked_inodes();
-  void add_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master, MDSlaveUpdate*);
-  void finish_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master);
-  MDSlaveUpdate* get_uncommitted_slave_update(metareqid_t reqid, mds_rank_t master);
 
   void send_slave_resolves();
   void send_subtree_resolves();
@@ -563,7 +578,7 @@ public:
   void add_rollback(metareqid_t reqid, mds_rank_t master) {
     resolve_need_rollback[reqid] = master;
   }
-  void finish_rollback(metareqid_t reqid);
+  void finish_rollback(metareqid_t reqid, MDRequestRef& mdr);
 
   // ambiguous imports
   void add_ambiguous_import(dirfrag_t base, const vector<dirfrag_t>& bounds);
@@ -594,7 +609,7 @@ public:
   bool dump_inode(Formatter *f, uint64_t number);
 protected:
   // [rejoin]
-  bool rejoins_pending;
+  bool rejoins_pending = false;
   set<mds_rank_t> rejoin_gather;      // nodes from whom i need a rejoin
   set<mds_rank_t> rejoin_sent;        // nodes i sent a rejoin to
   set<mds_rank_t> rejoin_ack_sent;    // nodes i sent a rejoin to
@@ -611,7 +626,7 @@ protected:
   map<inodeno_t,map<client_t,map<mds_rank_t,cap_reconnect_t> > > cap_imports;  // ino -> client -> frommds -> capex
   set<inodeno_t> cap_imports_missing;
   map<inodeno_t, MDSContext::vec > cap_reconnect_waiters;
-  int cap_imports_num_opening;
+  int cap_imports_num_opening = 0;
   
   set<CInode*> rejoin_undef_inodes;
   set<CInode*> rejoin_potential_updated_scatterlocks;
@@ -774,9 +789,7 @@ public:
  public:
   explicit MDCache(MDSRank *m, PurgeQueue &purge_queue_);
   ~MDCache();
-  void handle_conf_change(const ConfigProxy& conf,
-                          const std::set <std::string> &changed,
-                          const MDSMap &mds_map);
+  void handle_conf_change(const std::set<std::string>& changed, const MDSMap& mds_map);
   
   // debug
   void log_stat();
@@ -839,7 +852,7 @@ public:
       shutdown_export_strays();
   }
 
-  bool did_shutdown_log_cap;
+  bool did_shutdown_log_cap = false;
 
   // inode_map
   bool have_inode(vinodeno_t vino) {
@@ -954,7 +967,7 @@ protected:
 
 
 private:
-  bool opening_root, open;
+  bool opening_root = false, open = false;
   MDSContext::vec waiting_for_open;
 
 public:
@@ -1059,7 +1072,7 @@ protected:
       want_replica(false), want_xlocked(false), tid(0), pool(-1),
       last_err(0) {}
   };
-  ceph_tid_t open_ino_last_tid;
+  ceph_tid_t open_ino_last_tid = 0;
   map<inodeno_t,open_ino_info_t> opening_inodes;
 
   void _open_ino_backtrace_fetched(inodeno_t ino, bufferlist& bl, int err);
@@ -1096,7 +1109,7 @@ public:
   };
 
   map<ceph_tid_t, find_ino_peer_info_t> find_ino_peer;
-  ceph_tid_t find_ino_peer_last_tid;
+  ceph_tid_t find_ino_peer_last_tid = 0;
 
   void find_ino_peers(inodeno_t ino, MDSContext *c, mds_rank_t hint=MDS_RANK_NONE);
   void _do_find_ino_peer(find_ino_peer_info_t& fip);
@@ -1106,7 +1119,7 @@ public:
 
   // -- snaprealms --
 private:
-  SnapRealm *global_snaprealm;
+  SnapRealm *global_snaprealm = nullptr;
 public:
   SnapRealm *get_global_snaprealm() const { return global_snaprealm; }
   void create_global_snaprealm();
@@ -1235,12 +1248,16 @@ private:
 
 public:
   void wait_for_uncommitted_fragment(dirfrag_t dirfrag, MDSContext *c) {
-    ceph_assert(uncommitted_fragments.count(dirfrag));
-    uncommitted_fragments[dirfrag].waiters.push_back(c);
+    uncommitted_fragments.at(dirfrag).waiters.push_back(c);
   }
+  bool is_any_uncommitted_fragment() const {
+    return !uncommitted_fragments.empty();
+  }
+  void wait_for_uncommitted_fragments(MDSContext* finisher);
+  void rollback_uncommitted_fragments();
+
   void split_dir(CDir *dir, int byn);
   void merge_dir(CInode *diri, frag_t fg);
-  void rollback_uncommitted_fragments();
 
   void find_stale_fragment_freeze();
   void fragment_freeze_inc_num_waiters(CDir *dir);
@@ -1260,6 +1277,9 @@ public:
   map<CDir*, expiremap> delayed_expire; // subtree root -> expire msg
   void process_delayed_expire(CDir *dir);
   void discard_delayed_expire(CDir *dir);
+
+  // -- mdsmap --
+  void handle_mdsmap(const MDSMap &mdsmap);
 
 protected:
   int dump_cache(std::string_view fn, Formatter *f);
@@ -1318,8 +1338,17 @@ public:
 public:
   /* Because exports may fail, this set lets us keep track of inodes that need exporting. */
   std::set<CInode *> export_pin_queue;
+  std::set<CInode *> export_pin_delayed_queue;
 
   OpenFileTable open_file_table;
+
+private:
+  std::thread upkeeper;
+  ceph::mutex upkeep_mutex = ceph::make_mutex("MDCache::upkeep_mutex");
+  ceph::condition_variable upkeep_cvar;
+  time upkeep_last_trim = time::min();
+  time upkeep_last_release = time::min();
+  std::atomic<bool> upkeep_trim_shutdown{false};
 };
 
 class C_MDS_RetryRequest : public MDSInternalContext {

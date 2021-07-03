@@ -59,6 +59,8 @@ struct MonSession : public RefCountedObject {
 
   AuthServiceHandler *auth_handler = nullptr;
   EntityName entity_name;
+  uint64_t global_id = 0;
+  global_id_status_t global_id_status = global_id_status_t::NONE;
 
   ConnectionRef proxy_con;
   uint64_t proxy_tid = 0;
@@ -95,7 +97,6 @@ struct MonSession : public RefCountedObject {
     map<string,string> args;
     return caps.is_capable(
       g_ceph_context,
-      CEPH_ENTITY_TYPE_MON,
       entity_name,
       service, "", args,
       mask & MON_CAP_R, mask & MON_CAP_W, mask & MON_CAP_X,
@@ -104,6 +105,25 @@ struct MonSession : public RefCountedObject {
 
   const entity_addr_t& get_peer_socket_addr() {
     return socket_addr;
+  }
+
+  void dump(Formatter *f) const {
+    f->dump_stream("name") << name;
+    f->dump_stream("entity_name") << entity_name;
+    f->dump_object("addrs", addrs);
+    f->dump_object("socket_addr", socket_addr);
+    f->dump_string("con_type", ceph_entity_type_name(con_type));
+    f->dump_unsigned("con_features", con_features);
+    f->dump_stream("con_features_hex") << std::hex << con_features << std::dec;
+    f->dump_string("con_features_release",
+		   ceph_release_name(ceph_release_from_features(con_features)));
+    f->dump_bool("open", !closed);
+    f->dump_object("caps", caps);
+    f->dump_bool("authenticated", authenticated);
+    f->dump_unsigned("global_id", global_id);
+    f->dump_stream("global_id_status") << global_id_status;
+    f->dump_unsigned("osd_epoch", osd_epoch);
+    f->dump_string("remote_host", remote_host);
   }
 };
 
@@ -135,7 +155,8 @@ struct MonSessionMap {
     }
     s->sub_map.clear();
     s->item.remove_myself();
-    if (s->name.is_osd()) {
+    if (s->name.is_osd() &&
+	s->name.num() >= 0) {
       for (multimap<int,MonSession*>::iterator p = by_osd.find(s->name.num());
 	   p->first == s->name.num();
 	   ++p)
@@ -162,9 +183,13 @@ struct MonSessionMap {
   }
 
   void add_session(MonSession *s) {
+    s->session_timeout = ceph_clock_now();
+    s->session_timeout += g_conf()->mon_session_timeout;
+
     sessions.push_back(&s->item);
     s->get();
-    if (s->name.is_osd()) {
+    if (s->name.is_osd() &&
+	s->name.num() >= 0) {
       by_osd.insert(pair<int,MonSession*>(s->name.num(), s));
     }
     if (s->con_features) {

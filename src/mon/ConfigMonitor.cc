@@ -66,6 +66,15 @@ void ConfigMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   dout(10) << " " << (version+1) << dendl;
   put_last_committed(t, version+1);
 
+  for (auto& [key, value] : pending_cleanup) {
+    if (pending.count(key) == 0) {
+      derr << __func__ << " repair: adjusting config key '" << key << "'"
+	   << dendl;
+      pending[key] = value;
+    }
+  }
+  pending_cleanup.clear();
+
   // TODO: record changed sections (osd, mds.foo, rack:bar, ...)
 
   string history = HISTORY_PREFIX + stringify(version+1) + "/";
@@ -286,19 +295,30 @@ bool ConfigMonitor::preprocess_command(MonOpRequestRef op)
       &config, &src);
 
     if (cmd_getval(g_ceph_context, cmdmap, "key", name)) {
-      // get a single value
-      auto p = config.find(name);
-      if (p != config.end()) {
-	odata.append(p->second);
-	odata.append("\n");
-	goto reply;
-      }
       const Option *opt = g_conf().find_option(name);
       if (!opt) {
 	opt = mon->mgrmon()->find_module_option(name);
       }
       if (!opt) {
 	err = -ENOENT;
+	goto reply;
+      }
+      if (opt->has_flag(Option::FLAG_NO_MON_UPDATE)) {
+	// handle special options
+	if (name == "fsid") {
+	  odata.append(stringify(mon->monmap->get_fsid()));
+	  odata.append("\n");
+	  goto reply;
+	}
+	err = -EINVAL;
+	ss << name << " is special and cannot be stored by the mon";
+	goto reply;
+      }
+      // get a single value
+      auto p = config.find(name);
+      if (p != config.end()) {
+	odata.append(p->second);
+	odata.append("\n");
 	goto reply;
       }
       if (!entity.is_client() &&
@@ -486,14 +506,18 @@ bool ConfigMonitor::prepare_command(MonOpRequestRef op)
 	goto reply;
       }
 
-      if (opt) {
-	Option::value_t real_value;
-	string errstr;
-	err = opt->parse_value(value, &real_value, &errstr, &value);
-	if (err < 0) {
-	  ss << "error parsing value: " << errstr;
-	  goto reply;
-	}
+      Option::value_t real_value;
+      string errstr;
+      err = opt->parse_value(value, &real_value, &errstr, &value);
+      if (err < 0) {
+	ss << "error parsing value: " << errstr;
+	goto reply;
+      }
+
+      if (opt->has_flag(Option::FLAG_NO_MON_UPDATE)) {
+	err = -EINVAL;
+	ss << name << " is special and cannot be stored by the mon";
+	goto reply;
       }
     }
 
@@ -508,6 +532,8 @@ bool ConfigMonitor::prepare_command(MonOpRequestRef op)
     string key;
     if (section.size()) {
       key += section + "/";
+    } else {
+      key += "global/";
     }
     string mask_str = mask.to_str();
     if (mask_str.size()) {
@@ -678,11 +704,14 @@ update:
 
 void ConfigMonitor::tick()
 {
-  if (!is_active()) {
+  if (!is_active() || !mon->is_leader()) {
     return;
   }
   dout(10) << __func__ << dendl;
   bool changed = false;
+  if (!pending_cleanup.empty()) {
+    changed = true;
+  }
   if (changed) {
     propose_pending();
   }
@@ -699,6 +728,7 @@ void ConfigMonitor::load_config()
   it->lower_bound(KEY_PREFIX);
   config_map.clear();
   current.clear();
+  pending_cleanup.clear();
   while (it->valid() &&
 	 it->key().compare(0, KEY_PREFIX.size(), KEY_PREFIX) == 0) {
     string key = it->key().substr(KEY_PREFIX.size());
@@ -725,8 +755,10 @@ void ConfigMonitor::load_config()
     }
     if (!opt) {
       dout(10) << __func__ << " unrecognized option '" << name << "'" << dendl;
-      opt = new Option(name, Option::TYPE_STR, Option::LEVEL_UNKNOWN);
-      // FIXME: this will be leaked!
+      config_map.stray_options.push_back(
+	std::unique_ptr<Option>(
+	  new Option(name, Option::TYPE_STR, Option::LEVEL_UNKNOWN)));
+      opt = config_map.stray_options.back().get();
     }
 
     string err;
@@ -741,10 +773,23 @@ void ConfigMonitor::load_config()
     string section_name;
     if (who.size() &&
 	!ConfigMap::parse_mask(who, &section_name, &mopt.mask)) {
-      derr << __func__ << " ignoring key " << key << dendl;
+      derr << __func__ << " invalid mask for key " << key << dendl;
+      pending_cleanup[key] = boost::none;
+    } else if (opt->has_flag(Option::FLAG_NO_MON_UPDATE)) {
+      dout(10) << __func__ << " NO_MON_UPDATE option '"
+	       << name << "' = '" << value << "' for " << name
+	       << dendl;
+      pending_cleanup[key] = boost::none;
     } else {
+      if (section_name.empty()) {
+	// we prefer global/$option instead of just $option
+	derr << __func__ << " adding global/ prefix to key '" << key << "'"
+	     << dendl;
+	pending_cleanup[key] = boost::none;
+	pending_cleanup["global/"s + key] = it->value();
+      }
       Section *section = &config_map.global;;
-      if (section_name.size()) {
+      if (section_name.size() && section_name != "global") {
 	if (section_name.find('.') != std::string::npos) {
 	  section = &config_map.by_id[section_name];
 	} else {
@@ -757,13 +802,6 @@ void ConfigMonitor::load_config()
     it->next();
   }
   dout(10) << __func__ << " got " << num << " keys" << dendl;
-  dout(20) << __func__ << " config map:\n";
-  JSONFormatter jf(true);
-  jf.open_object_section("config_map");
-  config_map.dump(&jf);
-  jf.close_section();
-  jf.flush(*_dout);
-  *_dout << dendl;
 
   // refresh our own config
   {
@@ -844,8 +882,9 @@ bool ConfigMonitor::refresh_config(MonSession *s)
     dout(20) << __func__ << " no change, " << out << dendl;
     return false;
   }
-
-  dout(20) << __func__ << " " << out << dendl;
+  // removing this to hide sensitive data going into logs
+  // leaving this for debugging purposes
+  // dout(20) << __func__ << " " << out << dendl;
   s->last_config = out;
   s->any_config = true;
   return true;

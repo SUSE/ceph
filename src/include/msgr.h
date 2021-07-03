@@ -7,6 +7,14 @@
 
 #include "include/int_types.h"
 
+/* See comment in ceph_fs.h.  */
+#ifndef __KERNEL__
+#include "byteorder.h"
+#define __le16 ceph_le16
+#define __le32 ceph_le32
+#define __le64 ceph_le64
+#endif
+
 /*
  * Data types for message passing layer used by Ceph.
  */
@@ -44,15 +52,16 @@
 #define DEFINE_MSGR2_FEATURE(bit, incarnation, name)               \
 	const static uint64_t CEPH_MSGR2_FEATURE_##name = (1ULL << bit); \
 	const static uint64_t CEPH_MSGR2_FEATUREMASK_##name =            \
-			(1ULL << bit | CEPH_FEATURE_INCARNATION_##incarnation);
+			(1ULL << bit | CEPH_MSGR2_INCARNATION_##incarnation);
 
 #define HAVE_MSGR2_FEATURE(x, name) \
 	(((x) & (CEPH_MSGR2_FEATUREMASK_##name)) == (CEPH_MSGR2_FEATUREMASK_##name))
 
+DEFINE_MSGR2_FEATURE( 0, 1, REVISION_1)   // msgr2.1
 
-#define CEPH_MSGR2_SUPPORTED_FEATURES (0ull)
+#define CEPH_MSGR2_SUPPORTED_FEATURES (CEPH_MSGR2_FEATURE_REVISION_1)
 
-#define CEPH_MSGR2_REQUIRED_FEATURES (CEPH_MSGR2_SUPPORTED_FEATURES)
+#define CEPH_MSGR2_REQUIRED_FEATURES  (0ull)
 
 
 /*
@@ -236,5 +245,10 @@ struct ceph_msg_footer {
 #define CEPH_MSG_FOOTER_NOCRC     (1<<1)   /* no data crc */
 #define CEPH_MSG_FOOTER_SIGNED	  (1<<2)   /* msg was signed */
 
+#ifndef __KERNEL__
+#undef __le16
+#undef __le32
+#undef __le64
+#endif
 
 #endif

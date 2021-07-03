@@ -22,6 +22,7 @@ protected:
   static constexpr uint64_t MAX_ROLE_SESSION_SIZE = 64;
   uint64_t MAX_DURATION_IN_SECS;
   uint64_t duration;
+  string err_msg;
   string iamPolicy;
   string roleArn;
   string roleSessionName;
@@ -109,7 +110,7 @@ public:
   int generateAssumedRoleUser( CephContext* cct,
                                 RGWRados *store,
                                 const string& roleId,
-                                const rgw::IAM::ARN& roleArn,
+                                const rgw::ARN& roleArn,
                                 const string& roleSessionName);
   const string& getARN() const { return arn; }
   const string& getAssumeRoleId() const { return assumeRoleId; }

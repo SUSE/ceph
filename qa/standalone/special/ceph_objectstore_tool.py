@@ -45,7 +45,7 @@ if sys.version_info[0] >= 3:
     def decode(s):
         return s.decode('utf-8')
 
-    def check_output(*args, **kwargs):
+    def check_output(*args, **kwargs): # noqa
         return decode(subprocess.check_output(*args, **kwargs))
 else:
     def decode(s):
@@ -336,7 +336,7 @@ def check_entry_transactions(entry, enum):
 
 
 def check_transaction_ops(ops, enum, tnum):
-    if len(ops) is 0:
+    if len(ops) == 0:
         logging.warning("No ops found in entry {e} trans {t}".format(e=enum, t=tnum))
     errors = 0
     for onum in range(len(ops)):
@@ -375,7 +375,7 @@ def test_dump_journal(CFSD_PREFIX, osds):
         os.unlink(TMPFILE)
 
         journal_errors = check_journal(jsondict)
-        if journal_errors is not 0:
+        if journal_errors != 0:
             logging.error(jsondict)
         ERRORS += journal_errors
 
@@ -519,7 +519,7 @@ def get_osd_weights(CFSD_PREFIX, osd_ids, osd_path):
     for line in output.strip().split('\n'):
         print(line)
         linev = re.split('\s+', line)
-        if linev[0] is '':
+        if linev[0] == '':
             linev.pop(0)
         print('linev %s' % linev)
         weights.append(float(linev[2]))
@@ -604,6 +604,7 @@ def test_removeall(CFSD_PREFIX, db, OBJREPPGS, REP_POOL, CEPH_BIN, OSDDIR, REP_N
     errors=0
     print("Test removeall")
     kill_daemons()
+    test_force_remove = 0
     for nspace in db.keys():
         for basename in db[nspace].keys():
             JSON = db[nspace][basename]['json']
@@ -619,6 +620,25 @@ def test_removeall(CFSD_PREFIX, db, OBJREPPGS, REP_POOL, CEPH_BIN, OSDDIR, REP_N
                     if int(basename.split(REP_NAME)[1]) <= int(NUM_CLONED_REP_OBJECTS):
                         cmd = (CFSD_PREFIX + "'{json}' remove").format(osd=osd, json=JSON)
                         errors += test_failure(cmd, "Snapshots are present, use removeall to delete everything")
+                        if not test_force_remove:
+
+                            cmd = (CFSD_PREFIX + " '{json}' set-attr snapset /dev/null").format(osd=osd, json=JSON)
+                            logging.debug(cmd)
+                            ret = call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
+                            if ret != 0:
+                                logging.error("Test set-up to corrupt snapset failed for {json}".format(json=JSON))
+                                errors += 1
+                                # Do the removeall since this test failed to set-up
+                            else:
+                                test_force_remove = 1
+
+                                cmd = (CFSD_PREFIX + " '{json}' --force remove").format(osd=osd, json=JSON)
+                                logging.debug(cmd)
+                                ret = call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
+                                if ret != 0:
+                                    logging.error("forced remove with corrupt snapset failed for {json}".format(json=JSON))
+                                    errors += 1
+                                continue
 
                     cmd = (CFSD_PREFIX + " --force --dry-run '{json}' remove").format(osd=osd, json=JSON)
                     logging.debug(cmd)
@@ -1014,7 +1034,7 @@ def main(argv):
 
     # Specify a bad --op command
     cmd = (CFSD_PREFIX + "--op oops").format(osd=ONEOSD)
-    ERRORS += test_failure(cmd, "Must provide --op (info, log, remove, mkfs, fsck, repair, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log)")
+    ERRORS += test_failure(cmd, "Must provide --op (info, log, remove, mkfs, fsck, repair, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log, statfs)")
 
     # Provide just the object param not a command
     cmd = (CFSD_PREFIX + "object").format(osd=ONEOSD)

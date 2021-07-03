@@ -25,6 +25,7 @@ extern "C" {
 
 #include "include/util.h"
 
+#include "cls/rgw/cls_rgw_types.h"
 #include "cls/rgw/cls_rgw_client.h"
 
 #include "global/global_init.h"
@@ -107,6 +108,7 @@ void usage()
   cout << "  bucket rewrite             rewrite all objects in the specified bucket\n";
   cout << "  bucket sync disable        disable bucket sync\n";
   cout << "  bucket sync enable         enable bucket sync\n";
+  cout << "  bucket radoslist           list rados objects backing bucket's objects\n";
   cout << "  bi get                     retrieve bucket index object entries\n";
   cout << "  bi put                     store bucket index object entries\n";
   cout << "  bi list                    list raw bucket index entries\n";
@@ -155,6 +157,7 @@ void usage()
   cout << "  zonegroup rename           rename a zone group\n";
   cout << "  zonegroup list             list all zone groups set on this cluster\n";
   cout << "  zonegroup placement list   list zonegroup's placement targets\n";
+  cout << "  zonegroup placement get    get a placement target of a specific zonegroup\n";
   cout << "  zonegroup placement add    add a placement target id to a zonegroup\n";
   cout << "  zonegroup placement modify modify a placement target of a specific zonegroup\n";
   cout << "  zonegroup placement rm     remove a placement target from a zonegroup\n";
@@ -167,6 +170,7 @@ void usage()
   cout << "  zone list                  list all zones set on this cluster\n";
   cout << "  zone rename                rename a zone\n";
   cout << "  zone placement list        list zone's placement targets\n";
+  cout << "  zone placement get         get a zone placement target\n";
   cout << "  zone placement add         add a zone placement target\n";
   cout << "  zone placement modify      modify a zone placement target\n";
   cout << "  zone placement rm          remove a zone placement target\n";
@@ -375,6 +379,11 @@ void usage()
   cout << "   --totp-seconds            the time resolution that is being used for TOTP generation\n";
   cout << "   --totp-window             the number of TOTP tokens that are checked before and after the current token when validating token\n";
   cout << "   --totp-pin                the valid value of a TOTP token at a certain time\n";
+  cout << "\nradoslist options:\n";
+  cout << "   --rgw-obj-fs              the field separator that will separate the rados\n";
+  cout << "                             object name from the rgw object name;\n";
+  cout << "                             additionally rados objects for incomplete\n";
+  cout << "                             multipart uploads will not be output\n";
   cout << "\n";
   generic_client_usage();
 }
@@ -410,6 +419,8 @@ enum {
   OPT_BUCKET_RM,
   OPT_BUCKET_REWRITE,
   OPT_BUCKET_RESHARD,
+  OPT_BUCKET_CHOWN,
+  OPT_BUCKET_RADOS_LIST,
   OPT_POLICY,
   OPT_POOL_ADD,
   OPT_POOL_RM,
@@ -460,6 +471,7 @@ enum {
   OPT_ZONEGROUP_PLACEMENT_MODIFY,
   OPT_ZONEGROUP_PLACEMENT_RM,
   OPT_ZONEGROUP_PLACEMENT_LIST,
+  OPT_ZONEGROUP_PLACEMENT_GET,
   OPT_ZONEGROUP_PLACEMENT_DEFAULT,
   OPT_ZONE_CREATE,
   OPT_ZONE_DELETE,
@@ -473,6 +485,7 @@ enum {
   OPT_ZONE_PLACEMENT_MODIFY,
   OPT_ZONE_PLACEMENT_RM,
   OPT_ZONE_PLACEMENT_LIST,
+  OPT_ZONE_PLACEMENT_GET,
   OPT_CAPS_ADD,
   OPT_CAPS_RM,
   OPT_METADATA_GET,
@@ -681,6 +694,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_BUCKET_RESHARD;
     if (strcmp(cmd, "check") == 0)
       return OPT_BUCKET_CHECK;
+    if (strcmp(cmd, "radoslist") == 0)
+      return OPT_BUCKET_RADOS_LIST;
     if (strcmp(cmd, "sync") == 0) {
       *need_more = true;
       return 0;
@@ -828,6 +843,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_ZONEGROUP_PLACEMENT_RM;
     if (strcmp(cmd, "list") == 0)
       return OPT_ZONEGROUP_PLACEMENT_LIST;
+    if (strcmp(cmd, "get") == 0)
+      return OPT_ZONEGROUP_PLACEMENT_GET;
     if (strcmp(cmd, "default") == 0)
       return OPT_ZONEGROUP_PLACEMENT_DEFAULT;
   } else if (strcmp(prev_cmd, "zonegroup") == 0) {
@@ -871,8 +888,10 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_ZONE_PLACEMENT_RM;
     if (strcmp(cmd, "list") == 0)
       return OPT_ZONE_PLACEMENT_LIST;
+    if (strcmp(cmd, "get") == 0)
+      return OPT_ZONE_PLACEMENT_GET;
   } else if (strcmp(prev_cmd, "zone") == 0) {
-    if (strcmp(cmd, "delete") == 0)
+    if (match_str(cmd, "rm", "delete"))
       return OPT_ZONE_DELETE;
     if (strcmp(cmd, "create") == 0)
       return OPT_ZONE_CREATE;
@@ -1178,8 +1197,12 @@ public:
   }
 };
 
-static int init_bucket(const string& tenant_name, const string& bucket_name, const string& bucket_id,
-                       RGWBucketInfo& bucket_info, rgw_bucket& bucket, map<string, bufferlist> *pattrs = nullptr)
+static int init_bucket(const string& tenant_name,
+		       const string& bucket_name,
+		       const string& bucket_id,
+                       RGWBucketInfo& bucket_info,
+		       rgw_bucket& bucket,
+		       map<string, bufferlist> *pattrs = nullptr)
 {
   if (!bucket_name.empty()) {
     auto obj_ctx = store->svc.sysobj->init_obj_ctx();
@@ -2135,22 +2158,24 @@ static void get_md_sync_status(list<string>& status)
     if (ret < 0) {
       derr << "ERROR: failed to fetch master next positions (" << cpp_strerror(-ret) << ")" << dendl;
     } else {
-      ceph::real_time oldest;
+      std::optional<std::pair<int, ceph::real_time>> oldest;
+
       for (auto iter : master_pos) {
         rgw_mdlog_shard_data& shard_data = iter.second;
 
         if (!shard_data.entries.empty()) {
           rgw_mdlog_entry& entry = shard_data.entries.front();
-          if (ceph::real_clock::is_zero(oldest)) {
-            oldest = entry.timestamp;
-          } else if (!ceph::real_clock::is_zero(entry.timestamp) && entry.timestamp < oldest) {
-            oldest = entry.timestamp;
+          if (!oldest) {
+            oldest.emplace(iter.first, entry.timestamp);
+          } else if (!ceph::real_clock::is_zero(entry.timestamp) && entry.timestamp < oldest->second) {
+            oldest.emplace(iter.first, entry.timestamp);
           }
         }
       }
 
-      if (!ceph::real_clock::is_zero(oldest)) {
-        push_ss(ss, status) << "oldest incremental change not applied: " << oldest;
+      if (oldest) {
+        push_ss(ss, status) << "oldest incremental change not applied: "
+            << oldest->second << " [" << oldest->first << ']';
       }
     }
   }
@@ -2288,22 +2313,24 @@ static void get_data_sync_status(const string& source_zone, list<string>& status
     if (ret < 0) {
       derr << "ERROR: failed to fetch next positions (" << cpp_strerror(-ret) << ")" << dendl;
     } else {
-      ceph::real_time oldest;
+      std::optional<std::pair<int, ceph::real_time>> oldest;
+
       for (auto iter : master_pos) {
         rgw_datalog_shard_data& shard_data = iter.second;
 
         if (!shard_data.entries.empty()) {
           rgw_datalog_entry& entry = shard_data.entries.front();
-          if (ceph::real_clock::is_zero(oldest)) {
-            oldest = entry.timestamp;
-          } else if (!ceph::real_clock::is_zero(entry.timestamp) && entry.timestamp < oldest) {
-            oldest = entry.timestamp;
+          if (!oldest) {
+            oldest.emplace(iter.first, entry.timestamp);
+          } else if (!ceph::real_clock::is_zero(entry.timestamp) && entry.timestamp < oldest->second) {
+            oldest.emplace(iter.first, entry.timestamp);
           }
         }
       }
 
-      if (!ceph::real_clock::is_zero(oldest)) {
-        push_ss(ss, status, tab) << "oldest incremental change not applied: " << oldest;
+      if (oldest) {
+        push_ss(ss, status, tab) << "oldest incremental change not applied: "
+            << oldest->second << " [" << oldest->first << ']';
       }
     }
   }
@@ -2462,11 +2489,11 @@ static int bucket_source_sync_status(RGWRados *store, const RGWZone& zone,
       shards_behind.insert(shard_id);
     }
   }
-  if (shards_behind.empty()) {
-    out << indented{width} << "bucket is caught up with source\n";
-  } else {
+  if (!shards_behind.empty()) {
     out << indented{width} << "bucket is behind on " << shards_behind.size() << " shards\n";
     out << indented{width} << "behind shards: [" << shards_behind << "]\n" ;
+  } else if (!num_full) {
+    out << indented{width} << "bucket is caught up with source\n";
   }
   return 0;
 }
@@ -2599,6 +2626,13 @@ int check_reshard_bucket_params(RGWRados *store,
   if (ret < 0) {
     cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
     return ret;
+  }
+
+  if (bucket_info.reshard_status != CLS_RGW_RESHARD_NOT_RESHARDING) {
+    // if in_progress or done then we have an old BucketInfo
+    cerr << "ERROR: the bucket is currently undergoing resharding and "
+      "cannot be added to the reshard list at this time" << std::endl;
+    return -EBUSY;
   }
 
   int num_source_shards = (bucket_info.num_shards > 0 ? bucket_info.num_shards : 1);
@@ -2890,13 +2924,19 @@ int main(int argc, const char **argv)
   string sub_dest_bucket;
   string sub_push_endpoint;
   string event_id;
-  set<string, ltstr_nocase> event_types;
+  rgw::notify::EventTypeList event_types;
+
+  std::optional<std::string> rgw_obj_fs; // radoslist field separator
 
   for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_double_dash(args, i)) {
       break;
     } else if (ceph_argparse_witharg(args, i, &val, "-i", "--uid", (char*)NULL)) {
       user_id.from_str(val);
+      if (user_id.empty()) {
+        cerr << "no value for uid" << std::endl;
+        exit(1);
+      }
     } else if (ceph_argparse_witharg(args, i, &val, "--tenant", (char*)NULL)) {
       tenant = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--access-key", (char*)NULL)) {
@@ -3038,7 +3078,7 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_witharg(args, i, &val, "--bucket-id", (char*)NULL)) {
       bucket_id = val;
       if (bucket_id.empty()) {
-        cerr << "bad bucket-id" << std::endl;
+        cerr << "no value for bucket-id" << std::endl;
         exit(1);
       }
     } else if (ceph_argparse_witharg(args, i, &val, "--format", (char*)NULL)) {
@@ -3229,9 +3269,11 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_witharg(args, i, &val, "--event-id", (char*)NULL)) {
       event_id = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--event-type", "--event-types", (char*)NULL)) {
-      get_str_set(val, ",", event_types);
+      rgw::notify::from_string_list(val, event_types);
     } else if (ceph_argparse_binary_flag(args, i, &detail, NULL, "--detail", (char*)NULL)) {
       // do nothing
+    } else if (ceph_argparse_witharg(args, i, &val, "--rgw-obj-fs", (char*)NULL)) {
+      rgw_obj_fs = val;
     } else if (strncmp(*i, "-", 1) == 0) {
       cerr << "ERROR: invalid flag " << *i << std::endl;
       return EINVAL;
@@ -3335,6 +3377,9 @@ int main(int argc, const char **argv)
 
   // not a raw op if 'period update' needs to commit to master
   bool raw_period_update = opt_cmd == OPT_PERIOD_UPDATE && !commit;
+  // not a raw op if 'period pull' needs to read zone/period configuration
+  bool raw_period_pull = opt_cmd == OPT_PERIOD_PULL && !url.empty();
+
   std::set<int> raw_storage_ops_list = {OPT_ZONEGROUP_ADD, OPT_ZONEGROUP_CREATE, OPT_ZONEGROUP_DELETE,
 			 OPT_ZONEGROUP_GET, OPT_ZONEGROUP_LIST,
                          OPT_ZONEGROUP_SET, OPT_ZONEGROUP_DEFAULT,
@@ -3342,15 +3387,16 @@ int main(int argc, const char **argv)
 			 OPT_ZONEGROUP_REMOVE,
 			 OPT_ZONEGROUP_PLACEMENT_ADD, OPT_ZONEGROUP_PLACEMENT_RM,
 			 OPT_ZONEGROUP_PLACEMENT_MODIFY, OPT_ZONEGROUP_PLACEMENT_LIST,
+			 OPT_ZONEGROUP_PLACEMENT_GET,
 			 OPT_ZONEGROUP_PLACEMENT_DEFAULT,
 			 OPT_ZONE_CREATE, OPT_ZONE_DELETE,
                          OPT_ZONE_GET, OPT_ZONE_SET, OPT_ZONE_RENAME,
                          OPT_ZONE_LIST, OPT_ZONE_MODIFY, OPT_ZONE_DEFAULT,
 			 OPT_ZONE_PLACEMENT_ADD, OPT_ZONE_PLACEMENT_RM,
 			 OPT_ZONE_PLACEMENT_MODIFY, OPT_ZONE_PLACEMENT_LIST,
+			 OPT_ZONE_PLACEMENT_GET,
 			 OPT_REALM_CREATE,
 			 OPT_PERIOD_DELETE, OPT_PERIOD_GET,
-			 OPT_PERIOD_PULL,
 			 OPT_PERIOD_GET_CURRENT, OPT_PERIOD_LIST,
 			 OPT_GLOBAL_QUOTA_GET, OPT_GLOBAL_QUOTA_SET,
 			 OPT_GLOBAL_QUOTA_ENABLE, OPT_GLOBAL_QUOTA_DISABLE,
@@ -3382,9 +3428,11 @@ int main(int argc, const char **argv)
 			 OPT_ZONEGROUP_GET,
 			 OPT_ZONEGROUP_LIST,
 			 OPT_ZONEGROUP_PLACEMENT_LIST,
+			 OPT_ZONEGROUP_PLACEMENT_GET,
 			 OPT_ZONE_GET,
 			 OPT_ZONE_LIST,
 			 OPT_ZONE_PLACEMENT_LIST,
+			 OPT_ZONE_PLACEMENT_GET,
 			 OPT_METADATA_GET,
 			 OPT_METADATA_LIST,
 			 OPT_METADATA_SYNC_STATUS,
@@ -3414,7 +3462,7 @@ int main(int argc, const char **argv)
   };
 
   bool raw_storage_op = (raw_storage_ops_list.find(opt_cmd) != raw_storage_ops_list.end() ||
-                         raw_period_update);
+                         raw_period_update || raw_period_pull);
   bool need_cache = readonly_ops_list.find(opt_cmd) == readonly_ops_list.end();
 
   if (raw_storage_op) {
@@ -4308,6 +4356,29 @@ int main(int argc, const char **argv)
 	formatter->flush(cout);
       }
       break;
+    case OPT_ZONEGROUP_PLACEMENT_GET:
+      {
+	if (placement_id.empty()) {
+	  cerr << "ERROR: --placement-id not specified" << std::endl;
+	  return EINVAL;
+	}
+
+	RGWZoneGroup zonegroup(zonegroup_id, zonegroup_name);
+	int ret = zonegroup.init(g_ceph_context, store->svc.sysobj);
+	if (ret < 0) {
+	  cerr << "failed to init zonegroup: " << cpp_strerror(-ret) << std::endl;
+	  return -ret;
+	}
+
+	auto p = zonegroup.placement_targets.find(placement_id);
+	if (p == zonegroup.placement_targets.end()) {
+	  cerr << "failed to find a zonegroup placement target named '" << placement_id << "'" << std::endl;
+	  return -ENOENT;
+	}
+	encode_json("placement_targets", p->second, formatter);
+	formatter->flush(cout);
+      }
+      break;
     case OPT_ZONEGROUP_PLACEMENT_ADD:
     case OPT_ZONEGROUP_PLACEMENT_MODIFY:
     case OPT_ZONEGROUP_PLACEMENT_RM:
@@ -4884,6 +4955,28 @@ int main(int argc, const char **argv)
 	formatter->flush(cout);
       }
       break;
+    case OPT_ZONE_PLACEMENT_GET:
+      {
+	if (placement_id.empty()) {
+	  cerr << "ERROR: --placement-id not specified" << std::endl;
+	  return EINVAL;
+	}
+
+	RGWZoneParams zone(zone_id, zone_name);
+	int ret = zone.init(g_ceph_context, store->svc.sysobj);
+	if (ret < 0) {
+	  cerr << "unable to initialize zone: " << cpp_strerror(-ret) << std::endl;
+	  return -ret;
+	}
+	auto p = zone.placement_pools.find(placement_id);
+	if (p == zone.placement_pools.end()) {
+	  cerr << "ERROR: zone placement target '" << placement_id << "' not found" << std::endl;
+	  return -ENOENT;
+	}
+	encode_json("placement_pools", p->second, formatter);
+	formatter->flush(cout);
+      }
+      break;
     }
     return 0;
   }
@@ -4986,7 +5079,7 @@ int main(int argc, const char **argv)
   // RGWUser to use for user operations
   RGWUser user;
   int ret = 0;
-  if (!user_id.empty() || !subuser.empty()) {
+  if (!(user_id.empty() && access_key.empty()) || !subuser.empty()) {
     ret = user.init(store, user_op);
     if (ret < 0) {
       cerr << "user.init failed: " << cpp_strerror(-ret) << std::endl;
@@ -5009,8 +5102,8 @@ int main(int argc, const char **argv)
 
   switch (opt_cmd) {
   case OPT_USER_INFO:
-    if (user_id.empty()) {
-      cerr << "ERROR: uid not specified" << std::endl;
+    if (user_id.empty() && access_key.empty()) {
+      cerr << "ERROR: --uid or --access-key required" << std::endl;
       return EINVAL;
     }
     break;
@@ -5462,6 +5555,12 @@ int main(int argc, const char **argv)
 
   if (opt_cmd == OPT_BUCKETS_LIST) {
     if (bucket_name.empty()) {
+      if (!user_id.empty()) {
+        if (!user_op.has_existing_user()) {
+          cerr << "ERROR: could not find user: " << user_id << std::endl;
+          return -ENOENT;
+        }
+      }
       RGWBucketAdminOp::info(store, bucket_op, f);
     } else {
       RGWBucketInfo bucket_info;
@@ -5471,10 +5570,17 @@ int main(int argc, const char **argv)
         return -ret;
       }
       formatter->open_array_section("entries");
-      bool truncated;
+
+      bool truncated = false;
       int count = 0;
-      if (max_entries < 0)
-        max_entries = 1000;
+
+      static constexpr int MAX_PAGINATE_SIZE = 10000;
+      static constexpr int DEFAULT_MAX_ENTRIES = 1000;
+
+      if (max_entries < 0) {
+	max_entries = DEFAULT_MAX_ENTRIES;
+      }
+      const int paginate_size = std::min(max_entries, MAX_PAGINATE_SIZE);
 
       string prefix;
       string delim;
@@ -5494,7 +5600,9 @@ int main(int argc, const char **argv)
       list_op.params.allow_unordered = bool(allow_unordered);
 
       do {
-        ret = list_op.list_objects(max_entries - count, &result, &common_prefixes, &truncated);
+        const int remaining = max_entries - count;
+        ret = list_op.list_objects(std::min(remaining, paginate_size),
+				   &result, &common_prefixes, &truncated);
         if (ret < 0) {
           cerr << "ERROR: store->list_objects(): " << cpp_strerror(-ret) << std::endl;
           return -ret;
@@ -5502,8 +5610,7 @@ int main(int argc, const char **argv)
 
         count += result.size();
 
-        for (vector<rgw_bucket_dir_entry>::iterator iter = result.begin(); iter != result.end(); ++iter) {
-          rgw_bucket_dir_entry& entry = *iter;
+        for (const auto& entry : result) {
           encode_json("entry", entry, formatter);
         }
         formatter->flush(cout);
@@ -5514,7 +5621,43 @@ int main(int argc, const char **argv)
     } /* have bucket_name */
   } /* OPT_BUCKETS_LIST */
 
+  if (opt_cmd == OPT_BUCKET_RADOS_LIST) {
+    RGWRadosList lister(store,
+			max_concurrent_ios, orphan_stale_secs, tenant);
+    if (rgw_obj_fs) {
+      lister.set_field_separator(*rgw_obj_fs);
+    }
+
+    if (bucket_name.empty()) {
+      ret = lister.run();
+    } else {
+      ret = lister.run(bucket_name);
+    }
+
+    if (ret < 0) {
+      std::cerr <<
+	"ERROR: bucket radoslist failed to finish before " <<
+	"encountering error: " << cpp_strerror(-ret) << std::endl;
+      std::cerr << "************************************"
+	"************************************" << std::endl;
+      std::cerr << "WARNING: THE RESULTS ARE NOT RELIABLE AND SHOULD NOT " <<
+	"BE USED IN DELETING ORPHANS" << std::endl;
+      std::cerr << "************************************"
+	"************************************" << std::endl;
+      return -ret;
+    }
+  }
+
   if (opt_cmd == OPT_BUCKET_STATS) {
+    if (bucket_name.empty() && !bucket_id.empty()) {
+      rgw_bucket bucket;
+      if (!rgw_find_bucket_by_id(store->ctx(), store->meta_mgr, marker, bucket_id, &bucket)) {
+        cerr << "failure: no such bucket id" << std::endl;
+        return -ENOENT;
+      }
+      bucket_op.set_tenant(bucket.tenant);
+      bucket_op.set_bucket_name(bucket.name);
+    }
     bucket_op.set_fetch_stats(true);
 
     int r = RGWBucketAdminOp::info(store, bucket_op, f);
@@ -6174,20 +6317,28 @@ next:
     formatter->open_object_section("result");
     formatter->dump_string("bucket", bucket_name);
     formatter->open_array_section("objects");
+
+    constexpr uint32_t NUM_ENTRIES = 1000;
+    uint16_t expansion_factor = 1;
     while (is_truncated) {
       map<string, rgw_bucket_dir_entry> result;
       int r =
 	store->cls_bucket_list_ordered(bucket_info, RGW_NO_SHARD, marker,
-				       prefix, 1000, true,
+				       prefix, NUM_ENTRIES, true, expansion_factor,
 				       result, &is_truncated, &marker,
 				       bucket_object_check_filter);
-
       if (r < 0 && r != -ENOENT) {
         cerr << "ERROR: failed operation r=" << r << std::endl;
+      } else if (r == -ENOENT) {
+        break;
       }
 
-      if (r == -ENOENT)
-        break;
+      if (result.size() < NUM_ENTRIES / 8) {
+	++expansion_factor;
+      } else if (result.size() > NUM_ENTRIES * 7 / 8 &&
+		 expansion_factor > 1) {
+	--expansion_factor;
+      }
 
       map<string, rgw_bucket_dir_entry>::iterator iter;
       for (iter = result.begin(); iter != result.end(); ++iter) {
@@ -6390,26 +6541,39 @@ next:
     rgw_bucket bucket;
     RGWBucketInfo bucket_info;
     map<string, bufferlist> attrs;
-    ret = init_bucket(tenant, bucket_name, bucket_id, bucket_info, bucket, &attrs);
+    bool bucket_initable = true;
+    ret = init_bucket(tenant, bucket_name, bucket_id, bucket_info, bucket,
+                      &attrs);
     if (ret < 0) {
-      cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
-      return -ret;
+      if (yes_i_really_mean_it) {
+        bucket_initable = false;
+      } else {
+        cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) <<
+          "; if you want to cancel the reshard request nonetheless, please "
+          "use the --yes-i-really-mean-it option" << std::endl;
+        return -ret;
+      }
     }
 
-    RGWBucketReshard br(store, bucket_info, attrs, nullptr /* no callback */);
-    int ret = br.cancel();
-    if (ret < 0) {
-      if (ret == -EBUSY) {
-	cerr << "There is ongoing resharding, please retry after " <<
-	  store->ctx()->_conf.get_val<uint64_t>(
-	    "rgw_reshard_bucket_lock_duration") <<
-	  " seconds " << std::endl;
-      } else {
-	cerr << "Error canceling bucket " << bucket_name <<
-	  " resharding: " << cpp_strerror(-ret) << std::endl;
+    if (bucket_initable) {
+      // we did not encounter an error, so let's work with the bucket
+      RGWBucketReshard br(store, bucket_info, attrs,
+                          nullptr /* no callback */);
+      int ret = br.cancel();
+      if (ret < 0) {
+        if (ret == -EBUSY) {
+          cerr << "There is ongoing resharding, please retry after " <<
+            store->ctx()->_conf.get_val<uint64_t>(
+              "rgw_reshard_bucket_lock_duration") <<
+            " seconds " << std::endl;
+        } else {
+          cerr << "Error canceling bucket " << bucket_name <<
+            " resharding: " << cpp_strerror(-ret) << std::endl;
+        }
+        return ret;
       }
-      return ret;
     }
+
     RGWReshard reshard(store);
 
     cls_rgw_reshard_entry entry;
@@ -6419,10 +6583,11 @@ next:
 
     ret = reshard.remove(entry);
     if (ret < 0 && ret != -ENOENT) {
-      cerr << "Error in getting bucket " << bucket_name << ": " << cpp_strerror(-ret) << std::endl;
+      cerr << "Error in updating reshard log with bucket " <<
+        bucket_name << ": " << cpp_strerror(-ret) << std::endl;
       return ret;
     }
-  }
+  } // OPT_RESHARD_CANCEL
 
   if (opt_cmd == OPT_OBJECT_UNLINK) {
     RGWBucketInfo bucket_info;
@@ -6747,13 +6912,20 @@ next:
 
     string user_str = user_id.to_str();
     if (reset_stats) {
-      if (!bucket_name.empty()){
-	cerr << "ERROR: recalculate doesn't work on buckets" << std::endl;
+      if (!bucket_name.empty()) {
+	cerr << "ERROR: --reset-stats does not work on buckets and "
+	  "bucket specified" << std::endl;
+	return EINVAL;
+      }
+      if (sync_stats) {
+	cerr << "ERROR: sync-stats includes the reset-stats functionality, "
+	  "so at most one of the two should be specified" << std::endl;
 	return EINVAL;
       }
       ret = store->cls_user_reset_stats(user_str);
       if (ret < 0) {
-	cerr << "ERROR: could not clear user stats: " << cpp_strerror(-ret) << std::endl;
+	cerr << "ERROR: could not reset user stats: " << cpp_strerror(-ret) <<
+	  std::endl;
 	return -ret;
       }
     }
@@ -6762,13 +6934,15 @@ next:
       if (!bucket_name.empty()) {
         int ret = rgw_bucket_sync_user_stats(store, tenant, bucket_name);
         if (ret < 0) {
-          cerr << "ERROR: could not sync bucket stats: " << cpp_strerror(-ret) << std::endl;
+          cerr << "ERROR: could not sync bucket stats: " <<
+	    cpp_strerror(-ret) << std::endl;
           return -ret;
         }
       } else {
         int ret = rgw_user_sync_all_stats(store, user_id);
         if (ret < 0) {
-          cerr << "ERROR: failed to sync user stats: " << cpp_strerror(-ret) << std::endl;
+          cerr << "ERROR: could not sync user stats: " <<
+	    cpp_strerror(-ret) << std::endl;
           return -ret;
         }
       }
@@ -7001,8 +7175,12 @@ next:
     }
     RGWMetadataLog *meta_log = store->meta_mgr->get_log(period_id);
 
-    ret = meta_log->trim(shard_id, start_time.to_real_time(), end_time.to_real_time(), start_marker, end_marker);
-    if (ret < 0) {
+    // trim until -ENODATA
+    do {
+      ret = meta_log->trim(shard_id, start_time.to_real_time(),
+                           end_time.to_real_time(), start_marker, end_marker);
+    } while (ret == 0);
+    if (ret < 0 && ret != -ENODATA) {
       cerr << "ERROR: meta_log->trim(): " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
@@ -7565,7 +7743,7 @@ next:
     do {
       list<rgw_data_change_log_entry> entries;
       if (specified_shard_id) {
-        ret = log->list_entries(shard_id, start_time.to_real_time(), end_time.to_real_time(), max_entries - count, entries, marker, NULL, &truncated);
+        ret = log->list_entries(shard_id, start_time.to_real_time(), end_time.to_real_time(), max_entries - count, entries, marker, &marker, &truncated);
       } else {
         ret = log->list_entries(start_time.to_real_time(), end_time.to_real_time(), max_entries - count, entries, log_marker, &truncated);
       }
@@ -7641,9 +7819,20 @@ next:
     if (ret < 0)
       return -ret;
 
-    RGWDataChangesLog *log = store->data_log;
-    ret = log->trim_entries(start_time.to_real_time(), end_time.to_real_time(), start_marker, end_marker);
-    if (ret < 0) {
+    if (!specified_shard_id) {
+      cerr << "ERROR: requires a --shard-id" << std::endl;
+      return EINVAL;
+    }
+
+    // loop until -ENODATA
+    do {
+      auto datalog = store->data_log;
+      ret = datalog->trim_entries(shard_id, start_time.to_real_time(),
+                                  end_time.to_real_time(),
+                                  start_marker, end_marker);
+    } while (ret == 0);
+
+    if (ret < 0 && ret != -ENODATA) {
       cerr << "ERROR: trim_entries(): " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
@@ -8242,18 +8431,16 @@ next:
     RGWUserInfo& user_info = user_op.get_user_info();
     RGWUserPubSub ups(store, user_info.user_id);
 
-    RGWUserPubSub::Sub::list_events_result result;
-
     if (!max_entries_specified) {
-      max_entries = 100;
+      max_entries = RGWUserPubSub::Sub::DEFAULT_MAX_EVENTS;
     }
     auto sub = ups.get_sub(sub_name);
-    ret = sub->list_events(marker, max_entries, &result);
+    ret = sub->list_events(marker, max_entries);
     if (ret < 0) {
       cerr << "ERROR: could not list events: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
-    encode_json("result", result, formatter);
+    encode_json("result", *sub, formatter);
     formatter->flush(cout);
  }
 

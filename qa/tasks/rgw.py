@@ -3,21 +3,17 @@ rgw routines
 """
 import argparse
 import contextlib
-import json
 import logging
-import os
-import errno
-import util.rgw as rgw_utils
 
 from teuthology.orchestra import run
 from teuthology import misc as teuthology
 from teuthology import contextutil
 from teuthology.exceptions import ConfigError
-from util import get_remote_for_role
-from util.rgw import rgwadmin, wait_for_radosgw
-from util.rados import (rados, create_ec_pool,
-                                        create_replicated_pool,
-                                        create_cache_pool)
+from tasks.util import get_remote_for_role
+from tasks.util.rgw import rgwadmin, wait_for_radosgw
+from tasks.util.rados import (create_ec_pool,
+                              create_replicated_pool,
+                              create_cache_pool)
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +37,7 @@ def start_rgw(ctx, config, clients):
     log.info('Starting rgw...')
     testdir = teuthology.get_testdir(ctx)
     for client in clients:
-        (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+        (remote,) = ctx.cluster.only(client).remotes.keys()
         cluster_name, daemon_type, client_id = teuthology.split_role(client)
         client_with_id = daemon_type + '.' + client_id
         client_with_cluster = cluster_name + '.' + client_with_id
@@ -107,9 +103,10 @@ def start_rgw(ctx, config, clients):
                                                 kport=keystone_port),
                 ])
 
-        if client_config.get('dns-name'):
+
+        if client_config.get('dns-name') is not None:
             rgw_cmd.extend(['--rgw-dns-name', endpoint.dns_name])
-        if client_config.get('dns-s3website-name'):
+        if client_config.get('dns-s3website-name') is not None:
             rgw_cmd.extend(['--rgw-dns-s3website-name', endpoint.website_dns_name])
 
         rgw_cmd.extend([
@@ -147,7 +144,7 @@ def start_rgw(ctx, config, clients):
         endpoint = ctx.rgw.role_endpoints[client]
         url = endpoint.url()
         log.info('Polling {client} until it starts accepting connections on {url}'.format(client=client, url=url))
-        (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+        (remote,) = ctx.cluster.only(client).remotes.keys()
         wait_for_radosgw(url, remote)
 
     try:
@@ -169,7 +166,7 @@ def start_rgw(ctx, config, clients):
 
 def assign_endpoints(ctx, config, default_cert):
     role_endpoints = {}
-    for role, client_config in config.iteritems():
+    for role, client_config in config.items():
         client_config = client_config or {}
         remote = get_remote_for_role(ctx, role)
 
@@ -192,9 +189,8 @@ def assign_endpoints(ctx, config, default_cert):
             dns_name += remote.hostname
 
         website_dns_name = client_config.get('dns-s3website-name')
-        if website_dns_name:
-            if len(website_dns_name) == 0 or website_dns_name.endswith('.'):
-                website_dns_name += remote.hostname
+        if website_dns_name is not None and (len(website_dns_name) == 0 or website_dns_name.endswith('.')):
+            website_dns_name += remote.hostname
 
         role_endpoints[role] = RGWEndpoint(remote.hostname, port, ssl_certificate, dns_name, website_dns_name)
 
@@ -207,7 +203,7 @@ def create_pools(ctx, clients):
     log.info('Creating data pools')
     for client in clients:
         log.debug("Obtaining remote for client {}".format(client))
-        (remote,) = ctx.cluster.only(client).remotes.iterkeys()
+        (remote,) = ctx.cluster.only(client).remotes.keys()
         data_pool = 'default.rgw.buckets.data'
         cluster_name, daemon_type, client_id = teuthology.split_role(client)
 

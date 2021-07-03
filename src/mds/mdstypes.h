@@ -23,6 +23,7 @@
 #include "include/compact_map.h"
 #include "include/compact_set.h"
 #include "include/fs_types.h"
+#include "include/ceph_fs.h"
 
 #include "inode_backtrace.h"
 
@@ -40,13 +41,7 @@
 #define MAX_MDS                   0x100
 #define NUM_STRAY                 10
 
-#define MDS_INO_ROOT              1
-
-// No longer created but recognised in existing filesystems
-// so that we don't try to fragment it.
-#define MDS_INO_CEPH              2
-
-#define MDS_INO_GLOBAL_SNAPREALM  3
+// Inode numbers 1,2 and 4 please see CEPH_INO_* in include/ceph_fs.h
 
 #define MDS_INO_MDSDIR_OFFSET     (1*MAX_MDS)
 #define MDS_INO_STRAY_OFFSET      (6*MAX_MDS)
@@ -65,14 +60,15 @@
 #define MDS_INO_IS_STRAY(i)  ((i) >= MDS_INO_STRAY_OFFSET  && (i) < (MDS_INO_STRAY_OFFSET+(MAX_MDS*NUM_STRAY)))
 #define MDS_INO_IS_MDSDIR(i) ((i) >= MDS_INO_MDSDIR_OFFSET && (i) < (MDS_INO_MDSDIR_OFFSET+MAX_MDS))
 #define MDS_INO_MDSDIR_OWNER(i) (signed ((unsigned (i)) - MDS_INO_MDSDIR_OFFSET))
-#define MDS_INO_IS_BASE(i)   ((i) == MDS_INO_ROOT || (i) == MDS_INO_GLOBAL_SNAPREALM || MDS_INO_IS_MDSDIR(i))
+#define MDS_INO_IS_BASE(i)   ((i) == CEPH_INO_ROOT || (i) == CEPH_INO_GLOBAL_SNAPREALM || MDS_INO_IS_MDSDIR(i))
 #define MDS_INO_STRAY_OWNER(i) (signed (((unsigned (i)) - MDS_INO_STRAY_OFFSET) / NUM_STRAY))
 #define MDS_INO_STRAY_INDEX(i) (((unsigned (i)) - MDS_INO_STRAY_OFFSET) % NUM_STRAY)
+
+#define MDS_IS_PRIVATE_INO(i) ((i) < MDS_INO_SYSTEM_BASE && (i) >= MDS_INO_MDSDIR_OFFSET)
 
 #define MDS_TRAVERSE_FORWARD       1
 #define MDS_TRAVERSE_DISCOVER      2    // skips permissions checks etc.
 #define MDS_TRAVERSE_DISCOVERXLOCK 3    // succeeds on (foreign?) null, xlocked dentries.
-
 
 typedef int32_t mds_rank_t;
 constexpr mds_rank_t MDS_RANK_NONE = -1;
@@ -534,6 +530,7 @@ struct inode_t {
   inode_t()
   {
     clear_layout();
+    // FIPS zeroization audit 20191117: this memset is not security related.
     memset(&dir_layout, 0, sizeof(dir_layout));
   }
 
@@ -712,8 +709,10 @@ void inode_t<Allocator>::decode(bufferlist::const_iterator &p)
 
   if (struct_v >= 4)
     decode(dir_layout, p);
-  else
+  else {
+    // FIPS zeroization audit 20191117: this memset is not security related.
     memset(&dir_layout, 0, sizeof(dir_layout));
+  }
   decode(layout, p);
   decode(size, p);
   decode(truncate_seq, p);
@@ -943,6 +942,20 @@ using alloc_string = std::basic_string<char,std::char_traits<char>,Allocator<cha
 template<template<typename> class Allocator>
 using xattr_map = compact_map<alloc_string<Allocator>, bufferptr, std::less<alloc_string<Allocator>>, Allocator<std::pair<const alloc_string<Allocator>, bufferptr>>>; // FIXME bufferptr not in mempool
 
+template<template<typename> class Allocator>
+inline void decode_noshare(xattr_map<Allocator>& xattrs, ceph::buffer::list::const_iterator &p)
+{
+  __u32 n;
+  decode(n, p);
+  while (n-- > 0) {
+    alloc_string<Allocator> key;
+    decode(key, p);
+    __u32 len;
+    decode(len, p);
+    p.copy_deep(len, xattrs[key]);
+  }
+}
+
 /*
  * old_inode_t
  */
@@ -975,7 +988,7 @@ void old_inode_t<Allocator>::decode(bufferlist::const_iterator& bl)
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(first, bl);
   decode(inode, bl);
-  decode(xattrs, bl);
+  decode_noshare<Allocator>(xattrs, bl);
   DECODE_FINISH(bl);
 }
 
@@ -1138,6 +1151,7 @@ struct client_metadata_t {
   iterator find(const std::string& key) const { return kv_map.find(key); }
   iterator begin() const { return kv_map.begin(); }
   iterator end() const { return kv_map.end(); }
+  void erase(iterator it) { kv_map.erase(it); }
   std::string& operator[](const std::string& key) { return kv_map[key]; }
   void merge(const client_metadata_t& other) {
     kv_map.insert(other.kv_map.begin(), other.kv_map.end());
@@ -1366,6 +1380,7 @@ struct cap_reconnect_t {
   bufferlist flockbl;
 
   cap_reconnect_t() {
+    // FIPS zeroization audit 20191117: this memset is not security related.
     memset(&capinfo, 0, sizeof(capinfo));
     snap_follows = 0;
   }
@@ -1395,6 +1410,7 @@ struct snaprealm_reconnect_t {
   mutable ceph_mds_snaprealm_reconnect realm;
 
   snaprealm_reconnect_t() {
+    // FIPS zeroization audit 20191117: this memset is not security related.
     memset(&realm, 0, sizeof(realm));
   }
   snaprealm_reconnect_t(inodeno_t ino, snapid_t seq, inodeno_t parent) {
@@ -1414,13 +1430,13 @@ WRITE_CLASS_ENCODER(snaprealm_reconnect_t)
 
 // compat for pre-FLOCK feature
 struct old_ceph_mds_cap_reconnect {
-	__le64 cap_id;
-	__le32 wanted;
-	__le32 issued;
-  __le64 old_size;
+	ceph_le64 cap_id;
+	ceph_le32 wanted;
+	ceph_le32 issued;
+  ceph_le64 old_size;
   struct ceph_timespec old_mtime, old_atime;
-	__le64 snaprealm;
-	__le64 pathbase;        /* base ino for our path to this ino */
+	ceph_le64 snaprealm;
+	ceph_le64 pathbase;        /* base ino for our path to this ino */
 } __attribute__ ((packed));
 WRITE_RAW_ENCODER(old_ceph_mds_cap_reconnect)
 
@@ -1791,7 +1807,7 @@ struct keys_and_values
       query =  pair >> *(qi::lit(' ') >> pair);
       pair  =  key >> '=' >> value;
       key   =  qi::char_("a-zA-Z_") >> *qi::char_("a-zA-Z_0-9");
-      value = +qi::char_("a-zA-Z_0-9");
+      value = +qi::char_("a-zA-Z0-9-_.");
     }
     qi::rule<Iterator, std::map<string, string>()> query;
     qi::rule<Iterator, std::pair<string, string>()> pair;

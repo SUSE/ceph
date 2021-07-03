@@ -2,7 +2,9 @@ import logging
 import json
 import datetime
 import time
-from mgr_test_case import MgrTestCase
+
+from .mgr_test_case import MgrTestCase
+
 
 log = logging.getLogger(__name__)
 UUID = 'd5775432-0742-44a3-a435-45095e32e6b2'
@@ -10,6 +12,7 @@ DATEFMT = '%Y-%m-%d %H:%M:%S.%f'
 
 class TestInsights(MgrTestCase):
     def setUp(self):
+        super(TestInsights, self).setUp()
         self.setup_mgrs()
         self._load_module("insights")
         self._load_module("selftest")
@@ -163,23 +166,6 @@ class TestInsights(MgrTestCase):
         report = self._insights()
         self.assertFalse(report["health"]["history"]["checks"])
 
-    def test_insights_health(self):
-        """The insights module reports health checks"""
-        self._add_crash(1, True) # add invalid crash data
-        timeout = 10
-        while timeout > 0:
-            time.sleep(1)
-            timeout -= 1
-            # should observe a health check because it can't read the invalid
-            # crash data created at the beginning of this test
-            report = self._insights()
-            if "MGR_INSIGHTS_WARNING" in report["health"]["current"]["checks"]:
-                self._clear_crashes()
-                return
-        self._clear_crashes()
-        self.fail("Insights module did not set health check")
-        pass
-
     def test_schema(self):
         """TODO: assert conformance to a full schema specification?"""
         report = self._insights()
@@ -213,11 +199,5 @@ class TestInsights(MgrTestCase):
         self.assertTrue(report["crashes"]["summary"])
         self.assertFalse(report["errors"])
         log.warning("{}".format(json.dumps(report["crashes"], indent=2)))
-
-        # handling of comm. error with crash module
-        self._add_crash(1, True)
-        report = self._insights()
-        self.assertFalse(report["crashes"]["summary"])
-        self.assertTrue(report["errors"])
 
         self._clear_crashes()

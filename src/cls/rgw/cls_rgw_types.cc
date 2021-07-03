@@ -261,6 +261,7 @@ bool rgw_cls_bi_entry::get_info(cls_rgw_obj_key *key,
       {
         rgw_bucket_dir_entry entry;
         decode(entry, iter);
+        account = (account && entry.exists);
         *key = entry.key;
         *category = entry.meta.category;
         accounted_stats->num_entries++;
@@ -481,7 +482,7 @@ void rgw_bi_log_entry::generate_test_instances(list<rgw_bi_log_entry*>& ls)
   ls.push_back(new rgw_bi_log_entry);
   ls.back()->id = "midf";
   ls.back()->object = "obj";
-  ls.back()->timestamp = ceph::real_clock::from_ceph_timespec({{2}, {3}});
+  ls.back()->timestamp = ceph::real_clock::from_ceph_timespec({init_le32(2), init_le32(3)});
   ls.back()->index_ver = 4323;
   ls.back()->tag = "tagasdfds";
   ls.back()->op = CLS_RGW_OP_DEL;
@@ -663,7 +664,7 @@ void cls_rgw_reshard_entry::generate_test_instances(list<cls_rgw_reshard_entry*>
 {
   ls.push_back(new cls_rgw_reshard_entry);
   ls.push_back(new cls_rgw_reshard_entry);
-  ls.back()->time = ceph::real_clock::from_ceph_timespec({{2}, {3}});
+  ls.back()->time = ceph::real_clock::from_ceph_timespec({init_le32(2), init_le32(3)});
   ls.back()->tenant = "tenant";
   ls.back()->bucket_name = "bucket1""";
   ls.back()->bucket_id = "bucket_id";

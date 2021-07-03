@@ -1,3 +1,7 @@
+if(Boost_VERSION VERSION_GREATER 1.73)
+  add_definitions(-DBOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT)
+endif()
+
 add_library(rbd_types STATIC
   journal/Types.cc
   mirroring_watcher/Types.cc
@@ -8,6 +12,7 @@ add_library(rbd_types STATIC
 set(librbd_internal_srcs
   AsyncObjectThrottle.cc
   AsyncRequest.cc
+  ConfigWatcher.cc
   DeepCopyRequest.cc
   ExclusiveLock.cc
   ImageCtx.cc
@@ -134,6 +139,7 @@ set(librbd_internal_srcs
   operation/SparsifyRequest.cc
   operation/TrimRequest.cc
   trash/MoveRequest.cc
+  trash/RemoveRequest.cc
   watcher/Notifier.cc
   watcher/RewatchRequest.cc
   ${CMAKE_SOURCE_DIR}/src/common/ContextCompletion.cc)

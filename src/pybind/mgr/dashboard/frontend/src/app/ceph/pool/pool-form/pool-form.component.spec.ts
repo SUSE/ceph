@@ -48,6 +48,16 @@ describe('PoolFormComponent', () => {
     return control;
   };
 
+  const testPgUpdate = (pgs, jump, returnValue) => {
+    if (pgs) {
+      setPgNum(pgs);
+    }
+    if (jump) {
+      setPgNum(form.getValue('pgNum') + jump);
+    }
+    expect(form.getValue('pgNum')).toBe(returnValue);
+  };
+
   const createCrushRule = ({
     id = 0,
     name = 'somePoolName',
@@ -120,7 +130,9 @@ describe('PoolFormComponent', () => {
       compression_algorithms: ['snappy'],
       compression_modes: ['none', 'passive'],
       crush_rules_replicated: [],
-      crush_rules_erasure: []
+      crush_rules_erasure: [],
+      pg_autoscale_default_mode: 'off',
+      pg_autoscale_modes: ['off', 'warn', 'on']
     };
     const ecp1 = new ErasureCodeProfile();
     ecp1.name = 'ecp1';
@@ -260,7 +272,7 @@ describe('PoolFormComponent', () => {
       component.ngOnInit(); // Switches form into edit mode
       formHelper.setValue('poolType', 'erasure');
       fixture.detectChanges();
-      formHelper.expectError(setPgNum('8'), 'noDecrease');
+      formHelper.expectValid(setPgNum('8'));
     });
 
     it('is valid if pgNum, poolType and name are valid', () => {
@@ -579,21 +591,6 @@ describe('PoolFormComponent', () => {
   });
 
   describe('pg number changes', () => {
-    const setPgs = (pgs) => {
-      formHelper.setValue('pgNum', pgs);
-      fixture.debugElement.query(By.css('#pgNum')).nativeElement.dispatchEvent(new Event('blur'));
-    };
-
-    const testPgUpdate = (pgs, jump, returnValue) => {
-      if (pgs) {
-        setPgs(pgs);
-      }
-      if (jump) {
-        setPgs(form.getValue('pgNum') + jump);
-      }
-      expect(form.getValue('pgNum')).toBe(returnValue);
-    };
-
     beforeEach(() => {
       formHelper.setValue('crushRule', {
         min_size: 1,
@@ -1050,9 +1047,14 @@ describe('PoolFormComponent', () => {
         expect(form.getValue('ratio')).toBe(pool.options.compression_required_ratio);
       });
 
-      it('is only be possible to use the same or more pgs like before', () => {
+      it('updates pgs on every change', () => {
+        testPgUpdate(undefined, -1, 16);
+        testPgUpdate(undefined, -1, 8);
+      });
+
+      it('is possible to use less or more pgs than before', () => {
         formHelper.expectValid(setPgNum(64));
-        formHelper.expectError(setPgNum(4), 'noDecrease');
+        formHelper.expectValid(setPgNum(4));
       });
 
       describe('submit', () => {

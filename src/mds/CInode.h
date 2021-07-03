@@ -113,6 +113,12 @@ public:
   frag_t pick_dirfrag(std::string_view dn);
 };
 
+inline void decode_noshare(InodeStoreBase::mempool_xattr_map& xattrs,
+                          ceph::buffer::list::const_iterator &p)
+{
+  decode_noshare<mempool::mds_co::pool_allocator>(xattrs, p);
+}
+
 class InodeStore : public InodeStoreBase {
 public:
   // FIXME bufferlist not part of mempool
@@ -235,6 +241,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   static const int STATE_EVALSTALECAPS		= (1<<16);
   static const int STATE_QUEUEDEXPORTPIN	= (1<<17);
   static const int STATE_TRACKEDBYOFT		= (1<<18);  // tracked by open file table
+  static const int STATE_DELAYEDEXPORTPIN	= (1<<19);
   // orphan inode needs notification of releasing reference
   static const int STATE_ORPHAN =	STATE_NOTIFYREF;
 
@@ -242,7 +249,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
     (STATE_DIRTY|STATE_NEEDSRECOVER|STATE_DIRTYPARENT|STATE_DIRTYPOOL);
   static const int MASK_STATE_EXPORT_KEPT =
     (STATE_FROZEN|STATE_AMBIGUOUSAUTH|STATE_EXPORTINGCAPS|
-     STATE_QUEUEDEXPORTPIN|STATE_TRACKEDBYOFT);
+     STATE_QUEUEDEXPORTPIN|STATE_TRACKEDBYOFT|STATE_DELAYEDEXPORTPIN);
 
   // -- waiters --
   static const uint64_t WAIT_DIR         = (1<<0);
@@ -593,6 +600,9 @@ public:
         ls.push_back(dir);
     }
   }
+  int get_num_subtree_roots() const {
+    return num_subtree_roots;
+  }
 
   CDir *get_or_open_dirfrag(MDCache *mdcache, frag_t fg);
   CDir *add_dirfrag(CDir *dir);
@@ -626,7 +636,7 @@ protected:
   int num_caps_wanted = 0;
 
 public:
-  mempool::mds_co::compact_map<int, mempool::mds_co::set<client_t> > client_snap_caps;     // [auth] [snap] dirty metadata we still need from the head
+  mempool::mds_co::set<client_t> client_snap_caps;
   mempool::mds_co::compact_map<snapid_t, mempool::mds_co::set<client_t> > client_need_snapflush;
 
   void add_need_snapflush(CInode *snapin, snapid_t snapid, client_t client);
@@ -733,7 +743,7 @@ public:
   
 
   // -- accessors --
-  bool is_root() const { return inode.ino == MDS_INO_ROOT; }
+  bool is_root() const { return ino() == CEPH_INO_ROOT; }
   bool is_stray() const { return MDS_INO_IS_STRAY(inode.ino); }
   mds_rank_t get_stray_owner() const {
     return (mds_rank_t)MDS_INO_STRAY_OWNER(inode.ino);

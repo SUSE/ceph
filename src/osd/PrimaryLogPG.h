@@ -410,6 +410,9 @@ public:
   void inc_osd_stat_repaired() override {
     osd->inc_osd_stat_repaired();
   }
+  void set_osd_stat_repaired(int64_t count) override {
+    osd->set_osd_stat_repaired(count);
+  }
   bool pg_is_remote_backfilling() override {
     return is_remote_backfilling();
   }
@@ -446,6 +449,9 @@ public:
     bool transaction_applied,
     ObjectStore::Transaction &t,
     bool async = false) override {
+    if (is_primary()) {
+      ceph_assert(trim_to <= last_update_ondisk);
+    }
     if (hset_history) {
       info.hit_set = *hset_history;
     }
@@ -493,6 +499,9 @@ public:
   }
   pg_shard_t primary_shard() const override {
     return primary;
+  }
+  uint64_t min_upacting_features() const override {
+    return get_min_upacting_features();
   }
 
   void send_message_osd_cluster(
@@ -1126,7 +1135,7 @@ protected:
 				  PGBackend::RecoveryHandle *h,
 				  bool *work_started);
 
-  void finish_degraded_object(const hobject_t& oid) override;
+  void finish_degraded_object(const hobject_t oid) override;
 
   // Cancels/resets pulls from peer
   void check_recovery_sources(const OSDMapRef& map) override ;
@@ -1387,8 +1396,8 @@ protected:
 
   friend class C_ChecksumRead;
 
-  int do_extent_cmp(OpContext *ctx, OSDOp& osd_op);
-  int finish_extent_cmp(OSDOp& osd_op, const bufferlist &read_bl);
+  int do_extent_cmp(OpContext *ctx, OSDOp& osd_op, bool munged);
+  int finish_extent_cmp(OSDOp& osd_op, const bufferlist &read_bl, bool munged);
 
   friend class C_ExtentCmpRead;
 

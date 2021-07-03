@@ -293,8 +293,6 @@ function test_kill_daemon() {
         kill_daemon $pidfile TERM || return 1
     done
 
-    ceph osd dump | grep "osd.0 down" || return 1
-
     name_prefix=mgr
     for pidfile in $(find $dir 2>/dev/null | grep $name_prefix'[^/]*\.pid') ; do
         #
@@ -381,7 +379,6 @@ function test_kill_daemons() {
     # killing just the osd and verify the mon still is responsive
     #
     kill_daemons $dir TERM osd || return 1
-    ceph osd dump | grep "osd.0 down" || return 1
     #
     # kill the mgr
     #
@@ -482,6 +479,7 @@ function run_mon() {
         --pid-file=$dir/\$name.pid \
 	--mon-allow-pool-delete \
 	--mon-osd-backfillfull-ratio .99 \
+	--mon-warn-on-insecure-global-id-reclaim-allowed=false \
         "$@" || return 1
 
     cat > $dir/ceph.conf <<EOF
@@ -673,11 +671,15 @@ EOF
     echo start osd.$id
     ceph-osd -i $id $ceph_args &
 
+    # If noup is set, then can't wait for this osd
+    if ceph osd dump --format=json | jq '.flags_set[]' | grep -q '"noup"' ; then
+      return 0
+    fi
     wait_for_osd up $id || return 1
 
 }
 
-function run_osd_bluestore() {
+function run_osd_filestore() {
     local dir=$1
     shift
     local id=$1
@@ -710,7 +712,7 @@ function run_osd_bluestore() {
     echo "{\"cephx_secret\": \"$OSD_SECRET\"}" > $osd_data/new.json
     ceph osd new $uuid -i $osd_data/new.json
     rm $osd_data/new.json
-    ceph-osd -i $id $ceph_args --mkfs --key $OSD_SECRET --osd-uuid $uuid --osd-objectstore=bluestore
+    ceph-osd -i $id $ceph_args --mkfs --key $OSD_SECRET --osd-uuid $uuid --osd-objectstore=filestore
 
     local key_fn=$osd_data/keyring
     cat > $key_fn<<EOF
@@ -722,6 +724,10 @@ EOF
     echo start osd.$id
     ceph-osd -i $id $ceph_args &
 
+    # If noup is set, then can't wait for this osd
+    if ceph osd dump --format=json | jq '.flags_set[]' | grep -q '"noup"' ; then
+      return 0
+    fi
     wait_for_osd up $id || return 1
 
 
@@ -772,6 +778,7 @@ function destroy_osd() {
 
     ceph osd out osd.$id || return 1
     kill_daemons $dir TERM osd.$id || return 1
+    ceph osd down osd.$id || return 1
     ceph osd purge osd.$id --yes-i-really-mean-it || return 1
     teardown $dir/$id || return 1
     rm -fr $dir/$id
@@ -859,6 +866,10 @@ function activate_osd() {
 
     [ "$id" = "$(cat $osd_data/whoami)" ] || return 1
 
+    # If noup is set, then can't wait for this osd
+    if ceph osd dump --format=json | jq '.flags_set[]' | grep -q '"noup"' ; then
+      return 0
+    fi
     wait_for_osd up $id || return 1
 }
 
@@ -918,8 +929,10 @@ function test_wait_for_osd() {
     run_mon $dir a --osd_pool_default_size=1 || return 1
     run_mgr $dir x || return 1
     run_osd $dir 0 || return 1
+    run_osd $dir 1 || return 1
     wait_for_osd up 0 || return 1
-    kill_daemons $dir TERM osd || return 1
+    wait_for_osd up 1 || return 1
+    kill_daemons $dir TERM osd.0 || return 1
     wait_for_osd down 0 || return 1
     ( TIMEOUT=1 ; ! wait_for_osd up 0 ) || return 1
     teardown $dir || return 1
@@ -1179,13 +1192,8 @@ function _objectstore_tool_nodown() {
     shift
     local osd_data=$dir/$id
 
-    local journal_args
-    if [ "$objectstore_type" == "filestore" ]; then
-	journal_args=" --journal-path $osd_data/journal"
-    fi
     ceph-objectstore-tool \
         --data-path $osd_data \
-        $journal_args \
         "$@" || return 1
 }
 
@@ -1303,6 +1311,36 @@ function test_get_num_active_clean() {
     wait_for_clean || return 1
     local num_active_clean=$(get_num_active_clean)
     test "$num_active_clean" = $PG_NUM || return 1
+    teardown $dir || return 1
+}
+
+##
+# Return the number of active or peered PGs in the cluster. A PG matches if
+# ceph pg dump pgs reports it is either **active** or **peered** and that
+# not **stale**.
+#
+# @param STDOUT the number of active PGs
+# @return 0 on success, 1 on error
+#
+function get_num_active_or_peered() {
+    local expression
+    expression+="select(contains(\"active\") or contains(\"peered\")) | "
+    expression+="select(contains(\"stale\") | not)"
+    ceph --format json pg dump pgs 2>/dev/null | \
+        jq ".pg_stats | [.[] | .state | $expression] | length"
+}
+
+function test_get_num_active_or_peered() {
+    local dir=$1
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=1 || return 1
+    run_mgr $dir x || return 1
+    run_osd $dir 0 || return 1
+    create_rbd_pool || return 1
+    wait_for_clean || return 1
+    local num_peered=$(get_num_active_or_peered)
+    test "$num_peered" = $PG_NUM || return 1
     teardown $dir || return 1
 }
 
@@ -1581,6 +1619,64 @@ function test_wait_for_clean() {
     teardown $dir || return 1
 }
 
+##
+# Wait until the cluster becomes peered or if it does not make progress
+# for $WAIT_FOR_CLEAN_TIMEOUT seconds.
+# Progress is measured either via the **get_is_making_recovery_progress**
+# predicate or if the number of peered PGs changes (as returned by get_num_active_or_peered)
+#
+# @return 0 if the cluster is clean, 1 otherwise
+#
+function wait_for_peered() {
+    local cmd=$1
+    local num_peered=-1
+    local cur_peered
+    local -a delays=($(get_timeout_delays $WAIT_FOR_CLEAN_TIMEOUT .1))
+    local -i loop=0
+
+    flush_pg_stats || return 1
+    while test $(get_num_pgs) == 0 ; do
+	sleep 1
+    done
+
+    while true ; do
+        # Comparing get_num_active_clean & get_num_pgs is used to determine
+        # if the cluster is clean. That's almost an inline of is_clean() to
+        # get more performance by avoiding multiple calls of get_num_active_clean.
+        cur_peered=$(get_num_active_or_peered)
+        test $cur_peered = $(get_num_pgs) && break
+        if test $cur_peered != $num_peered ; then
+            loop=0
+            num_peered=$cur_peered
+        elif get_is_making_recovery_progress ; then
+            loop=0
+        elif (( $loop >= ${#delays[*]} )) ; then
+            ceph report
+            return 1
+        fi
+	# eval is a no-op if cmd is empty
+        eval $cmd
+        sleep ${delays[$loop]}
+        loop+=1
+    done
+    return 0
+}
+
+function test_wait_for_peered() {
+    local dir=$1
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=2 || return 1
+    run_osd $dir 0 || return 1
+    run_mgr $dir x || return 1
+    create_rbd_pool || return 1
+    ! WAIT_FOR_CLEAN_TIMEOUT=1 wait_for_clean || return 1
+    run_osd $dir 1 || return 1
+    wait_for_peered || return 1
+    teardown $dir || return 1
+}
+
+
 #######################################################################
 
 ##
@@ -1619,13 +1715,20 @@ function test_wait_for_health_ok() {
     local dir=$1
 
     setup $dir || return 1
-    run_mon $dir a --osd_pool_default_size=1 --osd_failsafe_full_ratio=.99 --mon_pg_warn_min_per_osd=0 || return 1
+    run_mon $dir a --osd_failsafe_full_ratio=.99 --mon_pg_warn_min_per_osd=0 || return 1
     run_mgr $dir x --mon_pg_warn_min_per_osd=0 || return 1
+    # start osd_pool_default_size OSDs
     run_osd $dir 0 || return 1
+    run_osd $dir 1 || return 1
+    run_osd $dir 2 || return 1
     kill_daemons $dir TERM osd || return 1
     ceph osd down 0 || return 1
+    # expect TOO_FEW_OSDS warning
     ! TIMEOUT=1 wait_for_health_ok || return 1
+    # resurrect all OSDs
     activate_osd $dir 0 || return 1
+    activate_osd $dir 1 || return 1
+    activate_osd $dir 2 || return 1
     wait_for_health_ok || return 1
     teardown $dir || return 1
 }
@@ -1961,6 +2064,10 @@ function flush_pg_stats()
     seqs=''
     for osd in $ids; do
 	    seq=`ceph tell osd.$osd flush_pg_stats`
+	    if test -z "$seq"
+	    then
+		continue
+	    fi
 	    seqs="$seqs $osd-$seq"
     done
 
@@ -2133,7 +2240,8 @@ function inject_eio() {
     if [ "$pooltype" != "ec" ]; then
         shard_id=""
     fi
-    set_config osd $osd_id filestore_debug_inject_read_err true || return 1
+    type=$(cat $dir/$osd_id/type)
+    set_config osd $osd_id ${type}_debug_inject_read_err true || return 1
     local loop=0
     while ( CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.$osd_id) \
              inject${which}err $poolname $objname $shard_id | grep -q Invalid ); do
@@ -2152,6 +2260,24 @@ function multidiff() {
         fi
         diff $DIFFCOLOPTS $@
     fi
+}
+
+function create_ec_pool() {
+    local pool_name=$1
+    shift
+    local allow_overwrites=$1
+    shift
+
+    ceph osd erasure-code-profile set myprofile crush-failure-domain=osd "$@" || return 1
+
+    create_pool "$poolname" 1 1 erasure myprofile || return 1
+
+    if [ "$allow_overwrites" = "true" ]; then
+        ceph osd pool set "$poolname" allow_ec_overwrites true || return 1
+    fi
+
+    wait_for_clean || return 1
+    return 0
 }
 
 # Local Variables:

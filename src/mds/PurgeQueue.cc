@@ -57,15 +57,43 @@ void PurgeItem::encode(bufferlist &bl) const
 void PurgeItem::decode(bufferlist::const_iterator &p)
 {
   DECODE_START(2, p);
-  decode((uint8_t&)action, p);
-  decode(ino, p);
-  decode(size, p);
-  decode(layout, p);
-  decode(old_pools, p);
-  decode(snapc, p);
-  decode(fragtree, p);
-  if (struct_v >= 2) {
-    decode(stamp, p);
+  bool done = false;
+  if (struct_v == 1) {
+    auto p_start = p;
+    try {
+      // bad encoding introduced by v13.2.2
+      decode(stamp, p);
+      decode(pad_size, p);
+      p.advance(pad_size);
+      uint8_t raw_action;
+      decode(raw_action, p);
+      action = (Action)raw_action;
+      decode(ino, p);
+      decode(size, p);
+      decode(layout, p);
+      decode(old_pools, p);
+      decode(snapc, p);
+      decode(fragtree, p);
+      if (p.get_off() > struct_end)
+	throw buffer::end_of_buffer();
+      done = true;
+    } catch (const buffer::error &e) {
+      p = p_start;
+    }
+  }
+  if (!done) {
+    uint8_t raw_action;
+    decode(raw_action, p);
+    action = (Action)raw_action;
+    decode(ino, p);
+    decode(size, p);
+    decode(layout, p);
+    decode(old_pools, p);
+    decode(snapc, p);
+    decode(fragtree, p);
+    if (struct_v >= 2) {
+      decode(stamp, p);
+    }
   }
   DECODE_FINISH(p);
 }
@@ -121,7 +149,9 @@ void PurgeQueue::create_logger()
 
   pcb.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
   pcb.add_u64(l_pq_executing_ops, "pq_executing_ops", "Purge queue ops in flight");
+  pcb.add_u64(l_pq_executing_ops_high_water, "pq_executing_ops_high_water", "Maximum number of executing file purge ops");
   pcb.add_u64(l_pq_executing, "pq_executing", "Purge queue tasks in flight");
+  pcb.add_u64(l_pq_executing_high_water, "pq_executing_high_water", "Maximum number of executing file purges");
 
   logger.reset(pcb.create_perf_counters());
   g_ceph_context->get_perfcounters_collection()->add(logger.get());
@@ -337,13 +367,11 @@ uint32_t PurgeQueue::_calculate_ops(const PurgeItem &item) const
     ops_required = 1 + leaves.size();
   } else {
     // File, work out concurrent Filer::purge deletes
+    // Account for removing (or zeroing) backtrace
     const uint64_t num = (item.size > 0) ?
       Striper::get_num_objects(item.layout, item.size) : 1;
 
     ops_required = std::min(num, g_conf()->filer_max_purge_ops);
-
-    // Account for removing (or zeroing) backtrace
-    ops_required += 1;
 
     // Account for deletions for old pools
     if (item.action != PurgeItem::TRUNCATE_FILE) {
@@ -471,9 +499,13 @@ void PurgeQueue::_execute_item(
 
   in_flight[expire_to] = item;
   logger->set(l_pq_executing, in_flight.size());
+  files_high_water = std::max(files_high_water, in_flight.size());
+  logger->set(l_pq_executing_high_water, files_high_water);
   auto ops = _calculate_ops(item);
   ops_in_flight += ops;
   logger->set(l_pq_executing_ops, ops_in_flight);
+  ops_high_water = std::max(ops_high_water, ops_in_flight);
+  logger->set(l_pq_executing_ops_high_water, ops_high_water);
 
   SnapContext nullsnapc;
 
@@ -541,8 +573,12 @@ void PurgeQueue::_execute_item(
             "dropping it" << dendl;
     ops_in_flight -= ops;
     logger->set(l_pq_executing_ops, ops_in_flight);
+    ops_high_water = std::max(ops_high_water, ops_in_flight);
+    logger->set(l_pq_executing_ops_high_water, ops_high_water);
     in_flight.erase(expire_to);
     logger->set(l_pq_executing, in_flight.size());
+    files_high_water = std::max(files_high_water, in_flight.size());
+    logger->set(l_pq_executing_high_water, files_high_water);
     return;
   }
   ceph_assert(gather.has_subs());
@@ -550,8 +586,14 @@ void PurgeQueue::_execute_item(
   gather.set_finisher(new C_OnFinisher(
                       new FunctionContext([this, expire_to](int r){
     std::lock_guard l(lock);
-    _execute_item_complete(expire_to);
 
+    if (r == -EBLACKLISTED) {
+      finisher.queue(on_error, r);
+      on_error = nullptr;
+      return;
+    }
+
+    _execute_item_complete(expire_to);
     _consume();
 
     // Have we gone idle?  If so, do an extra write_head now instead of
@@ -605,11 +647,15 @@ void PurgeQueue::_execute_item_complete(
 
   ops_in_flight -= _calculate_ops(iter->second);
   logger->set(l_pq_executing_ops, ops_in_flight);
+  ops_high_water = std::max(ops_high_water, ops_in_flight);
+  logger->set(l_pq_executing_ops_high_water, ops_high_water);
 
   dout(10) << "completed item for ino " << iter->second.ino << dendl;
 
   in_flight.erase(iter);
   logger->set(l_pq_executing, in_flight.size());
+  files_high_water = std::max(files_high_water, in_flight.size());
+  logger->set(l_pq_executing_high_water, files_high_water);
   dout(10) << "in_flight.size() now " << in_flight.size() << dendl;
 
   logger->inc(l_pq_executed);
@@ -651,9 +697,7 @@ void PurgeQueue::update_op_limit(const MDSMap &mds_map)
   }
 }
 
-void PurgeQueue::handle_conf_change(const ConfigProxy& conf,
-			     const std::set <std::string> &changed,
-                             const MDSMap &mds_map)
+void PurgeQueue::handle_conf_change(const std::set<std::string>& changed, const MDSMap& mds_map)
 {
   if (changed.count("mds_max_purge_ops")
       || changed.count("mds_max_purge_ops_per_pg")) {
@@ -664,7 +708,7 @@ void PurgeQueue::handle_conf_change(const ConfigProxy& conf,
       // We might have gone from zero to a finite limit, so
       // might need to kick off consume.
       dout(4) << "maybe start work again (max_purge_files="
-              << conf->mds_max_purge_files << dendl;
+              << g_conf()->mds_max_purge_files << dendl;
       finisher.queue(new FunctionContext([this](int r){
         std::lock_guard l(lock);
         _consume();

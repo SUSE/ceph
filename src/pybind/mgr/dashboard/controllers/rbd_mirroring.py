@@ -8,7 +8,7 @@ from functools import partial
 
 import cherrypy
 
-import rbd
+import rbd  # pylint: disable=import-error
 
 from . import ApiController, Endpoint, Task, BaseController, ReadPermission, \
     RESTController
@@ -50,7 +50,7 @@ def get_daemons_and_pools():  # pylint: disable=R0915
             for service in server['services']:
                 id = service['id']  # pylint: disable=W0622
                 metadata = service['metadata']
-                status = service['status']
+                status = service['status'] or {}
 
                 try:
                     status = json.loads(status['json'])

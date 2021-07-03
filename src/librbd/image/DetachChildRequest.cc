@@ -6,10 +6,12 @@
 #include "common/errno.h"
 #include "common/WorkQueue.h"
 #include "cls/rbd/cls_rbd_client.h"
+#include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/Operations.h"
 #include "librbd/Utils.h"
+#include "librbd/journal/DisabledPolicy.h"
 #include <string>
 
 #define dout_subsys ceph_subsys_rbd
@@ -182,6 +184,21 @@ void DetachChildRequest<I>::handle_clone_v2_open_parent(int r) {
     return;
   }
 
+  // do not attempt to open the parent journal when removing the trash
+  // snapshot, because the parent may be not promoted
+  if (m_parent_image_ctx->test_features(RBD_FEATURE_JOURNALING)) {
+    RWLock::WLocker snap_locker(m_parent_image_ctx->snap_lock);
+    m_parent_image_ctx->set_journal_policy(new journal::DisabledPolicy());
+  }
+
+  // disallow any proxied maintenance operations
+  {
+    RWLock::RLocker owner_lock(m_parent_image_ctx->owner_lock);
+    if (m_parent_image_ctx->exclusive_lock != nullptr) {
+      m_parent_image_ctx->exclusive_lock->block_requests(0);
+    }
+  }
+
   clone_v2_remove_snapshot();
 }
 
@@ -240,6 +257,8 @@ template<typename I>
 void DetachChildRequest<I>::clone_v1_remove_child() {
   auto cct = m_image_ctx.cct;
   ldout(cct, 5) << dendl;
+
+  m_parent_spec.pool_namespace = "";
 
   librados::ObjectWriteOperation op;
   librbd::cls_client::remove_child(&op, m_parent_spec, m_image_ctx.id);

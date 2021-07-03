@@ -59,12 +59,36 @@ KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, ai
 int KernelDevice::_lock()
 {
   dout(10) << __func__ << " " << fd_directs[WRITE_LIFE_NOT_SET] << dendl;
-  int r = ::flock(fd_directs[WRITE_LIFE_NOT_SET], LOCK_EX | LOCK_NB);
-  if (r < 0) {
-    derr << __func__ << " flock failed on " << path << dendl;
-    return -errno;
+  // When the block changes, systemd-udevd will open the block,
+  // read some information and close it. Then a failure occurs here.
+  // So we need to try again here.
+  int fd = fd_directs[WRITE_LIFE_NOT_SET];
+  uint64_t nr_tries = 0;
+  for (;;) {
+    struct flock fl = { F_WRLCK,
+                        SEEK_SET };
+    int r = ::fcntl(fd, F_OFD_SETLK, &fl);
+    if (r < 0) {
+      if (errno == EINVAL) {
+        r = ::flock(fd, LOCK_EX | LOCK_NB);
+      }
+    }
+    if (r == 0) {
+      return 0;
+    }
+    if (errno != EAGAIN) {
+      return -errno;
+    }
+    dout(1) << __func__ << " flock busy on " << path << dendl;
+    if (const uint64_t max_retry =
+	cct->_conf.get_val<uint64_t>("bdev_flock_retry");
+        max_retry > 0 && nr_tries++ == max_retry) {
+      return -EAGAIN;
+    }
+    double retry_interval =
+      cct->_conf.get_val<double>("bdev_flock_retry_interval");
+    std::this_thread::sleep_for(ceph::make_timespan(retry_interval));
   }
-  return 0;
 }
 
 int KernelDevice::open(const string& p)
@@ -538,7 +562,8 @@ void KernelDevice::_aio_thread()
 	      "This may suggest HW issue. Please check your dmesg!");
           }
         } else if (aio[i]->length != (uint64_t)r) {
-          derr << "aio to " << aio[i]->offset << "~" << aio[i]->length
+          derr << "aio to 0x" << std::hex << aio[i]->offset
+	       << "~" << aio[i]->length << std::dec
                << " but returned: " << r << dendl;
           ceph_abort_msg("unexpected aio return value: does not match length");
         }
@@ -772,18 +797,42 @@ int KernelDevice::_sync_write(uint64_t off, bufferlist &bl, bool buffered, int w
   }
   vector<iovec> iov;
   bl.prepare_iov(&iov);
-  int r = ::pwritev(choose_fd(buffered, write_hint),
-		    &iov[0], iov.size(), off);
 
-  if (r < 0) {
-    r = -errno;
-    derr << __func__ << " pwritev error: " << cpp_strerror(r) << dendl;
-    return r;
-  }
+  auto left = len;
+  auto o = off;
+  size_t idx = 0;
+  do {
+    auto r = ::pwritev(choose_fd(buffered, write_hint),
+      &iov[idx], iov.size() - idx, o);
+
+    if (r < 0) {
+      r = -errno;
+      derr << __func__ << " pwritev error: " << cpp_strerror(r) << dendl;
+      return r;
+    }
+    o += r;
+    left -= r;
+    if (left) {
+      // skip fully processed IOVs
+      while (idx < iov.size() && (size_t)r >= iov[idx].iov_len) {
+        r -= iov[idx++].iov_len;
+      }
+      // update partially processed one if any
+      if (r) {
+        ceph_assert(idx < iov.size());
+        ceph_assert((size_t)r < iov[idx].iov_len);
+        iov[idx].iov_base = static_cast<char*>(iov[idx].iov_base) + r;
+        iov[idx].iov_len -= r;
+        r = 0;
+      }
+      ceph_assert(r == 0);
+    }
+  } while (left);
+
 #ifdef HAVE_SYNC_FILE_RANGE
   if (buffered) {
     // initiate IO and wait till it completes
-    r = ::sync_file_range(fd_buffereds[WRITE_LIFE_NOT_SET], off, len, SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER|SYNC_FILE_RANGE_WAIT_BEFORE);
+    auto r = ::sync_file_range(fd_buffereds[WRITE_LIFE_NOT_SET], off, len, SYNC_FILE_RANGE_WRITE|SYNC_FILE_RANGE_WAIT_AFTER|SYNC_FILE_RANGE_WAIT_BEFORE);
     if (r < 0) {
       r = -errno;
       derr << __func__ << " sync_file_range error: " << cpp_strerror(r) << dendl;
@@ -808,6 +857,11 @@ int KernelDevice::write(
 	   << (buffered ? " (buffered)" : " (direct)")
 	   << dendl;
   ceph_assert(is_valid_io(off, len));
+  if (cct->_conf->objectstore_blackhole) {
+    lderr(cct) << __func__ << " objectstore_blackhole=true, throwing out IO"
+	       << dendl;
+    return 0;
+  }
 
   if ((!buffered || bl.get_num_buffers() >= IOV_MAX) &&
       bl.rebuild_aligned_size_and_memory(block_size, block_size, IOV_MAX)) {
@@ -832,6 +886,11 @@ int KernelDevice::aio_write(
 	   << (buffered ? " (buffered)" : " (direct)")
 	   << dendl;
   ceph_assert(is_valid_io(off, len));
+  if (cct->_conf->objectstore_blackhole) {
+    lderr(cct) << __func__ << " objectstore_blackhole=true, throwing out IO"
+	       << dendl;
+    return 0;
+  }
 
   if ((!buffered || bl.get_num_buffers() >= IOV_MAX) &&
       bl.rebuild_aligned_size_and_memory(block_size, block_size, IOV_MAX)) {
@@ -908,6 +967,11 @@ int KernelDevice::aio_write(
 int KernelDevice::discard(uint64_t offset, uint64_t len)
 {
   int r = 0;
+  if (cct->_conf->objectstore_blackhole) {
+    lderr(cct) << __func__ << " objectstore_blackhole=true, throwing out IO"
+	       << dendl;
+    return 0;
+  }
   if (support_discard) {
       dout(10) << __func__
 	       << " 0x" << std::hex << offset << "~" << len << std::dec

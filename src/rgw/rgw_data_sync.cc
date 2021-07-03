@@ -902,6 +902,7 @@ public:
   RGWCoroutine *store_marker(const string& new_marker, uint64_t index_pos, const real_time& timestamp) override {
     sync_marker.marker = new_marker;
     sync_marker.pos = index_pos;
+    sync_marker.timestamp = timestamp;
 
     tn->log(20, SSTR("updating marker marker_oid=" << marker_oid << " marker=" << new_marker));
     RGWRados *store = sync_env->store;
@@ -1144,8 +1145,6 @@ class RGWDataSyncShardCR : public RGWCoroutine {
   int spawn_window;
 
   bool *reset_backoff;
-
-  set<string> spawned_keys;
 
   boost::intrusive_ptr<RGWContinuousLeaseCR> lease_cr;
   boost::intrusive_ptr<RGWCoroutinesStack> lease_stack;
@@ -1416,12 +1415,10 @@ public:
         }
         omapkeys.reset();
 
-#define INCREMENTAL_MAX_ENTRIES 100
         tn->log(20, SSTR("shard_id=" << shard_id << " sync_marker=" << sync_marker.marker));
-        spawned_keys.clear();
         yield call(new RGWReadRemoteDataLogShardCR(sync_env, shard_id, sync_marker.marker,
                                                    &next_marker, &log_entries, &truncated));
-        if (retcode < 0) {
+        if (retcode < 0 && retcode != -ENOENT) {
           tn->log(0, SSTR("ERROR: failed to read remote data log info: ret=" << retcode));
           stop_spawned_services();
           drain_all();
@@ -1442,30 +1439,19 @@ public:
           if (!marker_tracker->start(log_iter->log_id, 0, log_iter->log_timestamp)) {
             tn->log(0, SSTR("ERROR: cannot start syncing " << log_iter->log_id << ". Duplicate entry?"));
           } else {
-            /*
-             * don't spawn the same key more than once. We can do that as long as we don't yield
-             */
-            if (spawned_keys.find(log_iter->entry.key) == spawned_keys.end()) {
-              spawned_keys.insert(log_iter->entry.key);
-              spawn(new RGWDataSyncSingleEntryCR(sync_env, log_iter->entry.key, log_iter->log_id, marker_tracker, error_repo, false, tn), false);
-              if (retcode < 0) {
-                stop_spawned_services();
-                drain_all();
-                return set_cr_error(retcode);
-              }
-            }
+            spawn(new RGWDataSyncSingleEntryCR(sync_env, log_iter->entry.key, log_iter->log_id, marker_tracker, error_repo, false, tn), false);
           }
-        }
-        while ((int)num_spawned() > spawn_window) {
-          set_status() << "num_spawned() > spawn_window";
-          yield wait_for_child();
-          int ret;
-          while (collect(&ret, lease_stack.get())) {
-            if (ret < 0) {
-              tn->log(10, "a sync operation returned error");
-              /* we have reported this error */
+          while ((int)num_spawned() > spawn_window) {
+            set_status() << "num_spawned() > spawn_window";
+            yield wait_for_child();
+            int ret;
+            while (collect(&ret, lease_stack.get())) {
+              if (ret < 0) {
+                tn->log(10, "a sync operation returned error");
+                /* we have reported this error */
+              }
+              /* not waiting for child here */
             }
-            /* not waiting for child here */
           }
         }
 
@@ -3545,14 +3531,6 @@ const std::string& get_stable_marker(const rgw_data_sync_marker& m)
   return m.state == m.FullSync ? m.next_step_marker : m.marker;
 }
 
-/// comparison operator for take_min_markers()
-bool operator<(const rgw_data_sync_marker& lhs,
-               const rgw_data_sync_marker& rhs)
-{
-  // sort by stable marker
-  return get_stable_marker(lhs) < get_stable_marker(rhs);
-}
-
 /// populate the container starting with 'dest' with the minimum stable marker
 /// of each shard for all of the peers in [first, last)
 template <typename IterIn, typename IterOut>
@@ -3561,18 +3539,12 @@ void take_min_markers(IterIn first, IterIn last, IterOut dest)
   if (first == last) {
     return;
   }
-  // initialize markers with the first peer's
-  auto m = dest;
-  for (auto &shard : first->sync_markers) {
-    *m = std::move(shard.second);
-    ++m;
-  }
-  // for remaining peers, replace with smaller markers
-  for (auto p = first + 1; p != last; ++p) {
-    m = dest;
+  for (auto p = first; p != last; ++p) {
+    auto m = dest;
     for (auto &shard : p->sync_markers) {
-      if (shard.second < *m) {
-        *m = std::move(shard.second);
+      const auto& stable = get_stable_marker(shard.second);
+      if (*m > stable) {
+        *m = stable;
       }
       ++m;
     }
@@ -3582,12 +3554,13 @@ void take_min_markers(IterIn first, IterIn last, IterOut dest)
 } // anonymous namespace
 
 class DataLogTrimCR : public RGWCoroutine {
+  using TrimCR = RGWSyncLogTrimCR;
   RGWRados *store;
   RGWHTTPManager *http;
   const int num_shards;
   const std::string& zone_id; //< my zone id
   std::vector<rgw_data_sync_status> peer_status; //< sync status for each peer
-  std::vector<rgw_data_sync_marker> min_shard_markers; //< min marker per shard
+  std::vector<std::string> min_shard_markers; //< min marker per shard
   std::vector<std::string>& last_trim; //< last trimmed marker per shard
   int ret{0};
 
@@ -3598,7 +3571,7 @@ class DataLogTrimCR : public RGWCoroutine {
       num_shards(num_shards),
       zone_id(store->svc.zone->get_zone().id),
       peer_status(store->svc.zone->get_zone_data_notify_to_map().size()),
-      min_shard_markers(num_shards),
+      min_shard_markers(num_shards, TrimCR::max_marker),
       last_trim(last_trim)
   {}
 
@@ -3651,16 +3624,14 @@ int DataLogTrimCR::operate()
 
       for (int i = 0; i < num_shards; i++) {
         const auto& m = min_shard_markers[i];
-        auto& stable = get_stable_marker(m);
-        if (stable <= last_trim[i]) {
+        if (m <= last_trim[i]) {
           continue;
         }
         ldout(cct, 10) << "trimming log shard " << i
-            << " at marker=" << stable
+            << " at marker=" << m
             << " last_trim=" << last_trim[i] << dendl;
-        using TrimCR = RGWSyncLogTrimCR;
         spawn(new TrimCR(store, store->data_log->get_oid(i),
-                         stable, &last_trim[i]),
+                         m, &last_trim[i]),
               true);
       }
     }

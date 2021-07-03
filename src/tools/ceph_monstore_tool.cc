@@ -496,7 +496,9 @@ static int update_auth(MonitorDBStore& st, const string& keyring_path)
   return 0;
 }
 
-static int update_mkfs(MonitorDBStore& st, const string& monmap_path)
+static int update_mkfs(MonitorDBStore& st,
+		       const string& monmap_path,
+		       const vector<string>& mon_ids)
 {
   MonMap monmap;
   if (!monmap_path.empty()) {
@@ -516,6 +518,29 @@ static int update_mkfs(MonitorDBStore& st, const string& monmap_path)
     if (r) {
       cerr << "no initial monitors" << std::endl;
       return -EINVAL;
+    }
+    vector<string> new_names;
+    if (!mon_ids.empty()) {
+      if (mon_ids.size() != monmap.size()) {
+	cerr << "Please pass the same number of <mon-ids> to name the hosts "
+	     << "listed in 'mon_host'. "
+	     << mon_ids.size() << " mon-id(s) specified, "
+	     << "while you have " << monmap.size() << " mon hosts." << std::endl;
+	return -EINVAL;
+      }
+      new_names = mon_ids;
+    } else {
+      for (unsigned rank = 0; rank < monmap.size(); rank++) {
+	string new_name{"a"};
+	new_name[0] += rank;
+	new_names.push_back(std::move(new_name));
+      }
+    }
+    for (unsigned rank = 0; rank < monmap.size(); rank++) {
+      auto name = monmap.get_name(rank);
+      if (name.compare(0, 7, "noname-") == 0) {
+	monmap.rename(name, new_names[rank]);
+      }
     }
   }
   monmap.print(cout);
@@ -597,13 +622,31 @@ static int update_mgrmap(MonitorDBStore& st)
     }
     bufferlist bl;
     encode(mgr_command_descs, bl);
-    t->put("mgr_command_desc", "", bl);
+    t->put("mgr_command_descs", "", bl);
   }
   return st.apply_transaction(t);
 }
 
 static int update_paxos(MonitorDBStore& st)
 {
+  const string prefix("paxos");
+  // a large enough version greater than the maximum possible `last_committed`
+  // that could be replied by the peons when the leader is collecting paxos
+  // transactions during recovery
+  constexpr version_t first_committed = 0x42;
+  constexpr version_t last_committed = first_committed;
+  for (version_t v = first_committed; v < last_committed + 1; v++) {
+    auto t = make_shared<MonitorDBStore::Transaction>();
+    if (v == first_committed) {
+      t->put(prefix, "first_committed", v);
+    }
+    bufferlist proposal;
+    MonitorDBStore::Transaction empty_txn;
+    empty_txn.encode(proposal);
+    t->put(prefix, v, proposal);
+    t->put(prefix, "last_committed", v);
+    st.apply_transaction(t);
+  }
   // build a pending paxos proposal from all non-permanent k/v pairs. once the
   // proposal is committed, it will gets applied. on the sync provider side, it
   // will be a no-op, but on its peers, the paxos commit will help to build up
@@ -622,11 +665,8 @@ static int update_paxos(MonitorDBStore& st)
     }
     t.encode(pending_proposal);
   }
-  const string prefix("paxos");
+  auto pending_v = last_committed + 1;
   auto t = make_shared<MonitorDBStore::Transaction>();
-  t->put(prefix, "first_committed", 0);
-  t->put(prefix, "last_committed", 0);
-  auto pending_v = 1;
   t->put(prefix, pending_v, pending_proposal);
   t->put(prefix, "pending_v", pending_v);
   t->put(prefix, "pending_pn", 400);
@@ -641,13 +681,18 @@ int rebuild_monstore(const char* progname,
   po::options_description op_desc("Allowed 'rebuild' options");
   string keyring_path;
   string monmap_path;
+  vector<string> mon_ids;
   op_desc.add_options()
     ("keyring", po::value<string>(&keyring_path),
      "path to the client.admin key")
     ("monmap", po::value<string>(&monmap_path),
-     "path to the initial monmap");
+     "path to the initial monmap")
+    ("mon-ids", po::value<vector<string>>(&mon_ids)->multitoken(),
+     "mon ids, use 'a', 'b', ... if not specified");
+  po::positional_options_description pos_desc;
+  pos_desc.add("mon-ids", -1);
   po::variables_map op_vm;
-  int r = parse_cmd_args(&op_desc, nullptr, nullptr, subcmds, &op_vm);
+  int r = parse_cmd_args(&op_desc, nullptr, &pos_desc, subcmds, &op_vm);
   if (r) {
     return -r;
   }
@@ -666,7 +711,7 @@ int rebuild_monstore(const char* progname,
   if ((r = update_paxos(st))) {
     return r;
   }
-  if ((r = update_mkfs(st, monmap_path))) {
+  if ((r = update_mkfs(st, monmap_path, mon_ids))) {
     return r;
   }
   if ((r = update_monitor(st))) {

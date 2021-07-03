@@ -209,6 +209,32 @@ ssize_t ImageRequestWQ<I>::writesame(uint64_t off, uint64_t len,
 }
 
 template <typename I>
+ssize_t ImageRequestWQ<I>::write_zeroes(uint64_t off, uint64_t len,
+                                        int zero_flags, int op_flags) {
+  auto cct = m_image_ctx.cct;
+  ldout(cct, 20) << "ictx=" << &m_image_ctx << ", off=" << off << ", "
+                 << "len = " << len << dendl;
+
+  m_image_ctx.snap_lock.get_read();
+  int r = clip_io(util::get_image_ctx(&m_image_ctx), off, &len);
+  m_image_ctx.snap_lock.put_read();
+  if (r < 0) {
+    lderr(cct) << "invalid IO request: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  C_SaferCond ctx;
+  auto aio_comp = io::AioCompletion::create(&ctx);
+  aio_write_zeroes(aio_comp, off, len, zero_flags, op_flags, false);
+
+  r = ctx.wait();
+  if (r < 0) {
+    return r;
+  }
+  return len;
+}
+
+template <typename I>
 ssize_t ImageRequestWQ<I>::compare_and_write(uint64_t off, uint64_t len,
                                              bufferlist &&cmp_bl,
                                              bufferlist &&bl,
@@ -448,6 +474,55 @@ void ImageRequestWQ<I>::aio_writesame(AioCompletion *c, uint64_t off,
   trace.event("finish");
 }
 
+
+template <typename I>
+void ImageRequestWQ<I>::aio_write_zeroes(io::AioCompletion *aio_comp,
+                                         uint64_t off, uint64_t len,
+                                         int zero_flags, int op_flags,
+                                         bool native_async) {
+  auto cct = m_image_ctx.cct;
+  FUNCTRACE(cct);
+  ZTracer::Trace trace;
+  if (m_image_ctx.blkin_trace_all) {
+    trace.init("io: write_zeroes", &m_image_ctx.trace_endpoint);
+    trace.event("init");
+  }
+
+  aio_comp->init_time(util::get_image_ctx(&m_image_ctx), io::AIO_TYPE_DISCARD);
+  ldout(cct, 20) << "ictx=" << &m_image_ctx << ", "
+                 << "completion=" << aio_comp << ", off=" << off << ", "
+                 << "len=" << len << dendl;
+
+  if (native_async && m_image_ctx.event_socket.is_valid()) {
+    aio_comp->set_event_notify(true);
+  }
+
+  // validate the supported flags
+  if (zero_flags != 0U) {
+    aio_comp->fail(-EINVAL);
+    return;
+  }
+
+  if (!start_in_flight_io(aio_comp)) {
+    return;
+  }
+
+  // enable partial discard (zeroing) of objects
+  uint32_t discard_granularity_bytes = 0;
+
+  RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
+  if (m_image_ctx.non_blocking_aio || writes_blocked()) {
+    queue(ImageDispatchSpec<I>::create_discard_request(
+      m_image_ctx, aio_comp, off, len, discard_granularity_bytes, trace));
+  } else {
+    aio_comp->start_op();
+    ImageRequest<I>::aio_discard(&m_image_ctx, aio_comp, {{off, len}},
+                                 discard_granularity_bytes, trace);
+    finish_in_flight_io();
+  }
+  trace.event("finish");
+}
+
 template <typename I>
 void ImageRequestWQ<I>::aio_compare_and_write(AioCompletion *c,
                                               uint64_t off, uint64_t len,
@@ -655,21 +730,23 @@ void ImageRequestWQ<I>::apply_qos_limit(const uint64_t flag,
 }
 
 template <typename I>
-void ImageRequestWQ<I>::handle_throttle_ready(int r, ImageDispatchSpec<I> *item, uint64_t flag) {
+void ImageRequestWQ<I>::handle_throttle_ready(int r, ImageDispatchSpec<I> *item,
+                                              uint64_t flag) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 15) << "r=" << r << ", " << "req=" << item << dendl;
 
+  std::lock_guard pool_locker{this->get_pool_lock()};
   ceph_assert(m_io_throttled.load() > 0);
   item->set_throttled(flag);
   if (item->were_all_throttled()) {
-    this->requeue_back(item);
+    this->requeue_back(pool_locker, item);
     --m_io_throttled;
-    this->signal();
+    this->signal(pool_locker);
   }
 }
 
 template <typename I>
-bool ImageRequestWQ<I>::needs_throttle(ImageDispatchSpec<I> *item) { 
+bool ImageRequestWQ<I>::needs_throttle(ImageDispatchSpec<I> *item) {
   uint64_t tokens = 0;
   uint64_t flag = 0;
   bool blocked = false;
@@ -841,6 +918,15 @@ int ImageRequestWQ<I>::start_in_flight_io(AioCompletion *c) {
 
     c->get();
     c->fail(-ESHUTDOWN);
+    return false;
+  }
+
+  if (!m_image_ctx.data_ctx.is_valid()) {
+    CephContext *cct = m_image_ctx.cct;
+    lderr(cct) << "missing data pool" << dendl;
+
+    c->get();
+    c->fail(-ENODEV);
     return false;
   }
 

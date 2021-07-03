@@ -115,7 +115,7 @@ export class PoolFormComponent implements OnInit {
     this.form = new CdFormGroup(
       {
         name: new FormControl('', {
-          validators: [Validators.pattern(/^[\.A-Za-z0-9_/-]+$/), Validators.required]
+          validators: [Validators.pattern(/^[.A-Za-z0-9_/-]+$/), Validators.required]
         }),
         poolType: new FormControl('', {
           validators: [Validators.required]
@@ -168,7 +168,6 @@ export class PoolFormComponent implements OnInit {
 
   private initInfo(info: PoolFormInfo) {
     this.form.silentSet('algorithm', info.bluestore_compression_algorithm);
-    info.compression_modes.push('unset');
     this.info = info;
   }
 
@@ -230,6 +229,7 @@ export class PoolFormComponent implements OnInit {
         this.form.silentSet(controlName, value);
       }
     });
+    this.data.pgs = this.form.getValue('pgNum');
     this.data.applications.selected = pool.application_metadata;
   }
 
@@ -403,11 +403,6 @@ export class PoolFormComponent implements OnInit {
   private setComplexValidators() {
     if (this.editing) {
       this.form
-        .get('pgNum')
-        .setValidators(
-          CdValidators.custom('noDecrease', (pgs) => this.data.pool && pgs < this.data.pool.pg_num)
-        );
-      this.form
         .get('name')
         .setValidators([
           this.form.get('name').validator,
@@ -506,6 +501,7 @@ export class PoolFormComponent implements OnInit {
     this.modalService.show(CriticalConfirmationModalComponent, {
       initialState: {
         itemDescription: this.i18n('erasure code profile'),
+        itemNames: [name],
         submitActionObservable: () =>
           this.taskWrapper.wrapTaskAroundCall({
             task: new FinishedTask('ecp/delete', { name: name }),
@@ -583,7 +579,7 @@ export class PoolFormComponent implements OnInit {
             externalFieldName: 'compression_mode',
             formControlName: 'mode',
             editable: true,
-            replaceFn: () => 'unset'
+            replaceFn: () => 'unset' // Is used if no compression is set
           },
           {
             externalFieldName: 'srcpool',

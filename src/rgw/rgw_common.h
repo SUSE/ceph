@@ -23,6 +23,7 @@
 #include <boost/utility/string_view.hpp>
 
 #include "common/ceph_crypto.h"
+#include "common/random_string.h"
 #include "rgw_acl.h"
 #include "rgw_cors.h"
 #include "rgw_iam_policy.h"
@@ -30,6 +31,8 @@
 #include "rgw_string.h"
 #include "common/async/yield_context.h"
 #include "rgw_website.h"
+#include "rgw_object_lock.h"
+#include "rgw_tag.h"
 #include "cls/version/cls_version_types.h"
 #include "cls/user/cls_user_types.h"
 #include "cls/rgw/cls_rgw_types.h"
@@ -79,6 +82,12 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_SLO_UINDICATOR RGW_ATTR_META_PREFIX "static-large-object"
 #define RGW_ATTR_X_ROBOTS_TAG	RGW_ATTR_PREFIX "x-robots-tag"
 #define RGW_ATTR_STORAGE_CLASS  RGW_ATTR_PREFIX "storage_class"
+
+/* S3 Object Lock*/
+#define RGW_ATTR_OBJECT_LOCK        RGW_ATTR_PREFIX "object-lock"
+#define RGW_ATTR_OBJECT_RETENTION   RGW_ATTR_PREFIX "object-retention"
+#define RGW_ATTR_OBJECT_LEGAL_HOLD  RGW_ATTR_PREFIX "object-legal-hold"
+
 
 #define RGW_ATTR_PG_VER 	RGW_ATTR_PREFIX "pg_ver"
 #define RGW_ATTR_SOURCE_ZONE    RGW_ATTR_PREFIX "source_zone"
@@ -139,6 +148,7 @@ using ceph::crypto::MD5;
 #define RGW_REST_S3             0x4
 #define RGW_REST_WEBSITE     0x8
 #define RGW_REST_STS            0x10
+#define RGW_REST_IAM            0x20
 
 #define RGW_SUSPENDED_USER_AUID (uint64_t)-2
 
@@ -208,6 +218,8 @@ using ceph::crypto::MD5;
 #define ERR_NO_SUCH_SUBUSER      2043
 #define ERR_MFA_REQUIRED         2044
 #define ERR_NO_SUCH_CORS_CONFIGURATION 2045
+#define ERR_NO_SUCH_OBJECT_LOCK_CONFIGURATION  2046
+#define ERR_INVALID_RETENTION_PERIOD 2047
 #define ERR_USER_SUSPENDED       2100
 #define ERR_INTERNAL_ERROR       2200
 #define ERR_NOT_IMPLEMENTED      2201
@@ -247,15 +259,6 @@ struct req_state;
 
 typedef void *RGWAccessHandle;
 
-/* size should be the required string size + 1 */
-int gen_rand_base64(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size);
-void gen_rand_alphanumeric_lower(CephContext *cct, string *str, int length);
-
 enum RGWIntentEvent {
   DEL_OBJ = 0,
   DEL_DIR = 1,
@@ -285,31 +288,35 @@ struct rgw_err {
 /* Helper class used for RGWHTTPArgs parsing */
 class NameVal
 {
-   string str;
-   string name;
-   string val;
+   const std::string str;
+   std::string name;
+   std::string val;
  public:
-    explicit NameVal(string nv) : str(nv) {}
+    explicit NameVal(const std::string& nv) : str(nv) {}
 
     int parse();
 
-    string& get_name() { return name; }
-    string& get_val() { return val; }
+    std::string& get_name() { return name; }
+    std::string& get_val() { return val; }
 };
 
 /** Stores the XML arguments associated with the HTTP request in req_state*/
 class RGWHTTPArgs {
-  string str, empty_str;
-  map<string, string> val_map;
-  map<string, string> sys_val_map;
-  map<string, string> sub_resources;
-  bool has_resp_modifier;
-  bool admin_subresource_added;
+  std::string str, empty_str;
+  std::map<std::string, std::string> val_map;
+  std::map<std::string, std::string> sys_val_map;
+  std::map<std::string, std::string> sub_resources;
+  bool has_resp_modifier = false;
+  bool admin_subresource_added = false;
  public:
-  RGWHTTPArgs() : has_resp_modifier(false), admin_subresource_added(false) {}
+  RGWHTTPArgs() = default;
+  explicit RGWHTTPArgs(const std::string& s) {
+      set(s);
+      parse();
+  }
 
   /** Set the arguments; as received */
-  void set(string s) {
+  void set(const std::string& s) {
     has_resp_modifier = false;
     val_map.clear();
     sub_resources.clear();
@@ -317,18 +324,18 @@ class RGWHTTPArgs {
   }
   /** parse the received arguments */
   int parse();
-  void append(const string& name, const string& val);
+  void append(const std::string& name, const string& val);
   /** Get the value for a specific argument parameter */
-  const string& get(const string& name, bool *exists = NULL) const;
+  const string& get(const std::string& name, bool *exists = NULL) const;
   boost::optional<const std::string&>
   get_optional(const std::string& name) const;
-  int get_bool(const string& name, bool *val, bool *exists);
+  int get_bool(const std::string& name, bool *val, bool *exists);
   int get_bool(const char *name, bool *val, bool *exists);
   void get_bool(const char *name, bool *val, bool def_val);
   int get_int(const char *name, int *val, int def_val);
 
   /** Get the value for specific system argument parameter */
-  std::string sys_get(const string& name, bool *exists = nullptr) const;
+  std::string sys_get(const std::string& name, bool *exists = nullptr) const;
 
   /** see if a parameter is contained in this RGWHTTPArgs */
   bool exists(const char *name) const {
@@ -337,7 +344,7 @@ class RGWHTTPArgs {
   bool sub_resource_exists(const char *name) const {
     return (sub_resources.find(name) != std::end(sub_resources));
   }
-  map<string, string>& get_params() {
+  std::map<std::string, std::string>& get_params() {
     return val_map;
   }
   const std::map<std::string, std::string>& get_sub_resources() const {
@@ -350,12 +357,12 @@ class RGWHTTPArgs {
     return has_resp_modifier;
   }
   void set_system() { /* make all system params visible */
-    map<string, string>::iterator iter;
+    std::map<std::string, std::string>::iterator iter;
     for (iter = sys_val_map.begin(); iter != sys_val_map.end(); ++iter) {
       val_map[iter->first] = iter->second;
     }
   }
-  const string& get_str() {
+  const std::string& get_str() {
     return str;
   }
 }; // RGWHTTPArgs
@@ -488,6 +495,12 @@ enum RGWOpType {
   RGW_OP_GET_USER_POLICY,
   RGW_OP_LIST_USER_POLICIES,
   RGW_OP_DELETE_USER_POLICY,
+  RGW_OP_PUT_BUCKET_OBJ_LOCK,
+  RGW_OP_GET_BUCKET_OBJ_LOCK,
+  RGW_OP_PUT_OBJ_RETENTION,
+  RGW_OP_GET_OBJ_RETENTION,
+  RGW_OP_PUT_OBJ_LEGAL_HOLD,
+  RGW_OP_GET_OBJ_LEGAL_HOLD,
   /* rgw specific */
   RGW_OP_ADMIN_SET_METADATA,
   RGW_OP_GET_OBJ_LAYOUT,
@@ -1300,10 +1313,7 @@ struct RGWObjVersionTracker {
   void prepare_op_for_read(librados::ObjectReadOperation *op);
   void prepare_op_for_write(librados::ObjectWriteOperation *op);
 
-  void apply_write() {
-    read_version = write_version;
-    write_version = obj_version();
-  }
+  void apply_write();
 
   void clear() {
     read_version = obj_version();
@@ -1331,6 +1341,7 @@ enum RGWBucketFlags {
   BUCKET_VERSIONS_SUSPENDED = 0x4,
   BUCKET_DATASYNC_DISABLED = 0X8,
   BUCKET_MFA_ENABLED = 0X10,
+  BUCKET_OBJ_LOCK_ENABLED = 0X20,
 };
 
 enum RGWBucketIndexType {
@@ -1390,12 +1401,16 @@ struct RGWBucketInfo {
 
   map<string, uint32_t> mdsearch_config;
 
+
+
   /* resharding */
   uint8_t reshard_status;
   string new_bucket_instance_id;
 
+  RGWObjectLock obj_lock;
+
   void encode(bufferlist& bl) const {
-     ENCODE_START(19, 4, bl);
+     ENCODE_START(20, 4, bl);
      encode(bucket, bl);
      encode(owner.id, bl);
      encode(flags, bl);
@@ -1422,10 +1437,13 @@ struct RGWBucketInfo {
      encode(mdsearch_config, bl);
      encode(reshard_status, bl);
      encode(new_bucket_instance_id, bl);
+     if (obj_lock_enabled()) {
+       encode(obj_lock, bl);
+     }
      ENCODE_FINISH(bl);
   }
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN_32(19, 4, 4, bl);
+    DECODE_START_LEGACY_COMPAT_LEN_32(20, 4, 4, bl);
      decode(bucket, bl);
      if (struct_v >= 2) {
        string s;
@@ -1489,6 +1507,9 @@ struct RGWBucketInfo {
        decode(reshard_status, bl);
        decode(new_bucket_instance_id, bl);
      }
+     if (struct_v >= 20 && obj_lock_enabled()) {
+       decode(obj_lock, bl);
+     }
      DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -1501,6 +1522,7 @@ struct RGWBucketInfo {
   bool versioning_enabled() const { return (versioning_status() & (BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED)) == BUCKET_VERSIONED; }
   bool mfa_enabled() const { return (versioning_status() & BUCKET_MFA_ENABLED) != 0; }
   bool datasync_flag_enabled() const { return (flags & BUCKET_DATASYNC_DISABLED) == 0; }
+  bool obj_lock_enabled() const { return (flags & BUCKET_OBJ_LOCK_ENABLED) != 0; }
 
   bool has_swift_versioning() const {
     /* A bucket may be versioned through one mechanism only. */
@@ -1599,11 +1621,12 @@ namespace rgw {
   }
 }
 
+using meta_map_t = boost::container::flat_map <std::string, std::string>;
 
 struct req_info {
   const RGWEnv *env;
   RGWHTTPArgs args;
-  map<string, string> x_meta_map;
+  meta_map_t x_meta_map;
 
   string host;
   const char *method;
@@ -1636,6 +1659,33 @@ struct rgw_obj_key {
   rgw_obj_key(const rgw_obj_index_key& k) {
     parse_index_key(k.name, &name, &ns);
     instance = k.instance;
+  }
+
+// Since bucket index entries are stored in sequence, and the elements
+// with namespaces can be between those without, we need a way to skip
+// past namespaced elements; this returns a marker that will do so.
+//
+// Consider the following sequence: ASP, _BAT_cat, __DOG, _eel_FOX,
+// goat; the 2nd and 4th entries are namespaced, but the 3rd is not,
+// it's just an entry that begins with an underscore, which will be
+// quoted with another underscore putting it between two potential
+// namespaced blocks
+  static const rgw_obj_index_key& after_namespace_marker(const std::string& after) {
+    // this is just before "__", so will allow finding non-namespaced
+    // entries that begin with an underscore (and therefore are entered
+    // as starting with "__".
+    static const rgw_obj_index_key result1(std::string("_^") + char(255));
+
+    // this is just before entries that do not begin with an
+    // underscore and will allow skipping past the second namespace
+    // block
+    static const rgw_obj_index_key result2(std::string("_") + char(255));
+
+    if (after < result1.name) {
+      return result1;
+    } else {
+      return result2;
+    }
   }
 
   static void parse_index_key(const string& key, string *name, string *ns) {
@@ -1693,6 +1743,14 @@ struct rgw_obj_key {
 
   const string& get_instance() const {
     return instance;
+  }
+
+  void set_ns(const std::string& _ns) {
+    ns = _ns;
+  }
+
+  const std::string& get_ns() const {
+    return ns;
   }
 
   string get_index_key_name() const {
@@ -2050,6 +2108,8 @@ struct req_state : DoutPrefixProvider {
   string trans_id;
   uint64_t id;
 
+  RGWObjTags tagset;
+
   bool mfa_verified{false};
 
   /// optional coroutine context
@@ -2404,7 +2464,7 @@ static inline uint64_t rgw_rounded_objsize_kb(uint64_t bytes)
 /* implement combining step, S3 header canonicalization;  k is a
  * valid header and in lc form */
 static inline void add_amz_meta_header(
-  std::map<std::string, std::string>& x_meta_map,
+  meta_map_t& x_meta_map,
   const std::string& k,
   const std::string& v)
 {
@@ -2450,12 +2510,12 @@ rgw::IAM::Effect eval_user_policies(const vector<rgw::IAM::Policy>& user_policie
                           const rgw::IAM::Environment& env,
                           boost::optional<const rgw::auth::Identity&> id,
                           const uint64_t op,
-                          const rgw::IAM::ARN& arn);
+                          const rgw::ARN& arn);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
                             RGWAccessControlPolicy * const user_acl,
                             const vector<rgw::IAM::Policy>& user_policies,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       struct req_state * const s,
@@ -2463,7 +2523,7 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       const int perm);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       struct req_state * const s,
@@ -2509,6 +2569,9 @@ extern bool verify_object_permission_no_policy(
   int perm);
 extern bool verify_object_permission_no_policy(const DoutPrefixProvider* dpp, struct req_state *s,
 					       int perm);
+
+int verify_object_lock(const DoutPrefixProvider* dpp, const map<string, buffer::list>& attrs, const bool bypass_perm, const bool bypass_governance_mode);
+
 /** Convert an input URL into a sane object name
  * by converting %-escaped strings into characters, etc*/
 extern void rgw_uri_escape_char(char c, string& dst);

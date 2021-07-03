@@ -1,26 +1,13 @@
->=14.2.2
---------
+14.2.19
+-------
 
-* Nautilus-based librbd clients can now open images on Jewel clusters.
+* OSD: the option ``osd_fast_shutdown_notify_mon`` has been introduced to allow
+  the OSD to notify the monitor it is shutting down even if ``osd_fast_shutdown``
+  is enabled. This helps with the monitor logs on larger clusters, that may get
+  many 'osd.X reported immediately failed by osd.Y' messages, and confuse tools.
 
-* The RGW "num_rados_handles" has been removed.
-  If you were using a value of "num_rados_handles" greater than 1
-  multiply your current "objecter_inflight_ops" and
-  "objecter_inflight_op_bytes" paramaeters by the old
-  "num_rados_handles" to get the same throttle behavior.
+14.2.18
+-------
 
-14.2.2
-------
-
-* The no{up,down,in,out} related commands has been revamped.
-  There are now 2 ways to set the no{up,down,in,out} flags:
-  the old 'ceph osd [un]set <flag>' command, which sets cluster-wide flags;
-  and the new 'ceph osd [un]set-group <flags> <who>' command,
-  which sets flags in batch at the granularity of any crush node,
-  or device class.
-
-* RGW: radosgw-admin introduces two subcommands that allow the
-  managing of expire-stale objects that might be left behind after a
-  bucket reshard in earlier versions of RGW. One subcommand lists such
-  objects and the other deletes them. Read the troubleshooting section
-  of the dynamic resharding docs for details.
+* This release fixes issues loading the dashboard and volumes manager
+  modules in some environments.

@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -7,9 +7,9 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 
 #include <sstream>
@@ -34,6 +34,7 @@
 #include "include/ceph_assert.h"
 
 #include "mds/MDSAuthCaps.h"
+#include "mgr/MgrCap.h"
 #include "osd/OSDCap.h"
 
 #define dout_subsys ceph_subsys_mon
@@ -585,6 +586,7 @@ bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
   bool start = false;
   bool finished = false;
   EntityName entity_name;
+  bool is_new_global_id = false;
 
   // set up handler?
   if (m->protocol == 0 && !s->auth_handler) {
@@ -704,23 +706,23 @@ bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
       ceph_assert(!paxos_writable);
       return false;
     }
+    is_new_global_id = true;
   }
 
   try {
     if (start) {
       // new session
       ret = s->auth_handler->start_session(entity_name,
-					   0, // no connection_secret needed
+					   s->con->peer_global_id,
+					   is_new_global_id,
 					   &response_bl,
-					   &s->con->peer_caps_info,
-					   nullptr, nullptr);
+					   &s->con->peer_caps_info);
     } else {
       // request
       ret = s->auth_handler->handle_request(
 	indata,
 	0, // no connection_secret needed
 	&response_bl,
-	&s->con->peer_global_id,
 	&s->con->peer_caps_info,
 	nullptr, nullptr);
     }
@@ -1240,9 +1242,14 @@ bool AuthMonitor::valid_caps(
     const string& caps,
     ostream *out)
 {
-  if (type == "mon" || type == "mgr") {
-    MonCap tmp;
-    if (!tmp.parse(caps, out)) {
+  if (type == "mon") {
+    MonCap moncap;
+    if (!moncap.parse(caps, out)) {
+      return false;
+    }
+  } else if (type == "mgr") {
+    MgrCap mgrcap;
+    if (!mgrcap.parse(caps, out)) {
       return false;
     }
   } else if (type == "osd") {

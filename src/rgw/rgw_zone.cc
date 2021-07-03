@@ -1097,7 +1097,7 @@ int RGWPeriod::update_latest_epoch(epoch_t epoch)
       return r;
     } else if (epoch <= info.epoch) {
       r = -EEXIST; // fail with EEXIST if epoch is not newer
-      ldout(cct, 1) << "found existing latest_epoch " << info.epoch
+      ldout(cct, 10) << "found existing latest_epoch " << info.epoch
           << " >= given epoch " << epoch << ", returning r=" << r << dendl;
       return r;
     } else {
@@ -1759,7 +1759,7 @@ const string& RGWZoneParams::get_compression_type(const rgw_placement_rule& plac
   if (p == placement_pools.end()) {
     return NONE;
   }
-  const auto& type = p->second.get_compression_type(placement_rule.storage_class);
+  const auto& type = p->second.get_compression_type(placement_rule.get_storage_class());
   return !type.empty() ? type : NONE;
 }
 

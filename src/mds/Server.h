@@ -76,6 +76,7 @@ enum {
   l_mdss_req_symlink_latency,
   l_mdss_req_unlink_latency,
   l_mdss_cap_revoke_eviction,
+  l_mdss_cap_acquisition_throttle,
   l_mdss_last,
 };
 
@@ -105,7 +106,9 @@ private:
   feature_bitset_t supported_features;
   feature_bitset_t required_client_features;
 
+  bool replay_unsafe_with_closed_session = false;
   double cap_revoke_eviction_timeout = 0;
+  uint64_t max_snaps_per_dir = 100;
 
   friend class MDSContinuation;
   friend class ServerContext;
@@ -169,12 +172,14 @@ public:
   void reconnect_tick();
   void recover_filelocks(CInode *in, bufferlist locks, int64_t client);
 
-  enum RecallFlags {
+  enum class RecallFlags : uint64_t {
     NONE = 0,
     STEADY = (1<<0),
     ENFORCE_MAX = (1<<1),
+    TRIM = (1<<2),
+    ENFORCE_LIVENESS = (1<<3),
   };
-  std::pair<bool, uint64_t> recall_client_state(MDSGatherBuilder* gather, enum RecallFlags=RecallFlags::NONE);
+  std::pair<bool, uint64_t> recall_client_state(MDSGatherBuilder* gather, RecallFlags=RecallFlags::NONE);
   void force_clients_readonly();
 
   // -- requests --
@@ -270,7 +275,7 @@ public:
 
   // link
   void handle_client_link(MDRequestRef& mdr);
-  void _link_local(MDRequestRef& mdr, CDentry *dn, CInode *targeti);
+  void _link_local(MDRequestRef& mdr, CDentry *dn, CInode *targeti, SnapRealm *target_realm);
   void _link_local_finish(MDRequestRef& mdr, CDentry *dn, CInode *targeti,
 			  version_t, version_t, bool);
 
@@ -343,15 +348,37 @@ public:
 			       bool finish_mdr);
 
   void evict_cap_revoke_non_responders();
-  void handle_conf_change(const ConfigProxy& conf,
-                          const std::set <std::string> &changed);
+  void handle_conf_change(const std::set<std::string>& changed);
 
 private:
   void reply_client_request(MDRequestRef& mdr, const MClientReply::ref &reply);
-  void flush_session(Session *session, MDSGatherBuilder *gather);
+  void flush_session(Session *session, MDSGatherBuilder& gather);
 
   DecayCounter recall_throttle;
   time last_recall_state;
+
+  // Cache cap acquisition throttle configs
+  uint64_t max_caps_per_client;
+  uint64_t cap_acquisition_throttle;
+  double max_caps_throttle_ratio;
+  double caps_throttle_retry_request_timeout;
 };
+
+static inline constexpr auto operator|(Server::RecallFlags a, Server::RecallFlags b) {
+  using T = std::underlying_type<Server::RecallFlags>::type;
+  return static_cast<Server::RecallFlags>(static_cast<T>(a) | static_cast<T>(b));
+}
+static inline constexpr auto operator&(Server::RecallFlags a, Server::RecallFlags b) {
+  using T = std::underlying_type<Server::RecallFlags>::type;
+  return static_cast<Server::RecallFlags>(static_cast<T>(a) & static_cast<T>(b));
+}
+static inline std::ostream& operator<<(std::ostream& os, const Server::RecallFlags& f) {
+  using T = std::underlying_type<Server::RecallFlags>::type;
+  return os << "0x" << std::hex << static_cast<T>(f) << std::dec;
+}
+static inline constexpr bool operator!(const Server::RecallFlags& f) {
+  using T = std::underlying_type<Server::RecallFlags>::type;
+  return static_cast<T>(f) == static_cast<T>(0);
+}
 
 #endif

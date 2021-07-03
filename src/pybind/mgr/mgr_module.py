@@ -5,6 +5,7 @@ try:
 except ImportError:
     # just for type checking
     pass
+import errno
 import logging
 import json
 import six
@@ -14,6 +15,9 @@ import rados
 import re
 import time
 
+ERROR_MSG_EMPTY_INPUT_FILE = 'Empty content: please add a password/secret to the file.'
+ERROR_MSG_NO_INPUT_FILE = 'Please specify the file containing the password/secret with "-i" option.'
+# Full list of strings in "osd_types.cc:pg_state_string()"
 PG_STATES = [
     "active",
     "clean",
@@ -44,7 +48,10 @@ PG_STATES = [
     "snaptrim_wait",
     "snaptrim_error",
     "creating",
-    "unknown"]
+    "unknown",
+    "premerge",
+    "failed_repair",
+]
 
 
 class CPlusPlusHandler(logging.Handler):
@@ -159,6 +166,9 @@ class HandleCommandResult(namedtuple('HandleCommandResult', ['retval', 'stdout',
         :type stderr: str
         """
         return super(HandleCommandResult, cls).__new__(cls, retval, stdout, stderr)
+
+
+class MonCommandFailed(RuntimeError): pass
 
 
 class OSDMap(ceph_module.BasePyOSDMap):
@@ -384,6 +394,19 @@ def CLIWriteCommand(prefix, args="", desc=""):
     return CLICommand(prefix, args, desc, "w")
 
 
+def CLICheckNonemptyFileInput(func):
+    def check(*args, **kwargs):
+        if not 'inbuf' in kwargs:
+            return -errno.EINVAL, '', ERROR_MSG_NO_INPUT_FILE
+        if isinstance(kwargs['inbuf'], str):
+            # Delete new line separator at EOF (it may have been added by a text editor).
+            kwargs['inbuf'] = kwargs['inbuf'].rstrip('\r\n').rstrip('\n')
+        if not kwargs['inbuf']:
+            return -errno.EINVAL, '', ERROR_MSG_EMPTY_INPUT_FILE
+        return func(*args, **kwargs)
+    return check
+
+
 def _get_localized_key(prefix, key):
     return '{}/{}'.format(prefix, key)
 
@@ -412,6 +435,57 @@ class Option(dict):
         super(Option, self).__init__(
             (k, v) for k, v in vars().items()
             if k != 'self' and v is not None)
+
+class Command(dict):
+    """
+    Helper class to declare options for COMMANDS list.
+
+    It also allows to specify prefix and args separately, as well as storing a
+    handler callable.
+
+    Usage:
+    >>> Command(prefix="example",
+    ...         args="name=arg,type=CephInt",
+    ...         perm='w',
+    ...         desc="Blah")
+    {'poll': False, 'cmd': 'example name=arg,type=CephInt', 'perm': 'w', 'desc': 'Blah'}
+    """
+
+    def __init__(
+            self,
+            prefix,
+            args=None,
+            perm="rw",
+            desc=None,
+            poll=False,
+            handler=None
+    ):
+        super(Command, self).__init__(
+            cmd=prefix + (' ' + args if args else ''),
+            perm=perm,
+            desc=desc,
+            poll=poll)
+        self.prefix = prefix
+        self.args = args
+        self.handler = handler
+
+    def register(self, instance=False):
+        """
+        Register a CLICommand handler. It allows an instance to register bound
+        methods. In that case, the mgr instance is not passed, and it's expected
+        to be available in the class instance.
+        It also uses HandleCommandResult helper to return a wrapped a tuple of 3
+        items.
+        """
+        return CLICommand(
+            prefix=self.prefix,
+            args=self.args,
+            desc=self['desc'],
+            perm=self['perm']
+        )(
+            func=lambda mgr, *args, **kwargs: HandleCommandResult(*self.handler(
+                *((instance or mgr,) + args), **kwargs))
+        )
 
 
 class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
@@ -481,6 +555,14 @@ class MgrStandbyModule(ceph_module.BaseMgrStandbyModule):
         :return: Byte string or None
         """
         return self._ceph_get_store(key)
+
+    def get_localized_store(self, key, default=None):
+        r = self._ceph_get_store(_get_localized_key(self.get_mgr_id(), key))
+        if r is None:
+            r = self._ceph_get_store(key)
+            if r is None:
+                r = default
+        return r
 
     def get_active_uri(self):
         return self._ceph_get_active_uri()
@@ -584,6 +666,15 @@ class MgrModule(ceph_module.BaseMgrModule):
     def version(self):
         return self._version
 
+    @property
+    def release_name(self):
+        """
+        Get the release name of the Ceph version, e.g. 'nautilus' or 'octopus'.
+        :return: Returns the release name of the Ceph version in lower case.
+        :rtype: str
+        """
+        return self._ceph_get_release_name()
+
     def get_context(self):
         """
         :return: a Python capsule containing a C++ CephContext pointer
@@ -641,7 +732,8 @@ class MgrModule(ceph_module.BaseMgrModule):
         :param str data_name: Valid things to fetch are osd_crush_map_text,
                 osd_map, osd_map_tree, osd_map_crush, config, mon_map, fs_map,
                 osd_metadata, pg_summary, io_rate, pg_dump, df, osd_stats,
-                health, mon_status, devices, device <devid>.
+                health, mon_status, devices, device <devid>, pg_stats,
+                pool_stats, pg_ready, osd_ping_times.
 
         Note:
             All these structures have their own JSON representations: experiment
@@ -812,7 +904,7 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         return self._ceph_get_server(None)
 
-    def get_metadata(self, svc_type, svc_id):
+    def get_metadata(self, svc_type, svc_id, default=None):
         """
         Fetch the daemon metadata for a particular service.
 
@@ -825,7 +917,10 @@ class MgrModule(ceph_module.BaseMgrModule):
             calling this
         :rtype: dict, or None if no metadata found
         """
-        return self._ceph_get_metadata(svc_type, svc_id)
+        metadata = self._ceph_get_metadata(svc_type, svc_id)
+        if metadata is None:
+            return default
+        return metadata
 
     def get_daemon_status(self, svc_type, svc_id):
         """
@@ -840,7 +935,20 @@ class MgrModule(ceph_module.BaseMgrModule):
         """
         return self._ceph_get_daemon_status(svc_type, svc_id)
 
-    def mon_command(self, cmd_dict):
+    def check_mon_command(self, cmd_dict, inbuf=None):
+        """
+        Wrapper around :func:`~mgr_module.MgrModule.mon_command`, but raises,
+        if ``retval != 0``.
+        """
+
+        r = HandleCommandResult(*self.mon_command(cmd_dict, inbuf))
+        if r.retval:
+            raise MonCommandFailed(
+                '{} failed: {} retval: {}'.format(cmd_dict["prefix"], r.stderr, r.retval)
+            )
+        return r
+
+    def mon_command(self, cmd_dict, inbuf=None):
         """
         Helper for modules that do simple, synchronous mon command
         execution.
@@ -852,7 +960,7 @@ class MgrModule(ceph_module.BaseMgrModule):
 
         t1 = time.time()
         result = CommandResult()
-        self.send_command(result, "mon", "", json.dumps(cmd_dict), "")
+        self.send_command(result, "mon", "", json.dumps(cmd_dict), "", inbuf)
         r = result.wait()
         t2 = time.time()
 
@@ -862,7 +970,14 @@ class MgrModule(ceph_module.BaseMgrModule):
 
         return r
 
-    def send_command(self, *args, **kwargs):
+    def send_command(
+            self,
+            result,
+            svc_type,
+            svc_id,
+            command,
+            tag,
+            inbuf=None):
         """
         Called by the plugin to send a command to the mon
         cluster.
@@ -882,8 +997,9 @@ class MgrModule(ceph_module.BaseMgrModule):
             completes, the ``notify()`` callback on the MgrModule instance is
             triggered, with notify_type set to "command", and notify_id set to
             the tag of the command.
+        :param str inbuf: input buffer for sending additional data.
         """
-        self._ceph_send_command(*args, **kwargs)
+        self._ceph_send_command(result, svc_type, svc_id, command, tag, inbuf)
 
     def set_health_checks(self, checks):
         """
@@ -1017,7 +1133,8 @@ class MgrModule(ceph_module.BaseMgrModule):
         return self._get_module_option(key, default, self.get_mgr_id())
 
     def _set_module_option(self, key, val):
-        return self._ceph_set_module_option(self.module_name, key, str(val))
+        return self._ceph_set_module_option(self.module_name, key,
+                                            None if val is None else str(val))
 
     def set_module_option(self, key, val):
         """
@@ -1316,6 +1433,17 @@ class MgrModule(ceph_module.BaseMgrModule):
         :param int query_id: query ID
         """
         return self._ceph_get_osd_perf_counters(query_id)
+
+    def is_authorized(self, arguments):
+        """
+        Verifies that the current session caps permit executing the py service
+        or current module with the provided arguments. This provides a generic
+        way to allow modules to restrict by more fine-grained controls (e.g.
+        pools).
+
+        :param arguments: dict of key/value arguments to test
+        """
+        return self._ceph_is_authorized(arguments)
 
 
 class PersistentStoreDict(object):

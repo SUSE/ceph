@@ -3,17 +3,18 @@
 # pylint: disable=too-many-statements,too-many-branches
 from __future__ import absolute_import
 
+import errno
 import math
 from functools import partial
 from datetime import datetime
 
 import cherrypy
 
-import rbd
+import rbd  # pylint: disable=import-error
 
 from . import ApiController, RESTController, Task, UpdatePermission, \
-              DeletePermission, CreatePermission, ReadPermission
-from .. import mgr
+              DeletePermission, CreatePermission, ReadPermission, allow_empty_body
+from .. import mgr, logger
 from ..security import Scope
 from ..services.ceph_service import CephService
 from ..services.rbd import RbdConfiguration, format_bitmask, format_features
@@ -105,7 +106,15 @@ class Rbd(RESTController):
         with rbd.Image(ioctx, image_name) as img:
             stat = img.stat()
             stat['name'] = image_name
-            stat['id'] = img.id()
+            if img.old_format():
+                stat['unique_id'] = '{}/{}'.format(pool_name, stat['block_name_prefix'])
+                stat['id'] = stat['unique_id']
+                stat['image_format'] = 1
+            else:
+                stat['unique_id'] = '{}/{}'.format(pool_name, img.id())
+                stat['id'] = img.id()
+                stat['image_format'] = 2
+
             stat['pool_name'] = pool_name
             features = img.features()
             stat['features'] = features
@@ -181,19 +190,39 @@ class Rbd(RESTController):
 
             return stat
 
+    # pylint: disable=inconsistent-return-statements
+    @classmethod
+    def _rbd_image_removing(cls, ioctx, pool_name, image_id):
+        rbd_inst = rbd.RBD()
+        img = rbd_inst.trash_get(ioctx, image_id)
+        img_spec = '{}/{}'.format(pool_name, image_id)
+
+        if img['source'] == 'REMOVING':
+            img['unique_id'] = img_spec
+            img['pool_name'] = pool_name
+            img['deletion_time'] = "{}Z".format(img['deletion_time'].isoformat())
+            img['deferment_end_time'] = "{}Z".format(img['deferment_end_time'].isoformat())
+            return img
+        raise rbd.ImageNotFound('No image {} in status `REMOVING` found.'.format(img_spec),
+                                errno=errno.ENOENT)
+
     @classmethod
     @ViewCache()
     def _rbd_pool_list(cls, pool_name):
         rbd_inst = rbd.RBD()
         with mgr.rados.open_ioctx(pool_name) as ioctx:
-            names = rbd_inst.list(ioctx)
+            image_refs = rbd_inst.list2(ioctx)
             result = []
-            for name in names:
+            for image_ref in image_refs:
                 try:
-                    stat = cls._rbd_image(ioctx, pool_name, name)
+                    stat = cls._rbd_image(ioctx, pool_name, image_ref['name'])
                 except rbd.ImageNotFound:
-                    # may have been removed in the meanwhile
-                    continue
+                    # Check if the RBD has been deleted partially. This happens for example if
+                    # the deletion process of the RBD has been started and was interrupted.
+                    try:
+                        stat = cls._rbd_image_removing(ioctx, pool_name, image_ref['id'])
+                    except rbd.ImageNotFound:
+                        continue
                 result.append(stat)
             return result
 
@@ -299,6 +328,7 @@ class Rbd(RESTController):
               'dest_pool_name': '{dest_pool_name}',
               'dest_image_name': '{dest_image_name}'}, 2.0)
     @RESTController.Resource('POST')
+    @allow_empty_body
     def copy(self, pool_name, image_name, dest_pool_name, dest_image_name,
              snapshot_name=None, obj_size=None, features=None, stripe_unit=None,
              stripe_count=None, data_pool=None, configuration=None):
@@ -328,6 +358,7 @@ class Rbd(RESTController):
     @RbdTask('flatten', ['{pool_name}', '{image_name}'], 2.0)
     @RESTController.Resource('POST')
     @UpdatePermission
+    @allow_empty_body
     def flatten(self, pool_name, image_name):
 
         def _flatten(ioctx, image):
@@ -342,6 +373,7 @@ class Rbd(RESTController):
 
     @RbdTask('trash/move', ['{pool_name}', '{image_name}'], 2.0)
     @RESTController.Resource('POST')
+    @allow_empty_body
     def move_trash(self, pool_name, image_name, delay=0):
         """Move an image to the trash.
         Images, even ones actively in-use by clones,
@@ -400,6 +432,7 @@ class RbdSnapshot(RESTController):
              ['{pool_name}', '{image_name}', '{snapshot_name}'], 5.0)
     @RESTController.Resource('POST')
     @UpdatePermission
+    @allow_empty_body
     def rollback(self, pool_name, image_name, snapshot_name):
         def _rollback(ioctx, img, snapshot_name):
             img.rollback_to_snap(snapshot_name)
@@ -412,6 +445,7 @@ class RbdSnapshot(RESTController):
               'child_pool_name': '{child_pool_name}',
               'child_image_name': '{child_image_name}'}, 2.0)
     @RESTController.Resource('POST')
+    @allow_empty_body
     def clone(self, pool_name, image_name, snapshot_name, child_pool_name,
               child_image_name, obj_size=None, features=None, stripe_unit=None, stripe_count=None,
               data_pool=None, configuration=None):
@@ -483,19 +517,23 @@ class RbdTrash(RESTController):
     @RbdTask('trash/purge', ['{pool_name}'], 2.0)
     @RESTController.Collection('POST', query_params=['pool_name'])
     @DeletePermission
+    @allow_empty_body
     def purge(self, pool_name=None):
         """Remove all expired images from trash."""
-        now = "{}Z".format(datetime.now().isoformat())
+        now = "{}Z".format(datetime.utcnow().isoformat())
         pools = self._trash_list(pool_name)
 
         for pool in pools:
             for image in pool['value']:
                 if image['deferment_end_time'] < now:
+                    logger.info('Removing trash image %s (pool=%s, name=%s)',
+                                image['id'], pool['pool_name'], image['name'])
                     _rbd_call(pool['pool_name'], self.rbd_inst.trash_remove, image['id'], 0)
 
     @RbdTask('trash/restore', ['{pool_name}', '{image_id}', '{new_image_name}'], 2.0)
     @RESTController.Resource('POST')
     @CreatePermission
+    @allow_empty_body
     def restore(self, pool_name, image_id, new_image_name):
         """Restore an image from trash."""
         return _rbd_call(pool_name, self.rbd_inst.trash_restore, image_id, new_image_name)

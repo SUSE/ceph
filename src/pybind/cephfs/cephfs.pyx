@@ -14,6 +14,7 @@ from datetime import datetime
 import errno
 import os
 import sys
+import time
 
 # Are we running Python 2.x
 if sys.version_info[0] < 3:
@@ -21,6 +22,24 @@ if sys.version_info[0] < 3:
 else:
     str_type = str
 
+AT_NO_ATTR_SYNC = 0x4000
+AT_SYMLINK_NOFOLLOW = 0x100
+cdef int AT_SYMLINK_NOFOLLOW_CDEF = AT_SYMLINK_NOFOLLOW
+CEPH_STATX_BASIC_STATS = 0x7ff
+cdef int CEPH_STATX_BASIC_STATS_CDEF = CEPH_STATX_BASIC_STATS
+CEPH_STATX_MODE = 0x1
+CEPH_STATX_NLINK = 0x2
+CEPH_STATX_UID = 0x4
+CEPH_STATX_GID = 0x8
+CEPH_STATX_RDEV = 0x10
+CEPH_STATX_ATIME = 0x20
+CEPH_STATX_MTIME = 0x40
+CEPH_STATX_CTIME = 0x80
+CEPH_STATX_INO = 0x100
+CEPH_STATX_SIZE = 0x200
+CEPH_STATX_BLOCKS = 0x400
+CEPH_STATX_BTIME = 0x800
+CEPH_STATX_VERSION = 0x1000
 
 cdef extern from "Python.h":
     # These are in cpython/string.pxd, but use "object" types instead of
@@ -49,13 +68,21 @@ cdef extern from "sys/statvfs.h":
         unsigned long int f_padding[32]
 
 
-cdef extern from "dirent.h":
-    cdef struct dirent:
-        long int d_ino
-        unsigned long int d_off
-        unsigned short int d_reclen
-        unsigned char d_type
-        char d_name[256]
+IF UNAME_SYSNAME == "FreeBSD":
+    cdef extern from "dirent.h":
+        cdef struct dirent:
+            long int d_ino
+            unsigned short int d_reclen
+            unsigned char d_type
+            char d_name[256]
+ELSE:
+    cdef extern from "dirent.h":
+        cdef struct dirent:
+            long int d_ino
+            unsigned long int d_off
+            unsigned short int d_reclen
+            unsigned char d_type
+            char d_name[256]
 
 
 cdef extern from "time.h":
@@ -69,7 +96,17 @@ cdef extern from "time.h":
 cdef extern from "sys/types.h":
     ctypedef unsigned long mode_t
 
-cdef extern from "cephfs/ceph_statx.h":
+cdef extern from "<utime.h>":
+    cdef struct utimbuf:
+        time_t actime
+        time_t modtime
+
+cdef extern from "sys/time.h":
+    cdef struct timeval:
+        long tv_sec
+        long tv_usec
+
+cdef extern from "cephfs/ceph_ll_client.h":
     cdef struct statx "ceph_statx":
         uint32_t    stx_mask
         uint32_t    stx_blksize
@@ -148,9 +185,18 @@ cdef extern from "cephfs/libcephfs.h" nogil:
     int ceph_fsync(ceph_mount_info *cmount, int fd, int syncdataonly)
     int ceph_conf_parse_argv(ceph_mount_info *cmount, int argc, const char **argv)
     int ceph_chmod(ceph_mount_info *cmount, const char *path, mode_t mode)
+    int ceph_lchmod(ceph_mount_info *cmount, const char *path, mode_t mode)
+    int ceph_chown(ceph_mount_info *cmount, const char *path, int uid, int gid)
+    int ceph_lchown(ceph_mount_info *cmount, const char *path, int uid, int gid)
     int64_t ceph_lseek(ceph_mount_info *cmount, int fd, int64_t offset, int whence)
     void ceph_buffer_free(char *buf)
     mode_t ceph_umask(ceph_mount_info *cmount, mode_t mode)
+    int ceph_utime(ceph_mount_info *cmount, const char *path, utimbuf *buf)
+    int ceph_futime(ceph_mount_info *cmount, int fd, utimbuf *buf)
+    int ceph_utimes(ceph_mount_info *cmount, const char *path, timeval times[2])
+    int ceph_lutimes(ceph_mount_info *cmount, const char *path, timeval times[2])
+    int ceph_futimes(ceph_mount_info *cmount, int fd, timeval times[2])
+    int ceph_futimens(ceph_mount_info *cmount, int fd, timespec times[2])
 
 
 class Error(Exception):
@@ -164,7 +210,7 @@ class OSError(Error):
         self.strerror = strerror
 
     def __str__(self):
-        return '[Errno {0}] {1}'.format(self.errno, self.strerror)
+        return '{0}: {1} [Errno {2}]'.format(self.strerror, os.strerror(self.errno), self.errno)
 
 
 class PermissionError(OSError):
@@ -211,6 +257,14 @@ class OutOfRange(OSError):
     pass
 
 
+class ObjectNotEmpty(OSError):
+    pass
+
+
+class DiskQuotaExceeded(OSError):
+    pass
+
+
 IF UNAME_SYSNAME == "FreeBSD":
     cdef errno_to_exception =  {
         errno.EPERM      : PermissionError,
@@ -223,6 +277,8 @@ IF UNAME_SYSNAME == "FreeBSD":
         errno.EOPNOTSUPP : OperationNotSupported,
         errno.ERANGE     : OutOfRange,
         errno.EWOULDBLOCK: WouldBlock,
+        errno.ENOTEMPTY  : ObjectNotEmpty,
+        errno.EDQUOT     : DiskQuotaExceeded,
     }
 ELSE:
     cdef errno_to_exception =  {
@@ -236,12 +292,14 @@ ELSE:
         errno.EOPNOTSUPP : OperationNotSupported,
         errno.ERANGE     : OutOfRange,
         errno.EWOULDBLOCK: WouldBlock,
+        errno.ENOTEMPTY  : ObjectNotEmpty,
+        errno.EDQUOT     : DiskQuotaExceeded,
     }
 
 
 cdef make_ex(ret, msg):
     """
-    Translate a librados return code into an exception.
+    Translate a libcephfs return code into an exception.
 
     :param ret: the return code
     :type ret: int
@@ -253,14 +311,14 @@ cdef make_ex(ret, msg):
     if ret in errno_to_exception:
         return errno_to_exception[ret](ret, msg)
     else:
-        return Error(ret, msg + (": error code %d" % ret))
+        return OSError(ret, msg)
 
 
 class DirEntry(namedtuple('DirEntry',
                ['d_ino', 'd_off', 'd_reclen', 'd_type', 'd_name'])):
     DT_DIR = 0x4
-    DT_REG = 0xA
-    DT_LNK = 0xC
+    DT_REG = 0x8
+    DT_LNK = 0xA
     def is_dir(self):
         return self.d_type == self.DT_DIR
 
@@ -310,11 +368,18 @@ cdef class DirResult(object):
         if not dirent:
             return None
 
-        return DirEntry(d_ino=dirent.d_ino,
-                        d_off=dirent.d_off,
-                        d_reclen=dirent.d_reclen,
-                        d_type=dirent.d_type,
-                        d_name=dirent.d_name)
+        IF UNAME_SYSNAME == "FreeBSD":
+            return DirEntry(d_ino=dirent.d_ino,
+                            d_off=0,
+                            d_reclen=dirent.d_reclen,
+                            d_type=dirent.d_type,
+                            d_name=dirent.d_name)
+        ELSE:
+             return DirEntry(d_ino=dirent.d_ino,
+                            d_off=dirent.d_off,
+                            d_reclen=dirent.d_reclen,
+                            d_type=dirent.d_type,
+                            d_name=dirent.d_name)
 
     def close(self):
         if self.handle:
@@ -364,6 +429,21 @@ def decode_cstr(val, encoding="utf-8"):
 
     return val.decode(encoding)
 
+cdef timeval to_timeval(t):
+    """
+    return timeval equivalent from time
+    """
+    tt = int(t)
+    cdef timeval buf = timeval(tt, (t - tt) * 1000000)
+    return buf
+
+cdef timespec to_timespec(t):
+    """
+    return timespec equivalent from time
+    """
+    tt = int(t)
+    cdef timespec buf = timespec(tt, (t - tt) * 1000000000)
+    return buf
 
 cdef char* opt_str(s) except? NULL:
     if s is None:
@@ -375,7 +455,7 @@ cdef char ** to_bytes_array(list_bytes):
     cdef char **ret = <char **>malloc(len(list_bytes) * sizeof(char *))
     if ret == NULL:
         raise MemoryError("malloc failed")
-    for i in xrange(len(list_bytes)):
+    for i in range(len(list_bytes)):
         ret[i] = <char *>list_bytes[i]
     return ret
 
@@ -426,13 +506,18 @@ cdef class LibCephFS(object):
             raise Error("libcephfs_initialize failed with error code: %d" % ret)
         self.state = "configuring"
 
-    def create(self, conf=None, conffile=None, auth_id=None):
+    NO_CONF_FILE = -1
+    "special value that indicates no conffile should be read when creating a mount handle"
+    DEFAULT_CONF_FILES = -2
+    "special value that indicates the default conffiles should be read when creating a mount handle"
+
+    def create(self, conf=None, conffile=NO_CONF_FILE, auth_id=None):
         """
         Create a mount handle for interacting with Ceph.  All libcephfs
         functions operate on a mount info handle.
         
         :param conf dict opt: settings overriding the default ones and conffile
-        :param conffile str opt: the path to ceph.conf to override the default settings
+        :param conffile Union[int,str], optional: the path to ceph.conf to override the default settings
         :auth_id str opt: the id used to authenticate the client entity
         """
         if conf is not None and not isinstance(conf, dict):
@@ -450,10 +535,11 @@ cdef class LibCephFS(object):
             raise Error("libcephfs_initialize failed with error code: %d" % ret)
 
         self.state = "configuring"
-        if conffile is not None:
-            # read the default conf file when '' is given
-            if conffile == '':
-                conffile = None
+        if conffile in (self.NO_CONF_FILE, None):
+            pass
+        elif conffile in (self.DEFAULT_CONF_FILES, ''):
+            self.conf_read_file(None)
+        else:
             self.conf_read_file(conffile)
         if conf is not None:
             for key, value in conf.iteritems():
@@ -798,7 +884,7 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_mkdir(self.cluster, _path, _mode)
         if ret < 0:
-            raise make_ex(ret, "error in mkdir '%s'" % path)
+            raise make_ex(ret, "error in mkdir {}".format(path.decode('utf-8')))
 
     def chmod(self, path, mode) :
         """
@@ -817,7 +903,65 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_chmod(self.cluster, _path, _mode)
         if ret < 0:
-            raise make_ex(ret, "error in chmod '%s'" % path)
+            raise make_ex(ret, "error in chmod {}".format(path.decode('utf-8')))
+
+    def lchmod(self, path, mode) -> None:
+        """
+        Change file mode. If the path is a symbolic link, it won't be dereferenced.
+
+        :param path: the path of the file. This must be either an absolute path or
+                     a relative path off of the current working directory.
+        :param mode: the permissions to be set .
+        """
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+        if not isinstance(mode, int):
+            raise TypeError('mode must be an int')
+        cdef:
+            char* _path = path
+            int _mode = mode
+        with nogil:
+            ret = ceph_lchmod(self.cluster, _path, _mode)
+        if ret < 0:
+            raise make_ex(ret, "error in chmod {}".format(path.decode('utf-8')))
+
+    def chown(self, path, uid, gid, follow_symlink=True):
+        """
+        Change directory ownership
+        :param path: the path of the directory to change.
+        :param uid: the uid to set
+        :param gid: the gid to set
+        :param follow_symlink: perform the operation on the target file if @path
+                               is a symbolic link (default)
+        """
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+        if not isinstance(uid, int):
+            raise TypeError('uid must be an int')
+        elif not isinstance(gid, int):
+            raise TypeError('gid must be an int')
+
+        cdef:
+            char* _path = path
+            int _uid = uid
+            int _gid = gid
+        if follow_symlink:
+            with nogil:
+                ret = ceph_chown(self.cluster, _path, _uid, _gid)
+        else:
+            with nogil:
+                ret = ceph_lchown(self.cluster, _path, _uid, _gid)
+        if ret < 0:
+            raise make_ex(ret, "error in chown {}".format(path.decode('utf-8')))
+
+    def lchown(self, path, uid, gid):
+        """
+        Change ownership of a symbolic link
+        :param path: the path of the symbolic link to change.
+        :param uid: the uid to set
+        :param gid: the gid to set
+        """
+        self.chown(path, uid, gid, follow_symlink=False)
 
     def mkdirs(self, path, mode):
         """
@@ -838,7 +982,7 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_mkdirs(self.cluster, _path, _mode)
         if ret < 0:
-            raise make_ex(ret, "error in mkdirs '%s'" % path)
+            raise make_ex(ret, "error in mkdirs {}".format(path.decode('utf-8')))
 
     def rmdir(self, path):
         """
@@ -851,7 +995,7 @@ cdef class LibCephFS(object):
         cdef char* _path = path
         ret = ceph_rmdir(self.cluster, _path)
         if ret < 0:
-            raise make_ex(ret, "error in rmdir '%s'" % path)
+            raise make_ex(ret, "error in rmdir {}".format(path.decode('utf-8')))
 
     def open(self, path, flags, mode=0):
         """
@@ -906,7 +1050,7 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_open(self.cluster, _path, _flags, _mode)
         if ret < 0:
-            raise make_ex(ret, "error in open '%s'" % path)
+            raise make_ex(ret, "error in open {}".format(path.decode('utf-8')))
         return ret
 
     def close(self, fd):
@@ -1087,7 +1231,7 @@ cdef class LibCephFS(object):
             raise make_ex(ret, "error in setxattr")
 
 
-    def stat(self, path):
+    def stat(self, path, follow_symlink=True):
         """
         Get a file's extended statistics and attributes.
         
@@ -1100,11 +1244,17 @@ cdef class LibCephFS(object):
             char* _path = path
             statx stx
 
-        with nogil:
-            # FIXME: replace magic number with CEPH_STATX_BASIC_STATS
-            ret = ceph_statx(self.cluster, _path, &stx, 0x7ffu, 0)
+        if follow_symlink:
+            with nogil:
+                ret = ceph_statx(self.cluster, _path, &stx,
+                                 CEPH_STATX_BASIC_STATS_CDEF, 0)
+        else:
+            with nogil:
+                ret = ceph_statx(self.cluster, _path, &stx,
+                                 CEPH_STATX_BASIC_STATS_CDEF, AT_SYMLINK_NOFOLLOW_CDEF)
+
         if ret < 0:
-            raise make_ex(ret, "error in stat: %s" % path)
+            raise make_ex(ret, "error in stat: {}".format(path.decode('utf-8')))
         return StatResult(st_dev=stx.stx_dev, st_ino=stx.stx_ino,
                           st_mode=stx.stx_mode, st_nlink=stx.stx_nlink,
                           st_uid=stx.stx_uid, st_gid=stx.stx_gid,
@@ -1114,6 +1264,16 @@ cdef class LibCephFS(object):
                           st_atime=datetime.fromtimestamp(stx.stx_atime.tv_sec),
                           st_mtime=datetime.fromtimestamp(stx.stx_mtime.tv_sec),
                           st_ctime=datetime.fromtimestamp(stx.stx_ctime.tv_sec))
+
+    def lstat(self, path):
+        """
+        Get a file's extended statistics and attributes. When file's a
+        symbolic link, return the informaion of the link itself rather
+        than that of the file it points too.
+
+        :param path: the file or directory to get the statistics of.
+        """
+        return self.stat(path, follow_symlink=False)
 
     def fstat(self, fd):
         """
@@ -1130,8 +1290,8 @@ cdef class LibCephFS(object):
             statx stx
 
         with nogil:
-            # FIXME: replace magic number with CEPH_STATX_BASIC_STATS
-            ret = ceph_fstatx(self.cluster, _fd, &stx, 0x7ffu, 0)
+            ret = ceph_fstatx(self.cluster, _fd, &stx,
+                              CEPH_STATX_BASIC_STATS_CDEF, 0)
         if ret < 0:
             raise make_ex(ret, "error in fsat")
         return StatResult(st_dev=stx.stx_dev, st_ino=stx.stx_ino,
@@ -1143,6 +1303,63 @@ cdef class LibCephFS(object):
                           st_atime=datetime.fromtimestamp(stx.stx_atime.tv_sec),
                           st_mtime=datetime.fromtimestamp(stx.stx_mtime.tv_sec),
                           st_ctime=datetime.fromtimestamp(stx.stx_ctime.tv_sec))
+    
+    def statx(self, path, mask, flag):
+        """
+        Get a file's extended statistics and attributes.
+
+        :param path: the file or directory to get the statistics of.
+        :param mask: want bitfield of CEPH_STATX_* flags showing designed attributes.
+        :param flag: bitfield that can be used to set AT_* modifier flags (only AT_NO_ATTR_SYNC and AT_SYMLINK_NOFOLLOW)
+        """
+
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+        if not isinstance(mask, int):
+            raise TypeError('flag must be a int')
+        if not isinstance(flag, int):
+            raise TypeError('flag must be a int')
+
+        cdef:
+            char* _path = path
+            statx stx
+            int _mask = mask
+            int _flag = flag
+            dict_result = dict()
+
+        with nogil:
+            ret = ceph_statx(self.cluster, _path, &stx, _mask, _flag)
+        if ret < 0:
+            raise make_ex(ret, "error in stat: %s" % path)
+
+        if (_mask & CEPH_STATX_MODE):
+            dict_result["mode"] = stx.stx_mode
+        if (_mask & CEPH_STATX_NLINK):
+            dict_result["nlink"] = stx.stx_nlink
+        if (_mask & CEPH_STATX_UID):
+            dict_result["uid"] = stx.stx_uid
+        if (_mask & CEPH_STATX_GID):
+            dict_result["gid"] = stx.stx_gid
+        if (_mask & CEPH_STATX_RDEV):
+            dict_result["rdev"] = stx.stx_rdev
+        if (_mask & CEPH_STATX_ATIME):
+            dict_result["atime"] = datetime.fromtimestamp(stx.stx_atime.tv_sec)
+        if (_mask & CEPH_STATX_MTIME):
+            dict_result["mtime"] = datetime.fromtimestamp(stx.stx_mtime.tv_sec)
+        if (_mask & CEPH_STATX_CTIME):
+            dict_result["ctime"] = datetime.fromtimestamp(stx.stx_ctime.tv_sec)
+        if (_mask & CEPH_STATX_INO):
+            dict_result["ino"] = stx.stx_ino
+        if (_mask & CEPH_STATX_SIZE):
+            dict_result["size"] = stx.stx_size
+        if (_mask & CEPH_STATX_BLOCKS):
+            dict_result["blocks"] = stx.stx_blocks
+        if (_mask & CEPH_STATX_BTIME):
+            dict_result["btime"] = datetime.fromtimestamp(stx.stx_btime.tv_sec)
+        if (_mask & CEPH_STATX_VERSION):
+            dict_result["version"] = stx.stx_version
+
+        return dict_result
 
     def symlink(self, existing, newname):
         """
@@ -1205,7 +1422,7 @@ cdef class LibCephFS(object):
                 ret = ceph_readlink(self.cluster, _path, buf, _size)
             if ret < 0:
                 raise make_ex(ret, "error in readlink")
-            return buf
+            return buf[:ret]
         finally:
             free(buf)
 
@@ -1222,7 +1439,7 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_unlink(self.cluster, _path)
         if ret < 0:
-            raise make_ex(ret, "error in unlink: %s" % path)
+            raise make_ex(ret, "error in unlink: {}".format(path.decode('utf-8')))
 
     def rename(self, src, dst):
         """
@@ -1244,7 +1461,8 @@ cdef class LibCephFS(object):
         with nogil:
             ret = ceph_rename(self.cluster, _src, _dst)
         if ret < 0:
-            raise make_ex(ret, "error in rename '%s' to '%s'" % (src, dst))
+            raise make_ex(ret, "error in rename {} to {}".format(src.decode(
+                          'utf-8'), dst.decode('utf-8')))
 
     def mds_command(self, mds_spec, args, input_data):
         """
@@ -1323,3 +1541,172 @@ cdef class LibCephFS(object):
             raise make_ex(ret, "error in lseek")
 
         return ret      
+
+    def utime(self, path, times=None):
+        """
+        Set access and modification time for path
+
+        :param path: file path for which timestamps have to be changed
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        """
+
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+        if times:
+            if not isinstance(times, tuple):
+                raise TypeError('times must be a tuple')
+            if not isinstance(times[0], int):
+                raise TypeError('atime must be an int')
+            if not isinstance(times[1], int):
+                raise TypeError('mtime must be an int')
+        actime = modtime = int(time.time())
+        if times:
+            actime = times[0]
+            modtime = times[1]
+
+        cdef:
+            char *pth = path
+            utimbuf buf = utimbuf(actime, modtime)
+        with nogil:
+            ret = ceph_utime(self.cluster, pth, &buf)
+        if ret < 0:
+            raise make_ex(ret, "error in utime {}".format(path.decode('utf-8')))
+
+    def futime(self, fd, times=None):
+        """
+        Set access and modification time for a file pointed by descriptor
+
+        :param fd: file descriptor of the open file
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        """
+
+        self.require_state("mounted")
+        if not isinstance(fd, int):
+            raise TypeError('fd must be an int')
+        if times:
+            if not isinstance(times, tuple):
+                raise TypeError('times must be a tuple')
+            if not isinstance(times[0], int):
+                raise TypeError('atime must be an int')
+            if not isinstance(times[1], int):
+                raise TypeError('mtime must be an int')
+        actime = modtime = int(time.time())
+        if times:
+            actime = times[0]
+            modtime = times[1]
+
+        cdef:
+            int _fd = fd
+            utimbuf buf = utimbuf(actime, modtime)
+        with nogil:
+            ret = ceph_futime(self.cluster, _fd, &buf)
+        if ret < 0:
+            raise make_ex(ret, "error in futime")
+
+    def utimes(self, path, times=None, follow_symlink=True):
+        """
+        Set access and modification time for path
+
+        :param path: file path for which timestamps have to be changed
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        :param follow_symlink: perform the operation on the target file if @path
+                               is a symbolic link (default)
+        """
+
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+        if times:
+            if not isinstance(times, tuple):
+                raise TypeError('times must be a tuple')
+            if not isinstance(times[0], (int, float)):
+                raise TypeError('atime must be an int or a float')
+            if not isinstance(times[1], (int, float)):
+                raise TypeError('mtime must be an int or a float')
+        actime = modtime = time.time()
+        if times:
+            actime = float(times[0])
+            modtime = float(times[1])
+
+        cdef:
+            char *pth = path
+            timeval *buf = [to_timeval(actime), to_timeval(modtime)]
+        if follow_symlink:
+            with nogil:
+                ret = ceph_utimes(self.cluster, pth, buf)
+        else:
+            with nogil:
+                ret = ceph_lutimes(self.cluster, pth, buf)
+        if ret < 0:
+            raise make_ex(ret, "error in utimes {}".format(path.decode('utf-8')))
+
+    def lutimes(self, path, times=None):
+        """
+        Set access and modification time for a file. If the file is a symbolic
+        link do not follow to the target.
+
+        :param path: file path for which timestamps have to be changed
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        """
+        self.utimes(path, times=times, follow_symlink=False)
+
+    def futimes(self, fd, times=None):
+        """
+        Set access and modification time for a file pointer by descriptor
+
+        :param fd: file descriptor of the open file
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        """
+
+        self.require_state("mounted")
+        if not isinstance(fd, int):
+            raise TypeError('fd must be an int')
+        if times:
+            if not isinstance(times, tuple):
+                raise TypeError('times must be a tuple')
+            if not isinstance(times[0], (int, float)):
+                raise TypeError('atime must be an int or a float')
+            if not isinstance(times[1], (int, float)):
+                raise TypeError('mtime must be an int or a float')
+        actime = modtime = time.time()
+        if times:
+            actime = float(times[0])
+            modtime = float(times[1])
+
+        cdef:
+            int _fd = fd
+            timeval *buf = [to_timeval(actime), to_timeval(modtime)]
+        with nogil:
+                ret = ceph_futimes(self.cluster, _fd, buf)
+        if ret < 0:
+            raise make_ex(ret, "error in futimes")
+
+    def futimens(self, fd, times=None):
+        """
+        Set access and modification time for a file pointer by descriptor
+
+        :param fd: file descriptor of the open file
+        :param times: if times is not None, it must be a tuple (atime, mtime)
+        """
+
+        self.require_state("mounted")
+        if not isinstance(fd, int):
+            raise TypeError('fd must be an int')
+        if times:
+            if not isinstance(times, tuple):
+                raise TypeError('times must be a tuple')
+            if not isinstance(times[0], (int, float)):
+                raise TypeError('atime must be an int or a float')
+            if not isinstance(times[1], (int, float)):
+                raise TypeError('mtime must be an int or a float')
+        actime = modtime = time.time()
+        if times:
+            actime = float(times[0])
+            modtime = float(times[1])
+
+        cdef:
+            int _fd = fd
+            timespec *buf = [to_timespec(actime), to_timespec(modtime)]
+        with nogil:
+                ret = ceph_futimens(self.cluster, _fd, buf)
+        if ret < 0:
+            raise make_ex(ret, "error in futimens")

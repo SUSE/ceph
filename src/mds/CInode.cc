@@ -544,18 +544,20 @@ void CInode::record_snaprealm_past_parent(sr_t *new_snap, SnapRealm *newparent)
   }
 }
 
-void CInode::record_snaprealm_parent_dentry(sr_t *new_snap, SnapRealm *newparent,
+void CInode::record_snaprealm_parent_dentry(sr_t *new_snap, SnapRealm *oldparent,
 					    CDentry *dn, bool primary_dn)
 {
   ceph_assert(new_snap->is_parent_global());
-  SnapRealm *oldparent = dn->get_dir()->inode->find_snaprealm();
+
+  if (!oldparent)
+    oldparent = dn->get_dir()->inode->find_snaprealm();
   auto& snaps = oldparent->get_snaps();
 
   if (!primary_dn) {
     auto p = snaps.lower_bound(dn->first);
     if (p != snaps.end())
       new_snap->past_parent_snaps.insert(p, snaps.end());
-  } else if (newparent != oldparent) {
+  } else {
     // 'last_destroyed' is used as 'current_parent_since'
     auto p = snaps.lower_bound(new_snap->last_destroyed);
     if (p != snaps.end())
@@ -1479,7 +1481,7 @@ void InodeStoreBase::decode_bare(bufferlist::const_iterator &bl,
     symlink = std::string_view(tmp);
   }
   decode(dirfragtree, bl);
-  decode(xattrs, bl);
+  decode_noshare(xattrs, bl);
   decode(snap_blob, bl);
 
   decode(old_inodes, bl);
@@ -2817,7 +2819,8 @@ void CInode::decode_snap_blob(const bufferlist& snapbl)
       }
     }
     dout(20) << __func__ << " " << *snaprealm << dendl;
-  } else if (snaprealm) {
+  } else if (snaprealm &&
+	     !is_root() && !is_mdsdir()) { // see https://tracker.ceph.com/issues/42675
     ceph_assert(mdcache->mds->is_any_replay());
     snaprealm->merge_to(NULL);
   }
@@ -2930,9 +2933,12 @@ void CInode::choose_lock_state(SimpleLock *lock, int allissued)
     } else if (lock->get_state() != LOCK_MIX) {
       if (issued & (CEPH_CAP_GEXCL | CEPH_CAP_GBUFFER))
 	lock->set_state(LOCK_EXCL);
-      else if (issued & CEPH_CAP_GWR)
-	lock->set_state(LOCK_MIX);
-      else if (lock->is_dirty()) {
+      else if (issued & CEPH_CAP_GWR) {
+        if (issued & (CEPH_CAP_GCACHE | CEPH_CAP_GSHARED))
+          lock->set_state(LOCK_EXCL);
+        else
+          lock->set_state(LOCK_MIX);
+      } else if (lock->is_dirty()) {
 	if (is_replicated())
 	  lock->set_state(LOCK_MIX);
 	else
@@ -3794,7 +3800,7 @@ void CInode::_decode_base(bufferlist::const_iterator& p)
     symlink = std::string_view(tmp);
   }
   decode(dirfragtree, p);
-  decode(xattrs, p);
+  decode_noshare(xattrs, p);
   decode(old_inodes, p);
   decode(damage_flags, p);
   decode_snap(p);
@@ -4195,7 +4201,11 @@ void CInode::validate_disk_state(CInode::validated_data *results,
       dout(20) << "ondisk_read_retval: " << results->backtrace.ondisk_read_retval << dendl;
       if (results->backtrace.ondisk_read_retval != 0) {
         results->backtrace.error_str << "failed to read off disk; see retval";
-	goto next;
+        // we probably have a new unwritten file!
+        // so skip the backtrace scrub for this entry and say that all's well
+        if (in->is_dirty_parent())
+          results->backtrace.passed = true;
+        goto next;
       }
 
       // extract the backtrace, and compare it to a newly-constructed one
@@ -4213,6 +4223,11 @@ void CInode::validate_disk_state(CInode::validated_data *results,
         }
         results->backtrace.error_str << "failed to decode on-disk backtrace ("
                                      << bl.length() << " bytes)!";
+        // we probably have a new unwritten file!
+        // so skip the backtrace scrub for this entry and say that all's well
+        if (in->is_dirty_parent())
+          results->backtrace.passed = true;
+
 	goto next;
       }
 
@@ -4220,8 +4235,12 @@ void CInode::validate_disk_state(CInode::validated_data *results,
 					      &equivalent, &divergent);
 
       if (divergent || memory_newer < 0) {
-	// we're divergent, or on-disk version is newer
-	results->backtrace.error_str << "On-disk backtrace is divergent or newer";
+        // we're divergent, or on-disk version is newer
+        results->backtrace.error_str << "On-disk backtrace is divergent or newer";
+        // we probably have a new unwritten file!
+        // so skip the backtrace scrub for this entry and say that all's well
+        if (divergent && in->is_dirty_parent())
+          results->backtrace.passed = true;
       } else {
         results->backtrace.passed = true;
       }

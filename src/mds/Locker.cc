@@ -1612,7 +1612,8 @@ bool Locker::xlock_start(SimpleLock *lock, MDRequestRef& mut)
   if (lock->get_parent()->is_auth()) {
     // auth
     while (1) {
-      if (lock->can_xlock(client) &&
+      if (mut->locking && // started xlock (not preempt other request)
+	  lock->can_xlock(client) &&
 	  !(lock->get_state() == LOCK_LOCK_XLOCK &&	// client is not xlocker or
 	    in && in->issued_caps_need_gather(lock))) { // xlocker does not hold shared cap
 	lock->set_state(LOCK_XLOCK);
@@ -1831,7 +1832,7 @@ void Locker::file_update_finish(CInode *in, MutationRef& mut, unsigned flags,
 
   if (ack) {
     Session *session = mds->get_session(client);
-    if (session) {
+    if (session && !session->is_closed()) {
       // "oldest flush tid" > 0 means client uses unique TID for each flush
       if (ack->get_oldest_flush_tid() > 0)
         session->add_completed_flush(ack->get_client_tid());
@@ -1858,30 +1859,15 @@ void Locker::file_update_finish(CInode *in, MutationRef& mut, unsigned flags,
   } else if ((flags & UPDATE_SNAPFLUSH) && !in->client_snap_caps.empty()) {
     dout(10) << " client_snap_caps " << in->client_snap_caps << dendl;
     // check for snap writeback completion
-    bool gather = false;
-    auto p = in->client_snap_caps.begin();
-    while (p != in->client_snap_caps.end()) {
-      auto q = p->second.find(client);
-      if (q != p->second.end()) {
-	SimpleLock *lock = in->get_lock(p->first);
+    in->client_snap_caps.erase(client);
+    if (in->client_snap_caps.empty()) {
+      for (int i = 0; i < num_cinode_locks; i++) {
+	SimpleLock *lock = in->get_lock(cinode_lock_info[i].lock);
 	ceph_assert(lock);
-	dout(10) << " completing client_snap_caps for " << ccap_string(p->first)
-		 << " lock " << *lock << " on " << *in << dendl;
 	lock->put_wrlock();
-
-	p->second.erase(q);
-	if (p->second.empty()) {
-	  gather = true;
-	  in->client_snap_caps.erase(p++);
-	} else
-	  ++p;
       }
-    }
-    if (gather) {
-      if (in->client_snap_caps.empty()) {
-	in->item_open_file.remove_myself();
-	in->item_caps.remove_myself();
-      }
+      in->item_open_file.remove_myself();
+      in->item_caps.remove_myself();
       eval_cap_gather(in, &need_issue);
     }
   }
@@ -2049,6 +2035,24 @@ int Locker::issue_caps(CInode *in, Capability *only_cap)
 	mds->queue_waiter_front(new C_Locker_RevokeStaleCap(this, in, it->first));
 	continue;
       }
+
+      if (!cap->is_valid() && (pending & ~CEPH_CAP_PIN)) {
+	// After stale->resume circle, client thinks it only has CEPH_CAP_PIN.
+	// mds needs to re-issue caps, then do revocation.
+	long seq = cap->issue(pending, true);
+
+	dout(7) << "   sending MClientCaps to client." << it->first
+		<< " seq " << seq << " re-issue " << ccap_string(pending) << dendl;
+
+	auto m = MClientCaps::create(CEPH_CAP_OP_GRANT, in->ino(),
+				     in->find_snaprealm()->inode->ino(),
+				     cap->get_cap_id(), cap->get_last_seq(),
+				     pending, wanted, 0, cap->get_mseq(),
+				     mds->get_osd_epoch_barrier());
+	in->encode_cap_message(m, cap);
+
+	mds->send_message_client_counted(m, cap->get_session());
+      }
     }
 
     // notify clients about deleted inode, to make sure they release caps ASAP.
@@ -2087,10 +2091,8 @@ int Locker::issue_caps(CInode *in, Capability *only_cap)
 
       auto m = MClientCaps::create(op, in->ino(),
 				   in->find_snaprealm()->inode->ino(),
-				   cap->get_cap_id(),
-				   cap->get_last_seq(),
-				   after, wanted, 0,
-				   cap->get_mseq(),
+				   cap->get_cap_id(), cap->get_last_seq(),
+				   after, wanted, 0, cap->get_mseq(),
 				   mds->get_osd_epoch_barrier());
       in->encode_cap_message(m, cap);
 
@@ -2170,6 +2172,7 @@ bool Locker::revoke_stale_caps(Session *session)
   // invalidate all caps
   session->inc_cap_gen();
 
+  bool ret = true;
   std::vector<CInode*> to_eval;
 
   for (auto p = session->caps.begin(); !p.end(); ) {
@@ -2186,8 +2189,10 @@ bool Locker::revoke_stale_caps(Session *session)
     if (!revoking)
       continue;
 
-    if (revoking & CEPH_CAP_ANY_WR)
-      return false;
+    if (revoking & CEPH_CAP_ANY_WR) {
+      ret = false;
+      break;
+    }
 
     int issued = cap->issued();
     CInode *in = cap->get_inode();
@@ -2222,7 +2227,7 @@ bool Locker::revoke_stale_caps(Session *session)
       request_inode_file_caps(in);
   }
 
-  return true;
+  return ret;
 }
 
 void Locker::resume_stale_caps(Session *session)
@@ -2964,8 +2969,9 @@ void Locker::handle_client_caps(const MClientCaps::const_ref &m)
 	dout(10) << " revocation in progress, not making any conclusions about null snapflushes" << dendl;
       }
     }
+    if (cap->need_snapflush() && !(m->flags & MClientCaps::FLAG_PENDING_CAPSNAP))
+      cap->clear_needsnapflush();
 
-    bool need_snapflush = cap->need_snapflush();
     if (dirty && in->is_auth()) {
       dout(7) << " flush client." << client << " dirty " << ccap_string(dirty)
 	      << " seq " << m->get_seq() << " on " << *in << dendl;
@@ -2973,12 +2979,6 @@ void Locker::handle_client_caps(const MClientCaps::const_ref &m)
           m->get_caps(), 0, dirty, 0, mds->get_osd_epoch_barrier());
       ack->set_client_tid(m->get_client_tid());
       ack->set_oldest_flush_tid(m->get_oldest_flush_tid());
-
-      // client flushes and releases caps at the same time. make sure MDCache::cow_inode()
-      // properly setup CInode::client_need_snapflush
-      if (!need_snapflush && (dirty & ~cap->issued()) &&
-	  (m->flags & MClientCaps::FLAG_PENDING_CAPSNAP))
-	cap->mark_needsnapflush();
     }
 
     // filter wanted based on what we could ever give out (given auth/replica status)
@@ -2993,14 +2993,9 @@ void Locker::handle_client_caps(const MClientCaps::const_ref &m)
       adjust_cap_wanted(cap, new_wanted, m->get_issue_seq());
     }
 
-    bool updated = in->is_auth() &&
-		   _do_cap_update(in, cap, dirty, follows, m, ack, &need_flush);
-
-    if (cap->need_snapflush() &&
-	(!need_snapflush || !(m->flags & MClientCaps::FLAG_PENDING_CAPSNAP)))
-      cap->clear_needsnapflush();
-
-    if (updated) {
+    if (in->is_auth() &&
+	_do_cap_update(in, cap, dirty, follows, m, ack, &need_flush)) {
+      // updated
       eval(in, CEPH_CAP_LOCKS);
 
       if (!need_flush && (cap->wanted() & ~cap->pending()))
@@ -3066,14 +3061,14 @@ void Locker::process_request_cap_release(MDRequestRef& mdr, client_t client, con
       if (dn) {
 	ClientLease *l = dn->get_client_lease(client);
 	if (l) {
-	  dout(10) << "process_cap_release removing lease on " << *dn << dendl;
+	  dout(10) << __func__ << " removing lease on " << *dn << dendl;
 	  dn->remove_client_lease(l, this);
 	} else {
-	  dout(7) << "process_cap_release client." << client
+	  dout(7) << __func__ << " client." << client
 		  << " doesn't have lease on " << *dn << dendl;
 	}
       } else {
-	dout(7) << "process_cap_release client." << client << " released lease on dn "
+	dout(7) << __func__ << " client." << client << " released lease on dn "
 		<< dir->dirfrag() << "/" << dname << " which dne" << dendl;
       }
     }
@@ -3083,7 +3078,7 @@ void Locker::process_request_cap_release(MDRequestRef& mdr, client_t client, con
   if (!cap)
     return;
 
-  dout(10) << "process_cap_release client." << client << " " << ccap_string(caps) << " on " << *in
+  dout(10) << __func__ << " client." << client << " " << ccap_string(caps) << " on " << *in
 	   << (mdr ? "" : " (DEFERRED, no mdr)")
 	   << dendl;
     
@@ -3517,7 +3512,7 @@ bool Locker::_do_cap_update(CInode *in, Capability *cap,
     dout(7) << " xattrs v" << pi.inode.xattr_version << " -> " << m->head.xattr_version << dendl;
     pi.inode.xattr_version = m->head.xattr_version;
     auto p = m->xattrbl.cbegin();
-    decode(*pi.xattrs, p);
+    decode_noshare(*pi.xattrs, p);
     wrlock_force(&in->xattrlock, mut);
   }
   
@@ -3692,7 +3687,10 @@ void Locker::get_late_revoking_clients(std::list<client_t> *result,
   // Slow path: execute in O(N_clients)
   for (auto &p : revoking_caps_by_client) {
     if (any_late_revoking_caps(p.second, timeout)) {
-      result->push_back(p.first);
+      // Search the list for duplicate and only insert if unique
+      std::list<client_t>::const_iterator it = std::find(result->begin(), result->end(), p.first);
+      if (it == result->end())
+        result->push_back(p.first);
     }
   }
 }
