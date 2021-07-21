@@ -65,7 +65,7 @@ class Module(MgrModule):
     MODULE_OPTIONS = [
         Option(
             name='zabbix_sender',
-            default='/usr/bin/zabbix_sender'),
+            default='/usr/sbin/zabbix_sender'),
         Option(
             name='zabbix_host',
             type='str',
