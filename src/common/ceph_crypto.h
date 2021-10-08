@@ -15,6 +15,10 @@
 // you *must* use CRYPTO_CXXFLAGS in CMakeLists.txt for including this include
 # include <nss.h>
 # include <pk11pub.h>
+// Get rid of CLEANUP macro, which is an internal implemention
+// detail of mozilla-nss, and conflicts with constructs such as
+// TEST(LibRGW, CLEANUP) in our src/test/librgw_file_marker.cc
+#undef CLEANUP
 
 // NSS thinks a lot of fairly fundamental operations might potentially
 // fail, because it has been written to support e.g. smartcards doing all
