@@ -47,6 +47,7 @@ from .settings import options_command_list, options_schema_list, \
 
 from .plugins import PLUGIN_MANAGER
 from .plugins import feature_toggles, debug, motd  # noqa # pylint: disable=unused-import
+from .plugins import ses7p_motd  # noqa # pylint: disable=unused-import
 
 
 PLUGIN_MANAGER.hook.init()
