@@ -524,6 +524,8 @@ private:
 
   // record laggy clients due to laggy OSDs
   std::set<client_t> laggy_clients;
+
+  size_t fscrypt_last_block_max_size = g_conf().get_val<Option::size_t>("mds_fscrypt_last_block_max_size");
 };
 
 static inline constexpr auto operator|(Server::RecallFlags a, Server::RecallFlags b) {
