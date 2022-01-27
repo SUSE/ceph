@@ -51,9 +51,9 @@ FuncT = TypeVar('FuncT', bound=Callable)
 DEFAULT_IMAGE = 'quay.io/ceph/ceph:v16'
 DEFAULT_IMAGE_IS_MASTER = False
 DEFAULT_IMAGE_RELEASE = 'pacific'
-DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.18.1'
-DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v0.18.1'
-DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.20.0'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-server:2.27.1'
+DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-node-exporter:1.1.2'
+DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-alertmanager:0.21.0'
 DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:6.7.4'
 DEFAULT_HAPROXY_IMAGE = 'docker.io/library/haproxy:2.3'
 DEFAULT_KEEPALIVED_IMAGE = 'docker.io/arcts/keepalived'
