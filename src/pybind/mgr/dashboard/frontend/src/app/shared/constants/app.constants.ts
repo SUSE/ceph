@@ -3,11 +3,11 @@ import { Injectable } from '@angular/core';
 import { environment } from '~/environments/environment';
 
 export class AppConstants {
-  public static readonly organization = 'ceph';
-  public static readonly projectName = 'Ceph Dashboard';
+  public static readonly organization = 'SUSE';
+  public static readonly projectName = 'SUSE Enterprise Storage';
   public static readonly license = 'Free software (LGPL 2.1).';
   public static readonly copyright = 'Copyright(c) ' + environment.year + ' Ceph contributors.';
-  public static readonly cephLogo = 'assets/Ceph_Logo.svg';
+  public static readonly cephLogo = 'assets/SUSE_Chameleon_Green.svg';
 }
 
 export enum URLVerbs {
