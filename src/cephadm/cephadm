@@ -4426,6 +4426,9 @@ def command_bootstrap(ctx):
         except Exception:
             logger.info('\nApplying %s to cluster failed!\n' % ctx.apply_spec)
 
+    # Notify the Dashboard to show the 'Expand cluster' page on first log in.
+    cli(['config-key', 'set', 'mgr/dashboard/cluster/status', 'INSTALLED'])
+
     logger.info('You can access the Ceph CLI with:\n\n'
                 '\tsudo %s shell --fsid %s -c %s -k %s\n' % (
                     sys.argv[0],
