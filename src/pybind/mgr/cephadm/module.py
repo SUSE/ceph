@@ -91,13 +91,13 @@ Host *
 """
 
 # Default container images -----------------------------------------------------
-DEFAULT_IMAGE = 'quay.io/ceph/ceph'
-DEFAULT_PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v2.18.1'
-DEFAULT_NODE_EXPORTER_IMAGE = 'quay.io/prometheus/node-exporter:v0.18.1'
-DEFAULT_ALERT_MANAGER_IMAGE = 'quay.io/prometheus/alertmanager:v0.20.0'
-DEFAULT_GRAFANA_IMAGE = 'quay.io/ceph/ceph-grafana:6.7.4'
-DEFAULT_HAPROXY_IMAGE = 'docker.io/library/haproxy:2.3'
-DEFAULT_KEEPALIVED_IMAGE = 'docker.io/arcts/keepalived'
+DEFAULT_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/ceph'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-server:2.27.1'
+DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-node-exporter:1.1.2'
+DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-alertmanager:0.21.0'
+DEFAULT_GRAFANA_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/grafana:7.5.12'
+DEFAULT_HAPROXY_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/haproxy:2.0.14'
+DEFAULT_KEEPALIVED_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/keepalived:2.0.19'
 DEFAULT_SNMP_GATEWAY_IMAGE = 'docker.io/maxwo/snmp-notifier:v1.2.1'
 # ------------------------------------------------------------------------------
 
