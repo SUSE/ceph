@@ -51,7 +51,7 @@ FuncT = TypeVar('FuncT', bound=Callable)
 DEFAULT_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/ceph:latest'
 DEFAULT_IMAGE_IS_MASTER = False
 DEFAULT_IMAGE_RELEASE = 'pacific'
-DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-server:2.27.1'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-server:2.32.1'
 DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-node-exporter:1.1.2'
 DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-alertmanager:0.21.0'
 DEFAULT_GRAFANA_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/grafana:7.5.12'
