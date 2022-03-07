@@ -23,7 +23,7 @@ export class DocService {
     });
   }
 
-  urlGenerator(section: string, release = '7p'): string {
+  urlGenerator(section: string, release = '7.1'): string {
     const domain = `https://documentation.suse.com/ses/${release}/single-html/`;
     const sections = {
       iscsi: `${domain}ses-admin/#dashboard-iscsi-management`,
