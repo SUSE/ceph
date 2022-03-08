@@ -3,7 +3,7 @@
 # Default container images -----------------------------------------------------
 DEFAULT_IMAGE = 'registry.suse.com/ses/7/ceph/ceph:latest'
 DEFAULT_IMAGE_IS_MASTER = False
-DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-server:2.27.1'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-server:2.32.1'
 DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-node-exporter:1.1.2'
 DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.com/ses/7/prometheus/prometheus-alertmanager:0.21.0'
 DEFAULT_GRAFANA_IMAGE = 'registry.suse.com/ses/7/ceph/grafana:7.3.1'
