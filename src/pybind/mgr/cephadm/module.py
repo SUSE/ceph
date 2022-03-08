@@ -95,9 +95,9 @@ Host *
 
 # Default container images -----------------------------------------------------
 DEFAULT_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/ceph'
-DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-server:2.32.1'
-DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-node-exporter:1.1.2'
-DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/prometheus/prometheus-alertmanager:0.21.0'
+DEFAULT_PROMETHEUS_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/prometheus-server:2.32.1'
+DEFAULT_NODE_EXPORTER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/prometheus-node-exporter:1.1.2'
+DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/prometheus-alertmanager:0.21.0'
 DEFAULT_GRAFANA_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/grafana:7.5.12'
 DEFAULT_HAPROXY_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/haproxy:2.0.14'
 DEFAULT_KEEPALIVED_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/keepalived:2.0.19'
