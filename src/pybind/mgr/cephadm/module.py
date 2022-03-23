@@ -101,7 +101,7 @@ DEFAULT_ALERT_MANAGER_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/contai
 DEFAULT_GRAFANA_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/grafana:7.5.12'
 DEFAULT_HAPROXY_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/haproxy:2.0.14'
 DEFAULT_KEEPALIVED_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/keepalived:2.0.19'
-DEFAULT_SNMP_GATEWAY_IMAGE = 'docker.io/maxwo/snmp-notifier:v1.2.1'
+DEFAULT_SNMP_GATEWAY_IMAGE = 'registry.suse.de/devel/storage/7.0/pacific/containers/ses/7.1/ceph/prometheus-snmp_notifier:1.2.1'
 # ------------------------------------------------------------------------------
 
 
