@@ -6085,6 +6085,32 @@ def command_zap_osds(ctx: CephadmContext) -> None:
 ##################################
 
 
+@infer_fsid
+def command_set_osd_service_name(ctx):
+    # type: (CephadmContext) -> None
+    if not ctx.fsid:
+        raise Error('must pass --fsid to specify cluster')
+
+    for osd_id in sorted(ctx.osd_ids):
+        data_dir = get_data_dir(ctx.fsid, ctx.data_dir, 'osd', osd_id)
+        meta_path = f"{data_dir}/unit.meta"
+        if not os.path.exists(meta_path):
+            raise Error(f"{meta_path} does not exist.  Perhaps the OSD ID ({osd_id}) or cluster FSID ({ctx.fsid}) is incorrect?")
+        meta_path_new = f"{meta_path}.new"
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        meta["service_name"] = ctx.service_name if ctx.service_name else None
+        with open(meta_path_new, 'w') as n:
+            json.dump(meta, n, indent=4)
+            os.fchmod(n.fileno(), 0o600)
+            s_pwd = pwd.getpwnam("ceph")
+            os.fchown(n.fileno(), s_pwd.pw_uid, s_pwd.pw_gid)
+            os.rename(meta_path_new, meta_path)
+        logger.info(f'Set service_name="{ctx.service_name}" in {meta_path}')
+
+##################################
+
+
 def get_ceph_cluster_count(ctx: CephadmContext) -> int:
     return len([c for c in os.listdir(ctx.data_dir) if is_fsid(c)])
 
@@ -8493,6 +8519,21 @@ def _get_parser():
         '--force',
         action='store_true',
         help='proceed, even though this may destroy valuable data')
+
+    parser_set_osd_service_name = subparsers.add_parser(
+        'set-osd-service-name', help='Set the service name (i.e. drive group) for the specified OSDs')
+    parser_set_osd_service_name.set_defaults(func=command_set_osd_service_name)
+    parser_set_osd_service_name.add_argument(
+        'service_name',
+        help='value to set (i.e. name of OSD Service Spec / Drive Group)')
+    parser_set_osd_service_name.add_argument(
+        'osd_ids',
+        metavar='ID',
+        nargs="+",
+        help='OSD ID (just the number, e.g.: 0, 1, etc.)')
+    parser_set_osd_service_name.add_argument(
+        '--fsid',
+        help='cluster FSID')
 
     parser_unit = subparsers.add_parser(
         'unit', help="operate on the daemon's systemd unit")
