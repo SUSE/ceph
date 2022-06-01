@@ -175,6 +175,7 @@ void MDSMap::dump(Formatter *f) const
   cephfs_dump_features(f, required_client_features);
   f->close_section();
   f->dump_int("max_file_size", max_file_size);
+  f->dump_int("max_xattr_size", max_xattr_size);
   f->dump_int("last_failure", last_failure);
   f->dump_int("last_failure_osd_epoch", last_failure_osd_epoch);
   f->open_object_section("compat");
@@ -253,6 +254,7 @@ void MDSMap::print(ostream& out) const
   out << "session_timeout\t" << session_timeout << "\n"
       << "session_autoclose\t" << session_autoclose << "\n";
   out << "max_file_size\t" << max_file_size << "\n";
+  out << "max_xattr_size\t" << max_xattr_size << "\n";
   out << "required_client_features\t" << cephfs_stringify_features(required_client_features) << "\n";
   out << "last_failure\t" << last_failure << "\n"
       << "last_failure_osd_epoch\t" << last_failure_osd_epoch << "\n";
@@ -762,6 +764,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
     encode(min_compat_client, bl);
   }
   encode(required_client_features, bl);
+  encode(max_xattr_size, bl);
   encode(bal_rank_mask, bl);
   ENCODE_FINISH(bl);
 }
@@ -911,6 +914,7 @@ void MDSMap::decode(bufferlist::const_iterator& p)
   }
 
   if (ev >= 17) {
+    decode(max_xattr_size, p);
     decode(bal_rank_mask, p);
   }
 
