@@ -375,7 +375,9 @@ docker.io/ceph/daemon-base:octopus
         assert cd.normalize_image_digest(s) == s
 
         s = 'ceph/ceph:latest'
-        assert cd.normalize_image_digest(s) == f'{cd.DEFAULT_REGISTRY}/{s}'
+        msg = r'Unexpected use of unqualified image name ceph/ceph:latest'
+        with pytest.raises(cd.Error, match=msg):
+            cd.normalize_image_digest(s)
 
     @pytest.mark.parametrize('fsid, ceph_conf, list_daemons, result, err, ',
         [

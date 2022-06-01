@@ -26,7 +26,9 @@ def normalize_image_digest(digest: str, default_registry: str) -> str:
     """
     Normal case:
     >>> normalize_image_digest('ceph/ceph', 'docker.io')
-    'docker.io/ceph/ceph'
+    Traceback (most recent call last):
+        ...
+    orchestrator._interface.OrchestratorError: Unexpected use of unqualified image name ceph/ceph
 
     No change:
     >>> normalize_image_digest('quay.ceph.io/ceph/ceph', 'docker.io')
@@ -45,7 +47,7 @@ def normalize_image_digest(digest: str, default_registry: str) -> str:
     ]
     for image in known_shortnames:
         if digest.startswith(image):
-            return f'{default_registry}/{digest}'
+            raise OrchestratorError('Unexpected use of unqualified image name {}'.format(digest))
     return digest
 
 
