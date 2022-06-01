@@ -396,8 +396,6 @@ OPTION(filer_max_purge_ops, OPT_U32)
 OPTION(filer_max_truncate_ops, OPT_U32)
 
 OPTION(mds_data, OPT_STR)
-// max xattr kv pairs size for each dir/file
-OPTION(mds_max_xattr_pairs_size, OPT_U32)
 OPTION(mds_max_file_recover, OPT_U32)
 OPTION(mds_dir_max_commit_size, OPT_INT) // MB
 OPTION(mds_dir_keys_per_op, OPT_INT)

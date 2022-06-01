@@ -8335,10 +8335,6 @@ std::vector<Option> get_mds_options() {
     .set_long_description("This setting indicates which file system name the MDS should prefer to join (affinity). The monitors will try to have the MDS cluster safely reach a state where all MDS have strong affinity, even via failovers to a standby.")
     .set_flag(Option::FLAG_RUNTIME),
 
-    Option("mds_max_xattr_pairs_size", Option::TYPE_SIZE, Option::LEVEL_ADVANCED)
-    .set_default(64_K)
-    .set_description("maximum aggregate size of extended attributes on a file"),
-
     Option("mds_cache_trim_interval", Option::TYPE_SECS, Option::LEVEL_ADVANCED)
     .set_default(1)
     .set_description("interval in seconds between cache trimming")
