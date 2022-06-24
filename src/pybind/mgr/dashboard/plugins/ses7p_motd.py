@@ -33,7 +33,7 @@ class SES7PMotd(I.CanMgr, I.Setupable, I.HasOptions):
         # here because it is not available at this time. To workaround
         # this issue we build and write the MOTD configuration ourself.
         message = 'There is an upgrade to SES 7.1 available, please check the ' \
-                  '<a href="https://documentation.suse.com/ses/7/html/ses-all/upgrade-to-pacific.html">' \
+                  '<a href="https://documentation.suse.com/ses/7.1/html/ses-all/upgrade-to-pacific.html">' \
                   'documentation</a> for more information.'  # noqa # pylint: disable=line-too-long
         value: str = json.dumps({
             'message': message,
