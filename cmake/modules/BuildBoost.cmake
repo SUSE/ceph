@@ -167,10 +167,12 @@ function(do_build_boost version)
       URL_HASH SHA256=${boost_sha256}
       DOWNLOAD_NO_PROGRESS 1)
   endif()
+  find_program(PATCH_EXECUTABLE patch)
   # build all components in a single shot
   include(ExternalProject)
   ExternalProject_Add(Boost
     ${source_dir}
+    PATCH_COMMAND ${PATCH_EXECUTABLE} -p3 -i ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/boost-python-use-public-api-for-filename.patch
     CONFIGURE_COMMAND CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER} ${configure_command}
     BUILD_COMMAND CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER} ${build_command}
     BUILD_IN_SOURCE 1
