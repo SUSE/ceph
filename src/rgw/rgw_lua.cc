@@ -6,7 +6,13 @@
 #include "rgw_sal_rados.h"
 #include "rgw_lua.h"
 #ifdef WITH_RADOSGW_LUA_PACKAGES
+#if __has_include(<filesystem>)
 #include <filesystem>
+namespace fs = std::filesystem;
+#elif __has_include(<experimental/filesystem>)
+#include <experimental/filesystem>
+namespace fs = std::experimental::filesystem;
+#endif
 #include <boost/process.hpp>
 #include "rgw_lua_version.h"
 #endif
@@ -233,7 +239,7 @@ int install_packages(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore* sto
   // luarocks directory cleanup
   std::error_code ec;
   const auto& luarocks_path = store->get_luarocks_path();
-  if (!std::filesystem::remove_all(luarocks_path, ec) &&
+  if (!fs::remove_all(luarocks_path, ec) &&
       ec != std::errc::no_such_file_or_directory) {
     output.append("failed to clear luarock directory: ");
     output.append(ec.message());
