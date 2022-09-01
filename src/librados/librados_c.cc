@@ -60,8 +60,8 @@
 #else
 #define LIBRADOS_C_API_BASE(fn)               \
   asm(".symver _" #fn "_base, " #fn "@")
-#define LIBRADOS_C_API_BASE_DEFAULT(fn)       \
-  asm(".symver _" #fn ", " #fn "@@")
+#define LIBRADOS_C_API_BASE_DEFAULT(fn) \
+  asm(".symver _" #fn ", " #fn "@@LIBRADOS_14.2.0")
 #define LIBRADOS_C_API_DEFAULT(fn, ver)       \
   asm(".symver _" #fn ", " #fn "@@LIBRADOS_" #ver)
 #endif
