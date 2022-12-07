@@ -18,3 +18,10 @@ tasks:
   - exec:
       mon.a:
         - find $TESTDIR/archive/coredump -type f -exec rm -f {} \;
+
+overrides:
+  ceph:
+    conf:
+      osd:
+        setuser: ceph
+        setgroup: ceph
