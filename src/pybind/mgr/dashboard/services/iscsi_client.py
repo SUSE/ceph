@@ -117,9 +117,10 @@ class IscsiClient(RestClient):
         return request()
 
     @RestClient.api_put('/api/disk/{pool}/{image}')
-    def create_disk(self, pool, image, backstore, wwn, request=None):
+    def create_disk(self, pool, image, backstore, wwn, request=None, controls={}):
         logger.debug("[%s] Creating disk: %s/%s", self.gateway_name, pool, image)
         return request({
+            'controls': json.dumps(controls),
             'mode': 'create',
             'backstore': backstore,
             'wwn': wwn
