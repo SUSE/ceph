@@ -29,8 +29,9 @@
  */
 
 
-#ifndef CEPH_CYCLES_H
-#define CEPH_CYCLES_H
+#pragma once
+
+#include <cstdint>
 
 /**
  * This class provides static methods that read the fine-grain CPU
@@ -112,4 +113,3 @@ private:
   }
 };
 
-#endif  // CEPH_CYCLES_H
