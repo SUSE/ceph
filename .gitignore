@@ -16,6 +16,7 @@
 *.orig
 *.patch
 !debian/patches/*.patch
+!cmake/modules/*.patch
 *.rej
 *.rpm
 *.pyc
