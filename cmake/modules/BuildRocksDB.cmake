@@ -1,3 +1,6 @@
+# CMAKE_CURRENT_FUNCTION_LIST_DIR is introduced by cmake 3.17, but ubuntu comes with 3.16
+set(_build_rocksdb_list_dir "${CMAKE_CURRENT_LIST_DIR}")
+
 function(build_rocksdb)
   set(rocksdb_CMAKE_ARGS -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
   list(APPEND rocksdb_CMAKE_ARGS -DWITH_GFLAGS=OFF)
@@ -79,10 +82,12 @@ function(build_rocksdb)
     set(make_cmd ${CMAKE_COMMAND} --build <BINARY_DIR> --target rocksdb)
   endif()
 
+  find_program(PATCH_EXECUTABLE patch)
   ExternalProject_Add(rocksdb_ext
     SOURCE_DIR "${rocksdb_SOURCE_DIR}"
     CMAKE_ARGS ${rocksdb_CMAKE_ARGS}
     BINARY_DIR "${rocksdb_BINARY_DIR}"
+    PATCH_COMMAND ${PATCH_EXECUTABLE} -p1 -i ${_build_rocksdb_list_dir}/rocksdb-gcc-13.patch
     BUILD_COMMAND "${make_cmd}"
     BUILD_BYPRODUCTS "${rocksdb_LIBRARY}"
     INSTALL_COMMAND "true"
