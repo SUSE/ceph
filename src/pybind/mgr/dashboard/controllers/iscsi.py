@@ -771,16 +771,6 @@ class IscsiTarget(RESTController):
                 backstore = disk['backstore']
                 wwn = disk.get('wwn')
                 lun = disk.get('lun')
-                if image_id not in config['disks']:
-                    IscsiClient.instance(gateway_name=gateway_name).create_disk(pool,
-                                                                                image,
-                                                                                backstore,
-                                                                                wwn)
-                if not target_config or image_id not in target_config['disks']:
-                    IscsiClient.instance(gateway_name=gateway_name).create_target_lun(target_iqn,
-                                                                                      image_id,
-                                                                                      lun)
-
                 controls = disk['controls']
                 d_conf_controls = {}
                 if image_id in config['disks']:
@@ -790,6 +780,18 @@ class IscsiTarget(RESTController):
                         # If control was removed, restore the default value
                         if old_control not in controls:
                             controls[old_control] = disk_default_controls[old_control]
+
+                if image_id not in config['disks']:
+                    IscsiClient.instance(gateway_name=gateway_name).create_disk(pool,
+                                                                                image,
+                                                                                backstore,
+                                                                                wwn,
+                                                                                controls=controls)
+
+                if not target_config or image_id not in target_config['disks']:
+                    IscsiClient.instance(gateway_name=gateway_name).create_target_lun(target_iqn,
+                                                                                      image_id,
+                                                                                      lun)
 
                 if (image_id not in config['disks'] or d_conf_controls != controls) and controls:
                     IscsiClient.instance(gateway_name=gateway_name).reconfigure_disk(pool,
