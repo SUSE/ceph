@@ -200,7 +200,7 @@ BuildRequires:	libblkid-devel >= 2.17
 BuildRequires:	cryptsetup-devel
 BuildRequires:	libcurl-devel
 BuildRequires:	libcap-ng-devel
-BuildRequires:	fmt-devel >= 5.2.1
+BuildRequires:	((fmt-devel >= 5.2.1 with fmt-devel < 10) or fmt-9-devel)
 BuildRequires:	pkgconfig(libudev)
 BuildRequires:	libnl3-devel
 BuildRequires:	liboath-devel
