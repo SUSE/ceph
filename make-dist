@@ -185,6 +185,13 @@ for spec in ceph.spec.in; do
         sed "s/@RPM_RELEASE@/$rpm_release/g" |
         sed "s/@TARBALL_BASENAME@/ceph-$version/g" > `echo $spec | sed 's/.in$//'`
 done
+
+case $ID in
+    opensuse*|suse|sles)
+        sed -i 's/^\(Requires.*\)-%{release}/\1/g' `echo $spec | sed 's/.in$//'`
+        ;;
+esac
+
 ln -s . $outfile
 tar cvf $outfile.version.tar $outfile/src/.git_version $outfile/ceph.spec
 # NOTE: If you change this version number make sure the package is available
