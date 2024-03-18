@@ -9023,7 +9023,7 @@ std::vector<Option> get_mds_options() {
      .set_long_description("The maximum number of entries before any new entries are rejected with ENOSPC."),
 
     Option("defer_client_eviction_on_laggy_osds", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
-     .set_default(true)
+     .set_default(false)
      .set_flag(Option::FLAG_RUNTIME)
      .set_description("Do not evict client if any osd is laggy")
      .set_long_description("Laggy OSD(s) can make clients laggy or unresponsive, this can lead to their eviction, this option once enabled can help defer client eviction."),
