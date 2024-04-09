@@ -219,6 +219,29 @@ for tarball in $outfile.version   \
     rm $tarball.tar
 done
 mv $outfile.all.tar $outfile.tar
+patch -p0 <<EOF
+--- src/rapidjson/include/rapidjson/document.h.orig	2024-04-09 16:01:06.252689115 +1000
++++ src/rapidjson/include/rapidjson/document.h	2024-04-09 16:01:29.129152799 +1000
+@@ -316,8 +316,6 @@
+ 
+     GenericStringRef(const GenericStringRef& rhs) : s(rhs.s), length(rhs.length) {}
+ 
+-    GenericStringRef& operator=(const GenericStringRef& rhs) { s = rhs.s; length = rhs.length; }
+-
+     //! implicit conversion to plain CharType pointer
+     operator const Ch *() const { return s; }
+ 
+@@ -328,6 +326,8 @@
+     //! Disallow construction from non-const array
+     template<SizeType N>
+     GenericStringRef(CharType (&str)[N]) /* = delete */;
++    //! Copy assignment operator not permitted - immutable type
++    GenericStringRef& operator=(const GenericStringRef& rhs) /* = delete */;
+ };
+ 
+ //! Mark a character pointer as constant string
+EOF
+tar --update -f $outfile.tar $outfile/src/rapidjson/include/rapidjson/document.h
 rm $outfile
 
 echo "compressing..."
