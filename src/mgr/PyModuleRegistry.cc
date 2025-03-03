@@ -54,6 +54,7 @@ void PyModuleRegistry::init()
 
   // Set up global python interpreter
 #define WCHAR(s) L ## #s
+#if PY_VERSION_HEX >= 0x030800f0
   PyConfig py_config;
   // do not enable isolated mode, otherwise we would not be able to have access
   // to the site packages. since we cannot import any module before initializing
@@ -76,22 +77,35 @@ void PyModuleRegistry::init()
   PyStatus status;
   status = PyConfig_SetString(&py_config, &py_config.program_name, WCHAR(MGR_PYTHON_EXECUTABLE));
   ceph_assertf(!PyStatus_Exception(status), "PyConfig_SetString: %s:%s", status.func, status.err_msg);
+#else
+  Py_SetProgramName(const_cast<wchar_t*>(WCHAR(MGR_PYTHON_EXECUTABLE)));
+#endif
   // Add more modules
   if (g_conf().get_val<bool>("daemonize")) {
     PyImport_AppendInittab("ceph_logger", PyModule::init_ceph_logger);
   }
   PyImport_AppendInittab("ceph_module", PyModule::init_ceph_module);
+#if PY_VERSION_HEX < 0x03090000
+  Py_InitializeEx(0);
+  // Let CPython know that we will be calling it back from other
+  // threads in future.
+  if (! PyEval_ThreadsInitialized()) {
+    PyEval_InitThreads();
+  }
+#endif
   // Configure sys.path to include mgr_module_path
   auto pythonpath_env = g_conf().get_val<std::string>("mgr_module_path");
   if (const char* pythonpath = getenv("PYTHONPATH")) {
     pythonpath_env += ":";
     pythonpath_env += pythonpath;
   }
+#if PY_VERSION_HEX >= 0x030800f0
   status = PyConfig_SetBytesString(&py_config, &py_config.pythonpath_env, pythonpath_env.data());
   ceph_assertf(!PyStatus_Exception(status), "PyConfig_SetBytesString: %s:%s", status.func, status.err_msg);
   dout(10) << "set PYTHONPATH to " << std::quoted(pythonpath_env) << dendl;
   status = Py_InitializeFromConfig(&py_config);
   ceph_assertf(!PyStatus_Exception(status), "Py_InitializeFromConfig: %s:%s", status.func, status.err_msg);
+#endif
 #undef WCHAR
 
   // Drop the GIL and remember the main thread state (current
