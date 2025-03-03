@@ -177,6 +177,7 @@ function(do_build_boost version)
     ${source_dir}
     PATCH_COMMAND ${PATCH_EXECUTABLE} -p3 -i ${_build_boost_list_dir}/boost-python-use-public-api-for-filename.patch
     COMMAND ${PATCH_EXECUTABLE} -p3 -i ${_build_boost_list_dir}/boost-python-fix-python-310-pep-620-incompatibility.patch
+    COMMAND ${PATCH_EXECUTABLE} -p3 -i ${_build_boost_list_dir}/boost-python-stop-using-deprecated-api-calls.patch
     CONFIGURE_COMMAND CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER} ${configure_command}
     BUILD_COMMAND CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER} ${build_command}
     BUILD_IN_SOURCE 1
