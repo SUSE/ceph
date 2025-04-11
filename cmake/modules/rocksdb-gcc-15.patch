@@ -1,0 +1,12 @@
+diff --git a/include/rocksdb/compaction_filter.h b/include/rocksdb/compaction_filter.h
+index 976507831..768d868f8 100644
+--- a/include/rocksdb/compaction_filter.h
++++ b/include/rocksdb/compaction_filter.h
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include <cassert>
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ #include <vector>

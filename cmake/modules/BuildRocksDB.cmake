@@ -89,6 +89,7 @@ function(build_rocksdb)
     CMAKE_ARGS ${rocksdb_CMAKE_ARGS}
     BINARY_DIR "${rocksdb_BINARY_DIR}"
     PATCH_COMMAND ${PATCH_EXECUTABLE} -p1 -i ${_build_rocksdb_list_dir}/rocksdb-gcc-13.patch
+    COMMAND ${PATCH_EXECUTABLE} -p1 -i ${_build_rocksdb_list_dir}/rocksdb-gcc-15.patch
     BUILD_COMMAND "${make_cmd}"
     BUILD_BYPRODUCTS "${rocksdb_LIBRARY}"
     INSTALL_COMMAND "true"
