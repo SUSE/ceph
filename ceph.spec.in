@@ -1377,6 +1377,19 @@ make DESTDIR=%{buildroot} install
 rm -f %{buildroot}/%{_sysconfdir}/init.d/ceph
 popd
 
+#
+# python's setuptools v76 introduces a simplified shebang
+# generation which results in cephfs-top and cephfs-shell just
+# saying "#!python", rather than "#!/usr/bin/python3.xx".
+# The former of course is invalid.  The correct solution for
+# ceph is presumably to somehow switch to using `pip` instead
+# (see https://packaging.python.org/en/latest/discussions/setup-py-deprecated/)
+# but for the sake of expedience right now we're just fixing
+# the invalid shebang lines here with a bit of sed.
+#
+sed -i s:^#\!python$:#\!$(readlink -f %{_bindir}/python3):g %{buildroot}%{_bindir}/cephfs-top
+sed -i s:^#\!python$:#\!$(readlink -f %{_bindir}/python3):g %{buildroot}%{_bindir}/cephfs-shell
+
 %if 0%{with seastar}
 # package crimson-osd with the name of ceph-osd
 install -m 0755 %{buildroot}%{_bindir}/crimson-osd %{buildroot}%{_bindir}/ceph-osd
