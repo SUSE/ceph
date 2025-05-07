@@ -1274,6 +1274,8 @@ fi
 export CEPH_SMP_NCPUS
 export CEPH_MFLAGS_JOBS="-j$CEPH_SMP_NCPUS"
 
+export CMAKE_POLICY_VERSION_MINIMUM="3.5"
+
 env | sort
 
 mkdir build
